@@ -62,8 +62,6 @@ Open <http://127.0.0.1:5173>. The default workspace seeds four columns: Sessions
 - **Backend** (`./`): Rust + axum + sqlx (SQLite WAL). OTLP/HTTP receiver, normalization pipeline, REST API, WebSocket fanout.
 - **Frontend** (`./web/`): React + TypeScript + Vite. Multi-column dashboard with 6 scenario types (live sessions, spans, tool detail inspector, input breakdown, file touches, raw record browser).
 
-See `./plan.md` for the project plan, `./supplemental.md` for the supplemental requirements, and `./docs/api.md` for the full HTTP API contract.
-
 ## References
 
 - [OpenTelemetry Semantic Conventions — Gen AI Spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/)
