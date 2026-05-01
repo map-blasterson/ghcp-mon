@@ -70,5 +70,6 @@ See `./plan.md` for the project plan, `./supplemental.md` for the supplemental r
 
 ## Demo Video
 
-[![Demo](doc/screenshot.png)](doc/demo.mp4)
-
+<video width="640" height="360" controls>
+    <source src="https://github.com/map-blasterson/ghcp-mon/raw/refs/heads/main/doc/demo.mp4" type="video/mp4">
+</video>
