@@ -72,4 +72,5 @@ See `./plan.md` for the project plan, `./supplemental.md` for the supplemental r
 
 <video width="640" height="360" controls>
     <source src="https://github.com/map-blasterson/ghcp-mon/raw/refs/heads/main/doc/demo.mp4" type="video/mp4">
+  Your browser does not support the video tag?
 </video>
