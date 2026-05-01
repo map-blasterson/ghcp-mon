@@ -10,4 +10,4 @@ tags:
 Two complementary surfaces — wall-clock and relative — used by row timestamps across the dashboard.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

@@ -10,4 +10,4 @@ tags:
 JSON helpers must never crash an inspector view.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

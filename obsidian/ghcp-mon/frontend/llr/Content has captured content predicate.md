@@ -10,4 +10,4 @@ tags:
 Used by views to decide whether to render the "no content captured" hint.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

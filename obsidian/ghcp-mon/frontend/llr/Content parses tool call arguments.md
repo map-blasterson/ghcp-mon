@@ -10,4 +10,4 @@ tags:
 Per execute-tool spec note [4] this attribute is a JSON-object string but real tools sometimes emit non-JSON.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

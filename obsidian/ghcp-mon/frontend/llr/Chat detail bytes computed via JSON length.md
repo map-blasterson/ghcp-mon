@@ -10,4 +10,4 @@ Each tree node's `bytes` field MUST equal `JSON.stringify(value ?? null).length`
 Bytes are the visible quantity in the summary bar; cycles must not crash the tree build.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

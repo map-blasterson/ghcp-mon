@@ -22,6 +22,6 @@
 - web/src/scenarios/LiveSessions.tsx
 - web/src/scenarios/Spans.tsx
 - web/src/scenarios/ToolDetail.tsx
-- web/src/scenarios/InputBreakdown.tsx
+- web/src/scenarios/ChatDetail.tsx
 - web/src/scenarios/RawBrowser.tsx
 - web/src/scenarios/FileTouches.tsx

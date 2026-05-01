@@ -7,7 +7,7 @@ export type ScenarioType =
   | "spans"
   | "tool_detail"
   | "raw_browser"
-  | "input_breakdown"
+  | "chat_detail"
   | "file_touches";
 
 export interface ColumnConfig {
@@ -18,7 +18,7 @@ export interface ColumnConfig {
   // When ChatDetail was auto-targeted by an execute_tool selection
   // in Spans.tsx, this carries the originating tool span's call_id so
   // ChatDetail can locate the matching message_tool node and mark
-  // it. Cleared whenever input_breakdown is updated with a directly
+  // it. Cleared whenever chat_detail is updated with a directly
   // picked chat span.
   selected_tool_call_id?: string;
   raw_type?: string;
@@ -57,7 +57,7 @@ const defaultColumns = (): Column[] => [
   { id: genId(), scenarioType: "live_sessions", title: "Sessions", config: {}, width: 1 },
   { id: genId(), scenarioType: "spans", title: "Traces", config: {}, width: 1.4 },
   { id: genId(), scenarioType: "tool_detail", title: "Tool detail", config: {}, width: 1.4 },
-  { id: genId(), scenarioType: "input_breakdown", title: "Chat detail", config: {}, width: 1.6 },
+  { id: genId(), scenarioType: "chat_detail", title: "Chat detail", config: {}, width: 1.6 },
 ];
 
 export const useWorkspace = create<WorkspaceState>()(
@@ -90,10 +90,15 @@ export const useWorkspace = create<WorkspaceState>()(
     }),
     {
       name: "ghcp-mon-workspace-v6",
+      version: 1,
       migrate: (persisted: any) => {
         if (persisted && Array.isArray(persisted.columns)) {
           const dropped = new Set(["context_growth", "tool_registry", "context_inspector", "shell_io"]);
           persisted.columns = persisted.columns.filter((c: any) => !dropped.has(c.scenarioType));
+          // v0 -> v1: rename scenario type key.
+          persisted.columns.forEach((c: any) => {
+            if (c.scenarioType === "input_breakdown") c.scenarioType = "chat_detail";
+          });
         }
         return persisted;
       },
@@ -106,6 +111,6 @@ export const SCENARIO_LABELS: Record<ScenarioType, string> = {
   spans: "Spans",
   tool_detail: "Tool detail inspector",
   raw_browser: "Raw OTel record browser",
-  input_breakdown: "Chat detail",
+  chat_detail: "Chat detail",
   file_touches: "File touches",
 };

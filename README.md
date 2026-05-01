@@ -55,12 +55,12 @@ npm install
 npm run dev                              # vite at :5173
 ```
 
-Open <http://127.0.0.1:5173>. The default workspace seeds four columns: Sessions | Traces | Tool detail | Input breakdown. Use the column header buttons to add, remove, reorder, or change scenario type.
+Open <http://127.0.0.1:5173>. The default workspace seeds four columns: Sessions | Traces | Tool detail | Chat detail. Use the column header buttons to add, remove, reorder, or change scenario type.
 
 ### Layout
 
 - **Backend** (`./`): Rust + axum + sqlx (SQLite WAL). OTLP/HTTP receiver, normalization pipeline, REST API, WebSocket fanout.
-- **Frontend** (`./web/`): React + TypeScript + Vite. Multi-column dashboard with 6 scenario types (live sessions, spans, tool detail inspector, input breakdown, file touches, raw record browser).
+- **Frontend** (`./web/`): React + TypeScript + Vite. Multi-column dashboard with 6 scenario types (live sessions, spans, tool detail inspector, chat detail, file touches, raw record browser).
 
 ## References
 

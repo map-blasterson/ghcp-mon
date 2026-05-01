@@ -654,7 +654,7 @@ details > summary::-webkit-details-marker { display: none; }
 details > summary::before { content: "▸ "; color: var(--fg-mute); }
 details[open] > summary::before { content: "▾ "; }
 
-/* ---- Input Breakdown scenario ---- */
+/* ---- Chat detail scenario ---- */
 .input-breakdown {
   --ib-color-root: #6aa0ff;
   --ib-color-system: #5e7ce6;

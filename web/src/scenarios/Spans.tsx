@@ -143,15 +143,15 @@ export function SpansScenario({ column }: { column: Column }) {
   const SCENARIO_KINDS: Record<string, KindClass[] | "*"> = {
     spans: "*",
     tool_detail: ["execute_tool", "external_tool"],
-    input_breakdown: ["chat"],
+    chat_detail: ["chat"],
   };
 
   const onPickSpan = (trace_id: string, span_id: string, kind_class: KindClass) => {
-    // For execute_tool selections, also auto-advance input_breakdown
+    // For execute_tool selections, also auto-advance chat_detail
     // columns to the chat span that immediately follows the picked
     // tool span among its siblings (same parent_span_id) when one
     // exists in the loaded session tree. Tool-kind selections would
-    // otherwise leave input_breakdown stuck on a stale chat span.
+    // otherwise leave chat_detail stuck on a stale chat span.
     let nextChatSpanId: string | undefined;
     let toolCallId: string | undefined;
     if (kind_class === "execute_tool" && tree.length > 0) {
@@ -172,13 +172,13 @@ export function SpansScenario({ column }: { column: Column }) {
         };
         // Direct chat / non-tool selections clear any prior
         // tool-driven hint so the arrow doesn't linger.
-        if (c.scenarioType === "input_breakdown") {
+        if (c.scenarioType === "chat_detail") {
           patch.selected_tool_call_id = undefined;
         }
         updateColumn(c.id, { config: patch });
         return;
       }
-      if (c.scenarioType === "input_breakdown" && nextChatSpanId) {
+      if (c.scenarioType === "chat_detail" && nextChatSpanId) {
         updateColumn(c.id, {
           config: {
             ...c.config,

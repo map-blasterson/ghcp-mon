@@ -10,4 +10,4 @@ The summary bar above the tree MUST render one segment per currently-visible (co
 The bar is a stacked overview that mirrors what the user has expanded.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

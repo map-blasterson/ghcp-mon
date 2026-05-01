@@ -10,4 +10,4 @@ The `attrs(span)` helper MUST return `span.attributes` when it is a non-null obj
 Some call sites carry the live API shape (`attributes`); others carry the raw DB shape (`attributes_json`).
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

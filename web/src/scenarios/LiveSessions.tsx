@@ -31,7 +31,7 @@ export function LiveSessionsScenario({ column }: { column: Column }) {
       if (
         [
           "spans",
-          "input_breakdown",
+          "chat_detail",
           "file_touches",
         ].includes(c.scenarioType)
       ) {

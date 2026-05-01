@@ -10,4 +10,4 @@ A primitive value rendered inside a tree node whose stringified length exceeds `
 Long content should not blow up the tree by default but must be inspectable in place.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

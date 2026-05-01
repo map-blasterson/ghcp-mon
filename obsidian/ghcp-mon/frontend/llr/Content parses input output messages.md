@@ -10,4 +10,4 @@ tags:
 The wire payloads are JSON strings per the OTel GenAI schemas; the parser tolerates both shapes for testing convenience.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

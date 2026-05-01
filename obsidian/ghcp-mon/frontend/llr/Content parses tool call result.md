@@ -10,4 +10,4 @@ tags:
 Per spec note [5] this is opaque; bash-family tools return literal stdout/stderr that must not be re-encoded.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

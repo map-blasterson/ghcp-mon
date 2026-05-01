@@ -14,7 +14,7 @@ export function ColumnBody({ column }: Props) {
     case "spans": return <SpansScenario column={column} />;
     case "tool_detail": return <ToolDetailScenario column={column} />;
     case "raw_browser": return <RawBrowserScenario column={column} />;
-    case "input_breakdown": return <ChatDetailScenario column={column} />;
+    case "chat_detail": return <ChatDetailScenario column={column} />;
     case "file_touches": return <FileTouchesScenario column={column} />;
   }
 }

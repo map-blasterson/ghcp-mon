@@ -10,4 +10,4 @@ The `MessageView` component MUST render each `Message` with its `role` as a head
 Per OTel GenAI part-type discriminator; unknown types are passed through to keep the view forward-compatible.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

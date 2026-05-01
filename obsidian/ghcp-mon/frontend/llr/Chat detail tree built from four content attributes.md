@@ -10,4 +10,4 @@ The breakdown tree's root MUST contain exactly four child branches: `system inst
 These are the four content attributes defined by the OTel GenAI semantic-convention spec.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

@@ -10,4 +10,4 @@ tags:
 Adaptive units keep durations human-readable across nine orders of magnitude.
 
 ## Derived from
-- [[Chat Input Breakdown]]
+- [[Chat detail]]

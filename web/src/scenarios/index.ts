@@ -15,6 +15,6 @@ export const SCENARIOS: Record<ScenarioType, ScenarioComp> = {
   spans: SpansScenario,
   tool_detail: ToolDetailScenario,
   raw_browser: RawBrowserScenario,
-  input_breakdown: ChatDetailScenario,
+  chat_detail: ChatDetailScenario,
   file_touches: FileTouchesScenario,
 };
