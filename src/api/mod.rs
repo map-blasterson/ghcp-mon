@@ -206,7 +206,7 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
         SELECT s.span_pk, s.trace_id, s.span_id, s.parent_span_id, s.name,
                s.start_unix_ns, s.end_unix_ns, s.ingestion_state, s.attributes_json
           FROM spans s WHERE s.span_pk IN (SELECT span_pk FROM all_pks)
-          ORDER BY COALESCE(s.start_unix_ns, 0) ASC
+          ORDER BY COALESCE(s.end_unix_ns, s.start_unix_ns, 0) ASC
         "#,
     ).bind(&cid).fetch_all(&s.pool).await?;
 
@@ -241,13 +241,15 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
             n.children.extend(kids.clone());
         }
     }
-    // Sort children newest-first; placeholder/null-start entries float to top.
-    let start_by_sid: BTreeMap<String, Option<i64>> =
-        rows.iter().map(|r| (r.2.clone(), r.5)).collect();
+    // Sort children newest-first by end time; spans without an end
+    // (in-progress / placeholder) float to top so live activity stays
+    // visible.
+    let end_by_sid: BTreeMap<String, Option<i64>> =
+        rows.iter().map(|r| (r.2.clone(), r.6)).collect();
     for n in nodes.values_mut() {
         n.children.sort_by(|a, b| {
-            let sa = start_by_sid.get(a).copied().flatten();
-            let sb = start_by_sid.get(b).copied().flatten();
+            let sa = end_by_sid.get(a).copied().flatten();
+            let sb = end_by_sid.get(b).copied().flatten();
             match (sa, sb) {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Less,
@@ -257,9 +259,9 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
         });
     }
     // Find roots: nodes whose parent isn't in our set or is None.
-    // Sort roots newest-first by start time, with placeholder-only roots
-    // (start_unix_ns NULL) floated to the very top so freshly-arrived
-    // traces don't sink below older timestamped ones.
+    // Sort roots newest-first by end time, with in-progress / placeholder
+    // roots (end_unix_ns NULL) floated to the very top so freshly-arrived
+    // traces don't sink below older completed ones.
     let mut roots: Vec<String> = Vec::new();
     for (sid, _) in &nodes {
         let parent = rows.iter().find(|r| r.2 == *sid).and_then(|r| r.3.clone());
@@ -270,11 +272,11 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
         }
     }
     roots.sort_by(|a, b| {
-        let sa = rows.iter().find(|r| &r.2 == a).and_then(|r| r.5);
-        let sb = rows.iter().find(|r| &r.2 == b).and_then(|r| r.5);
+        let sa = rows.iter().find(|r| &r.2 == a).and_then(|r| r.6);
+        let sb = rows.iter().find(|r| &r.2 == b).and_then(|r| r.6);
         match (sa, sb) {
             (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Less,    // placeholder first
+            (None, Some(_)) => std::cmp::Ordering::Less,    // placeholder/in-progress first
             (Some(_), None) => std::cmp::Ordering::Greater,
             (Some(x), Some(y)) => y.cmp(&x),                // newest first
         }
@@ -397,13 +399,14 @@ async fn build_tree_for_rows(
             n.children.extend(kids.clone());
         }
     }
-    // Sort children newest-first; placeholder/null-start entries float to top.
-    let start_by_sid: BTreeMap<String, Option<i64>> =
-        rows.iter().map(|r| (r.2.clone(), r.5)).collect();
+    // Sort children newest-first by end time; in-progress / placeholder
+    // entries (no end) float to top.
+    let end_by_sid: BTreeMap<String, Option<i64>> =
+        rows.iter().map(|r| (r.2.clone(), r.6)).collect();
     for n in nodes.values_mut() {
         n.children.sort_by(|a, b| {
-            let sa = start_by_sid.get(a).copied().flatten();
-            let sb = start_by_sid.get(b).copied().flatten();
+            let sa = end_by_sid.get(a).copied().flatten();
+            let sb = end_by_sid.get(b).copied().flatten();
             match (sa, sb) {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Less,
@@ -483,7 +486,7 @@ pub async fn list_traces(State(s): State<AppState>, Query(q): Query<ListQuery>) 
                      OR NOT EXISTS (
                          SELECT 1 FROM spans p
                           WHERE p.trace_id = s.trace_id AND p.span_id = s.parent_span_id))
-              ORDER BY COALESCE(s.start_unix_ns, 0) ASC, s.span_pk ASC
+              ORDER BY COALESCE(s.end_unix_ns, s.start_unix_ns, 0) ASC, s.span_pk ASC
               LIMIT 1
             "#,
         ).bind(&trace_id).fetch_optional(&s.pool).await?;
@@ -516,7 +519,7 @@ pub async fn list_traces(State(s): State<AppState>, Query(q): Query<ListQuery>) 
 pub async fn get_trace(State(s): State<AppState>, Path(trace_id): Path<String>) -> AppResult<Json<Value>> {
     let rows: Vec<SpanTreeRow> = sqlx::query_as(
         "SELECT span_pk, trace_id, span_id, parent_span_id, name, start_unix_ns, end_unix_ns, ingestion_state \
-         FROM spans WHERE trace_id = ? ORDER BY COALESCE(start_unix_ns, 0) ASC"
+         FROM spans WHERE trace_id = ? ORDER BY COALESCE(end_unix_ns, start_unix_ns, 0) ASC"
     ).bind(&trace_id).fetch_all(&s.pool).await?;
     if rows.is_empty() { return Err(AppError::NotFound); }
     let conv: Option<String> = sqlx::query_scalar(
@@ -594,7 +597,7 @@ pub async fn get_span(State(s): State<AppState>, Path((trace_id, span_id)): Path
     })).collect();
 
     let children: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT span_pk, trace_id, span_id, name FROM spans WHERE trace_id = ? AND parent_span_id = ? ORDER BY COALESCE(start_unix_ns, 0) ASC"
+        "SELECT span_pk, trace_id, span_id, name FROM spans WHERE trace_id = ? AND parent_span_id = ? ORDER BY COALESCE(end_unix_ns, start_unix_ns, 0) ASC"
     ).bind(&tr).bind(&sp).fetch_all(&s.pool).await?;
     let children_v: Vec<Value> = children.into_iter().map(|(cpk, ctr, csp, cname)| json!({
         "span_pk": cpk, "trace_id": ctr, "span_id": csp, "name": cname, "kind_class": classify(&cname)
