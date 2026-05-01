@@ -15,6 +15,12 @@ export interface ColumnConfig {
   session?: string;
   selected_trace_id?: string;
   selected_span_id?: string;
+  // When InputBreakdown was auto-targeted by an execute_tool selection
+  // in Spans.tsx, this carries the originating tool span's call_id so
+  // InputBreakdown can locate the matching message_tool node and mark
+  // it. Cleared whenever input_breakdown is updated with a directly
+  // picked chat span.
+  selected_tool_call_id?: string;
   raw_type?: string;
   tool_name_filter?: string;
   kind_filter?: KindClass;

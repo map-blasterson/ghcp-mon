@@ -721,7 +721,18 @@ details[open] > summary::before { content: "▾ "; }
   filter: brightness(1.4);
   z-index: 1;
 }
-.ib-tree-wrap { padding: 4px 6px 8px; }
+.ib-tree-wrap { padding: 4px 6px 8px; position: relative; }
+.ib-target-arrow {
+  position: absolute;
+  left: 2px;
+  transform: translateY(-50%);
+  color: #f5c518;
+  font-size: 14px;
+  line-height: 1;
+  pointer-events: none;
+  text-shadow: 0 0 3px rgba(245, 197, 24, 0.6);
+  z-index: 2;
+}
 .ib-node { margin: 1px 0; }
 .ib-header {
   display: flex;

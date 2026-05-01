@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { diffWordsWithSpace, type Change } from "diff";
 import { api } from "../api/client";
@@ -15,6 +15,15 @@ import {
   type Message,
   type Part,
 } from "../components/content";
+
+// Tree node ids contain `/` characters which break querySelector
+// attribute selectors unless escaped. Use the standards-track CSS.escape
+// when present, with a small fallback for older runtimes.
+function cssEscape(s: string): string {
+  const fn = (globalThis as { CSS?: { escape?: (v: string) => string } }).CSS?.escape;
+  if (typeof fn === "function") return fn(s);
+  return s.replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`);
+}
 
 // ---- Tree model ----
 
@@ -627,6 +636,71 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
   );
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
+  // Tool-call hint: when Spans.tsx auto-routed us here in response to
+  // an execute_tool selection, locate the matching message_tool node
+  // (the tool message containing a tool_call_response with this id)
+  // so we can auto-expand its ancestors and visually mark it.
+  const selectedToolCallId = column.config.selected_tool_call_id;
+  const targetMessageNodeId = useMemo<string | null>(() => {
+    if (!selectedToolCallId || !isChat) return null;
+    const msgs = parseInputMessages(a);
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (m.role !== "tool") continue;
+      for (const p of m.parts) {
+        const pt = p as { type?: unknown; id?: unknown };
+        if (pt.type === "tool_call_response" && pt.id === selectedToolCallId) {
+          return `root/input/input_messages/${i}`;
+        }
+      }
+    }
+    return null;
+  }, [selectedToolCallId, isChat, a]);
+
+  // Auto-expand the ancestor chain leading to the targeted message_tool
+  // node so the arrow lands on a visible row. Only adds; never collapses
+  // anything the user already opened.
+  useEffect(() => {
+    if (!targetMessageNodeId) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.add("root");
+      next.add("root/input");
+      next.add("root/input/input_messages");
+      next.add(targetMessageNodeId);
+      return next;
+    });
+  }, [targetMessageNodeId]);
+
+  const treeWrapRef = useRef<HTMLDivElement | null>(null);
+  const [arrowTop, setArrowTop] = useState<number | null>(null);
+
+  // Compute the y-position of the arrow inside the scrollable tree
+  // wrap by reading the targeted header's offset relative to the wrap.
+  // Recompute whenever the target id changes, the tree rerenders, or
+  // expand state changes (which can move the row up/down).
+  useLayoutEffect(() => {
+    if (!targetMessageNodeId) {
+      setArrowTop(null);
+      return;
+    }
+    const wrap = treeWrapRef.current;
+    if (!wrap) return;
+    const el = wrap.querySelector<HTMLElement>(
+      `[data-ib-id="${cssEscape(targetMessageNodeId)}"]`,
+    );
+    if (!el) {
+      setArrowTop(null);
+      return;
+    }
+    const wrapRect = wrap.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    // Place the arrow vertically centered on the row, accounting for
+    // the wrap's own scroll offset so the arrow follows scrolling.
+    const top = elRect.top - wrapRect.top + wrap.scrollTop + elRect.height / 2;
+    setArrowTop(top);
+  }, [targetMessageNodeId, tree, expanded]);
+
   const toggle = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -706,7 +780,11 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
             />
           ) : null}
         </div>
-        <div className="ib-tree-wrap" style={{ overflow: "auto", borderTop: "1px solid var(--border)" }}>
+        <div
+          ref={treeWrapRef}
+          className="ib-tree-wrap"
+          style={{ overflow: "auto", borderTop: "1px solid var(--border)", position: "relative" }}
+        >
           {tree && hasAny && (
             <NodeView
               node={tree}
@@ -716,6 +794,15 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
               hoveredNodeId={hoveredNodeId}
               setHoveredNodeId={setHoveredNodeId}
             />
+          )}
+          {arrowTop != null && (
+            <div
+              className="ib-target-arrow"
+              style={{ top: arrowTop }}
+              aria-hidden
+            >
+              ▶
+            </div>
           )}
         </div>
       </div>
@@ -780,6 +867,7 @@ function NodeView({
     <div className={`ib-node ib-type-${node.type}`} style={{ marginLeft: depth === 0 ? 0 : 10 }}>
       <div
         className={`ib-header${hov ? " hovered" : ""}${collapsible ? " clickable" : ""}`}
+        data-ib-id={node.id}
         onClick={() => collapsible && toggle(node.id)}
         onMouseEnter={() => setHoveredNodeId(node.id)}
         onMouseLeave={() => setHoveredNodeId(null)}

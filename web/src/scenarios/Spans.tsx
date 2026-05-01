@@ -25,6 +25,53 @@ const KINDS: Array<KindClass | ""> = [
   "other",
 ];
 
+// Sort key for sibling ordering: completion-time ascending, with
+// start_unix_ns and span_pk as tie-breakers. Mirrors the convention
+// used by InputBreakdown's flatChatSpansSorted so cross-column
+// selection feels consistent.
+function sortKey(n: SpanNode): number {
+  return n.end_unix_ns ?? n.start_unix_ns ?? n.span_pk ?? 0;
+}
+
+// Locate the picked span in the loaded session tree and return its
+// sibling array (children of its parent, or the top-level array when
+// the picked span is a root). Returns null when the span isn't found.
+function findSiblings(tree: SpanNode[], span_id: string): { picked: SpanNode; siblings: SpanNode[] } | null {
+  const find = (nodes: SpanNode[], parentSiblings: SpanNode[]): { picked: SpanNode; siblings: SpanNode[] } | null => {
+    for (const n of nodes) {
+      if (n.span_id === span_id) return { picked: n, siblings: parentSiblings };
+      const hit = find(n.children ?? [], n.children ?? []);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return find(tree, tree);
+}
+
+// Among the siblings of the picked tool span, find the first chat
+// span whose completion-time sort key is strictly greater than the
+// picked span's. Returns its span_id, or undefined if no such chat
+// sibling exists in the loaded tree.
+function findNextChatSiblingId(tree: SpanNode[], span_id: string): string | undefined {
+  const hit = findSiblings(tree, span_id);
+  if (!hit) return undefined;
+  const pickedKey = sortKey(hit.picked);
+  const ordered = [...hit.siblings].sort((a, b) => {
+    const ka = sortKey(a);
+    const kb = sortKey(b);
+    if (ka !== kb) return ka - kb;
+    return (a.span_pk ?? 0) - (b.span_pk ?? 0);
+  });
+  for (const sib of ordered) {
+    if (sib.kind_class !== "chat") continue;
+    const sk = sortKey(sib);
+    if (sk > pickedKey || (sk === pickedKey && (sib.span_pk ?? 0) > (hit.picked.span_pk ?? 0))) {
+      return sib.span_id;
+    }
+  }
+  return undefined;
+}
+
 // Trace-centric scenario.
 //
 // Two modes, gated by whether a session (conversation_id) is selected:
@@ -86,6 +133,7 @@ export function SpansScenario({ column }: { column: Column }) {
   }, [tick, qc, session]);
 
   const traces = tracesQ.data?.traces ?? [];
+  const tree = sessionTreeQ.data?.tree ?? [];
 
   // Applicability map: which scenario types accept selections from
   // which span kinds. Selecting a chat span only updates input-breakdown
@@ -99,13 +147,47 @@ export function SpansScenario({ column }: { column: Column }) {
   };
 
   const onPickSpan = (trace_id: string, span_id: string, kind_class: KindClass) => {
+    // For execute_tool selections, also auto-advance input_breakdown
+    // columns to the chat span that immediately follows the picked
+    // tool span among its siblings (same parent_span_id) when one
+    // exists in the loaded session tree. Tool-kind selections would
+    // otherwise leave input_breakdown stuck on a stale chat span.
+    let nextChatSpanId: string | undefined;
+    let toolCallId: string | undefined;
+    if (kind_class === "execute_tool" && tree.length > 0) {
+      const hit = findSiblings(tree, span_id);
+      toolCallId = hit?.picked.projection.tool_call?.call_id ?? undefined;
+      nextChatSpanId = findNextChatSiblingId(tree, span_id);
+    }
+
     columns.forEach((c) => {
       const allowed = SCENARIO_KINDS[c.scenarioType];
       if (!allowed) return;
-      if (allowed !== "*" && !allowed.includes(kind_class)) return;
-      updateColumn(c.id, {
-        config: { ...c.config, selected_trace_id: trace_id, selected_span_id: span_id },
-      });
+      const accepts = allowed === "*" || allowed.includes(kind_class);
+      if (accepts) {
+        const patch: Record<string, unknown> = {
+          ...c.config,
+          selected_trace_id: trace_id,
+          selected_span_id: span_id,
+        };
+        // Direct chat / non-tool selections clear any prior
+        // tool-driven hint so the arrow doesn't linger.
+        if (c.scenarioType === "input_breakdown") {
+          patch.selected_tool_call_id = undefined;
+        }
+        updateColumn(c.id, { config: patch });
+        return;
+      }
+      if (c.scenarioType === "input_breakdown" && nextChatSpanId) {
+        updateColumn(c.id, {
+          config: {
+            ...c.config,
+            selected_trace_id: trace_id,
+            selected_span_id: nextChatSpanId,
+            selected_tool_call_id: toolCallId,
+          },
+        });
+      }
     });
   };
 
@@ -114,7 +196,6 @@ export function SpansScenario({ column }: { column: Column }) {
     onPickSpan(trace_id, span_id, kind_class ?? "other");
   };
 
-  const tree = sessionTreeQ.data?.tree ?? [];
   const inspectorTraceId = column.config.selected_trace_id;
 
   // "Follow latest tool call" convenience: if the user is currently
