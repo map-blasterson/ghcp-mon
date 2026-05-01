@@ -966,3 +966,46 @@ details[open] > summary::before { content: "▾ "; }
   opacity: 0.4;
   cursor: default;
 }
+
+/* ---- InputBreakdown DELTA/FULL toggle + diff badges ---- */
+.ib-mode-toggle {
+  display: inline-flex;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ib-mode-btn {
+  background: transparent;
+  color: var(--fg-mute);
+  border: none;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ib-mode-btn.active {
+  background: var(--bg-2);
+  color: var(--fg);
+}
+.ib-mode-btn + .ib-mode-btn { border-left: 1px solid var(--border); }
+.ib-badge-changed { color: var(--warn); border-color: var(--warn); }
+.ib-badge-added   { color: var(--accent-2); border-color: var(--accent-2); }
+.ib-badge-removed { color: var(--err); border-color: var(--err); }
+
+/* ---- system-instructions diff renderer ---- */
+.ib-diff {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 6px 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  margin: 4px 0;
+}
+.ib-diff-eq  { color: var(--fg-mute); }
+.ib-diff-add { background: rgba(46, 160, 67, 0.18); color: var(--accent-2); }
+.ib-diff-rem { background: rgba(248, 81, 73, 0.18); color: var(--err); text-decoration: line-through; }

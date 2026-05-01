@@ -51,7 +51,7 @@ const defaultColumns = (): Column[] => [
   { id: genId(), scenarioType: "live_sessions", title: "Sessions", config: {}, width: 1 },
   { id: genId(), scenarioType: "spans", title: "Traces", config: {}, width: 1.4 },
   { id: genId(), scenarioType: "tool_detail", title: "Tool detail", config: {}, width: 1.4 },
-  { id: genId(), scenarioType: "input_breakdown", title: "Input breakdown", config: {}, width: 1.6 },
+  { id: genId(), scenarioType: "input_breakdown", title: "Chat detail", config: {}, width: 1.6 },
 ];
 
 export const useWorkspace = create<WorkspaceState>()(
@@ -100,6 +100,6 @@ export const SCENARIO_LABELS: Record<ScenarioType, string> = {
   spans: "Spans",
   tool_detail: "Tool detail inspector",
   raw_browser: "Raw OTel record browser",
-  input_breakdown: "Input breakdown",
+  input_breakdown: "Chat detail",
   file_touches: "File touches",
 };

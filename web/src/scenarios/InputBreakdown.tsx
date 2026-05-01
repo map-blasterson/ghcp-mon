@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { diffWordsWithSpace, type Change } from "diff";
 import { api } from "../api/client";
 import type { Column } from "../state/workspace";
+import type { SpanNode } from "../api/types";
 import { ColumnHeader } from "../components/ColumnHeader";
 import { KindBadge } from "../components/KindBadge";
 import {
@@ -18,9 +20,14 @@ import {
 
 type IBType =
   | "root"
+  | "input_root"
+  | "output_root"
   | "system"
+  | "system_unchanged"
+  | "system_diff"
   | "system_part"
   | "tool_def_root"
+  | "tool_def_unchanged"
   | "tool_def"
   | "input_messages_root"
   | "output_messages_root"
@@ -37,6 +44,8 @@ type IBType =
   | "json_object"
   | "json_array";
 
+type Badge = "CHANGED" | "ADDED" | "REMOVED";
+
 interface Node {
   id: string;
   type: IBType;
@@ -45,7 +54,11 @@ interface Node {
   children: Node[];
   primitive?: { key: string; value: string }[];
   meta?: string;
+  badge?: Badge;
+  diffSegments?: Change[];
 }
+
+type Mode = "DELTA" | "FULL";
 
 function safeBytes(v: unknown): number {
   try {
@@ -260,54 +273,253 @@ interface BuildArgs {
   toolDefs: unknown[];
   inputMessages: Message[];
   outputMessages: Message[];
+  mode: Mode;
+  prior: { systemParts: Part[]; toolDefs: unknown[] } | null;
 }
 
-function buildTree({ systemParts, toolDefs, inputMessages, outputMessages }: BuildArgs): Node {
-  const sysChildren: Node[] = systemParts.map((p, i) => {
+// Deep equality for the captured content payloads. JSON.stringify is good
+// enough here: messages/tool defs are JSON-shaped already and key order is
+// stable across the parsing path (we don't reorder).
+function deepEqualJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function toolName(d: unknown): string | null {
+  if (isPlainObject(d) && typeof d.name === "string") return d.name;
+  return null;
+}
+
+interface ToolDefDiff {
+  added: unknown[];      // in current but not in prior, OR same name but content differs
+  removed: unknown[];    // in prior but not in current, OR same name but content differs (paired w/ added)
+  unchangedCount: number;
+}
+
+// Diff two tool-definition arrays by name.
+//   - same name, same content   → unchanged
+//   - same name, content differs → REMOVED (prior) + ADDED (current)
+//   - name only in current      → ADDED
+//   - name only in prior        → REMOVED
+// Unnamed entries fall back to deep-equality multiset matching.
+function diffToolDefs(current: unknown[], prior: unknown[]): ToolDefDiff {
+  const byNameCur = new Map<string, unknown>();
+  const byNamePrior = new Map<string, unknown>();
+  const unnamedCur: unknown[] = [];
+  const unnamedPrior: unknown[] = [];
+  for (const d of current) {
+    const n = toolName(d);
+    if (n) byNameCur.set(n, d);
+    else unnamedCur.push(d);
+  }
+  for (const d of prior) {
+    const n = toolName(d);
+    if (n) byNamePrior.set(n, d);
+    else unnamedPrior.push(d);
+  }
+  const added: unknown[] = [];
+  const removed: unknown[] = [];
+  let unchangedCount = 0;
+  for (const [n, cur] of byNameCur) {
+    const pr = byNamePrior.get(n);
+    if (pr === undefined) {
+      added.push(cur);
+    } else if (!deepEqualJson(cur, pr)) {
+      removed.push(pr);
+      added.push(cur);
+    } else {
+      unchangedCount++;
+    }
+  }
+  for (const [n, pr] of byNamePrior) {
+    if (!byNameCur.has(n)) removed.push(pr);
+  }
+  const usedPriorIdx = new Set<number>();
+  for (const c of unnamedCur) {
+    let matched = false;
+    for (let i = 0; i < unnamedPrior.length; i++) {
+      if (usedPriorIdx.has(i)) continue;
+      if (deepEqualJson(unnamedPrior[i], c)) {
+        usedPriorIdx.add(i);
+        matched = true;
+        unchangedCount++;
+        break;
+      }
+    }
+    if (!matched) added.push(c);
+  }
+  for (let i = 0; i < unnamedPrior.length; i++) {
+    if (!usedPriorIdx.has(i)) removed.push(unnamedPrior[i]);
+  }
+  return { added, removed, unchangedCount };
+}
+
+function buildSystemPartChildren(systemParts: Part[], idBase: string): Node[] {
+  return systemParts.map((p, i) => {
     const t = typeof p.type === "string" ? p.type : "unknown";
     if (t === "text" || t === "reasoning") {
       const content = (p as { content?: string }).content ?? "";
       return {
-        id: `root/system/parts/${i}`, type: "system_part", label: t,
+        id: `${idBase}/parts/${i}`, type: "system_part", label: t,
         bytes: safeBytes(p), children: [],
         primitive: [{ key: "content", value: stringifyPrim(content) }],
         meta: `${content.length} ch`,
       };
     }
-    const fb = jsonNode(p as unknown, `root/system/parts/${i}`, t);
+    const fb = jsonNode(p as unknown, `${idBase}/parts/${i}`, t);
     if (fb) return { ...fb, type: "system_part", label: t };
-    return { id: `root/system/parts/${i}`, type: "system_part", label: t, bytes: safeBytes(p), children: [] };
+    return { id: `${idBase}/parts/${i}`, type: "system_part", label: t, bytes: safeBytes(p), children: [] };
   });
-  const sysNode: Node = {
-    id: "root/system", type: "system", label: "system instructions",
-    bytes: safeBytes(systemParts), children: sysChildren,
+}
+
+// Concatenate all text/reasoning parts into a single string body. Multi-part
+// system instructions are uncommon (Copilot CLI ships a single text part);
+// when more than one part is present, separate them with a banner so the
+// diff result is still legible.
+function concatSystemBody(parts: Part[]): string {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) {
+    const p = parts[0] as { type?: string; content?: string };
+    if (p.type === "text" || p.type === "reasoning") return p.content ?? "";
+    return JSON.stringify(p);
+  }
+  const out: string[] = [];
+  parts.forEach((raw, i) => {
+    const p = raw as { type?: string; content?: string };
+    out.push(`--- part ${i} (${p.type ?? "unknown"}) ---`);
+    if (p.type === "text" || p.type === "reasoning") {
+      out.push(p.content ?? "");
+    } else {
+      out.push(JSON.stringify(p));
+    }
+  });
+  return out.join("\n");
+}
+
+function buildSystemNode(
+  systemParts: Part[],
+  mode: Mode,
+  prior: BuildArgs["prior"],
+): Node {
+  const fullChildren = buildSystemPartChildren(systemParts, "root/input/system");
+  const fullBytes = safeBytes(systemParts);
+  const fullNode: Node = {
+    id: "root/input/system", type: "system", label: "system instructions",
+    bytes: fullBytes, children: fullChildren,
     meta: `${systemParts.length} part${systemParts.length === 1 ? "" : "s"}`,
   };
+  if (mode === "FULL" || !prior) return fullNode;
+  const same = deepEqualJson(systemParts, prior.systemParts);
+  if (same) {
+    return {
+      id: "root/input/system", type: "system_unchanged", label: "system instructions",
+      bytes: fullBytes, children: [],
+      meta: `unchanged · ${systemParts.length} part${systemParts.length === 1 ? "" : "s"}`,
+    };
+  }
+  // CHANGED: replace per-part full-content children with a single
+  // `system_diff` child carrying word-level diff segments of the
+  // concatenated body.
+  const priorBody = concatSystemBody(prior.systemParts);
+  const currentBody = concatSystemBody(systemParts);
+  const segments = diffWordsWithSpace(priorBody, currentBody);
+  const addedCh = segments.filter((s) => s.added).reduce((n, s) => n + s.value.length, 0);
+  const remCh = segments.filter((s) => s.removed).reduce((n, s) => n + s.value.length, 0);
+  const diffNode: Node = {
+    id: "root/input/system/diff",
+    type: "system_diff",
+    label: "diff vs previous",
+    bytes: currentBody.length,
+    children: [],
+    diffSegments: segments,
+    meta: `+${addedCh} ch · -${remCh} ch`,
+  };
+  return {
+    ...fullNode,
+    children: [diffNode],
+    badge: "CHANGED",
+  };
+}
 
-  const tdChildren = toolDefs.map((d, i) => buildToolDefNode(d, `root/tool_defs/${i}`));
-  const tdNode: Node = {
-    id: "root/tool_defs", type: "tool_def_root", label: "tool definitions",
-    bytes: safeBytes(toolDefs), children: tdChildren,
+function buildToolDefsNode(
+  toolDefs: unknown[],
+  mode: Mode,
+  prior: BuildArgs["prior"],
+): Node {
+  const fullBytes = safeBytes(toolDefs);
+  const fullChildren = toolDefs.map((d, i) =>
+    buildToolDefNode(d, `root/input/tool_defs/${i}`),
+  );
+  const fullNode: Node = {
+    id: "root/input/tool_defs", type: "tool_def_root", label: "tool definitions",
+    bytes: fullBytes, children: fullChildren,
     meta: `${toolDefs.length} tool${toolDefs.length === 1 ? "" : "s"}`,
   };
+  if (mode === "FULL" || !prior) return fullNode;
+  const diff = diffToolDefs(toolDefs, prior.toolDefs);
+  if (diff.added.length === 0 && diff.removed.length === 0) {
+    return {
+      id: "root/input/tool_defs", type: "tool_def_unchanged", label: "tool definitions",
+      bytes: fullBytes, children: [],
+      meta: `unchanged · ${toolDefs.length} tool${toolDefs.length === 1 ? "" : "s"}`,
+    };
+  }
+  const children: Node[] = [];
+  diff.removed.forEach((d, i) => {
+    const node = buildToolDefNode(d, `root/input/tool_defs/rem/${i}`);
+    children.push({ ...node, badge: "REMOVED" });
+  });
+  diff.added.forEach((d, i) => {
+    const node = buildToolDefNode(d, `root/input/tool_defs/add/${i}`);
+    children.push({ ...node, badge: "ADDED" });
+  });
+  const metaParts: string[] = [];
+  if (diff.added.length) metaParts.push(`${diff.added.length} added`);
+  if (diff.removed.length) metaParts.push(`${diff.removed.length} removed`);
+  if (diff.unchangedCount) metaParts.push(`${diff.unchangedCount} unchanged`);
+  return {
+    id: "root/input/tool_defs", type: "tool_def_root", label: "tool definitions",
+    bytes: fullBytes, children,
+    meta: metaParts.join(" · "),
+  };
+}
 
-  const inChildren = inputMessages.map((m, i) => buildMessageNode(m, `root/input_messages/${i}`));
-  const inNode: Node = {
-    id: "root/input_messages", type: "input_messages_root", label: "input messages",
+function buildTree({
+  systemParts, toolDefs, inputMessages, outputMessages, mode, prior,
+}: BuildArgs): Node {
+  const sysNode = buildSystemNode(systemParts, mode, prior);
+  const tdNode = buildToolDefsNode(toolDefs, mode, prior);
+
+  const inChildren = inputMessages.map((m, i) =>
+    buildMessageNode(m, `root/input/input_messages/${i}`),
+  );
+  const inMsgsNode: Node = {
+    id: "root/input/input_messages", type: "input_messages_root", label: "input messages",
     bytes: safeBytes(inputMessages), children: inChildren,
-    meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"}`,
+    meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"} · per-turn delta`,
   };
 
-  const outChildren = outputMessages.map((m, i) => buildMessageNode(m, `root/output_messages/${i}`));
-  const outNode: Node = {
-    id: "root/output_messages", type: "output_messages_root", label: "output messages",
-    bytes: safeBytes(outputMessages), children: outChildren,
+  const inputChildren = [sysNode, tdNode, inMsgsNode];
+  const inputBytes = inputChildren.reduce((a, c) => a + c.bytes, 0);
+  const inputRoot: Node = {
+    id: "root/input", type: "input_root", label: "context input",
+    bytes: inputBytes, children: inputChildren,
+  };
+
+  const outChildren = outputMessages.map((m, i) =>
+    buildMessageNode(m, `root/output/${i}`),
+  );
+  const outputBytes = safeBytes(outputMessages);
+  const outputRoot: Node = {
+    id: "root/output", type: "output_root", label: "context output",
+    bytes: outputBytes, children: outChildren,
     meta: `${outputMessages.length} message${outputMessages.length === 1 ? "" : "s"}`,
   };
 
-  const rootChildren = [sysNode, tdNode, inNode, outNode];
-  const rootBytes = rootChildren.reduce((a, c) => a + c.bytes, 0);
-  return { id: "root", type: "root", label: "context input", bytes: rootBytes, children: rootChildren };
+  return {
+    id: "root", type: "root", label: "chat detail",
+    bytes: inputBytes + outputBytes,
+    children: [inputRoot, outputRoot],
+  };
 }
 
 function walkVisible(node: Node, expanded: Set<string>, out: Node[]): void {
@@ -315,11 +527,34 @@ function walkVisible(node: Node, expanded: Set<string>, out: Node[]): void {
   for (const c of node.children) walkVisible(c, expanded, out);
 }
 
+// Walk a span tree and collect chat-class spans, sorted by end time
+// ascending (with start fallback for in-progress spans). Used to find
+// the chat span immediately preceding the selected one in the same
+// session.
+function flatChatSpansSorted(tree: SpanNode[]): SpanNode[] {
+  const out: SpanNode[] = [];
+  const walk = (nodes: SpanNode[]) => {
+    for (const n of nodes) {
+      if (n.kind_class === "chat") out.push(n);
+      walk(n.children ?? []);
+    }
+  };
+  walk(tree);
+  out.sort((a, b) => {
+    const ka = a.end_unix_ns ?? a.start_unix_ns ?? 0;
+    const kb = b.end_unix_ns ?? b.start_unix_ns ?? 0;
+    if (ka !== kb) return ka - kb;
+    return (a.span_pk ?? 0) - (b.span_pk ?? 0);
+  });
+  return out;
+}
+
 // ---- Component ----
 
 export function InputBreakdownScenario({ column }: { column: Column }) {
   const trace_id = column.config.selected_trace_id;
   const span_id = column.config.selected_span_id;
+  const [mode, setMode] = useState<Mode>("DELTA");
 
   const q = useQuery({
     queryKey: ["span", trace_id, span_id],
@@ -334,6 +569,47 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
     [isChat, detail]
   );
 
+  // Resolve the conversation_id from the current chat span. Without it
+  // we cannot locate prior chat spans, and DELTA mode degrades to FULL.
+  const cid = useMemo(() => {
+    const v = (a as Record<string, unknown>)["gen_ai.conversation.id"];
+    return typeof v === "string" ? v : null;
+  }, [a]);
+
+  const sessionTreeQ = useQuery({
+    queryKey: ["session-span-tree", cid],
+    queryFn: () => api.getSessionSpanTree(cid!),
+    enabled: !!cid && mode === "DELTA",
+  });
+
+  // Prior chat span: the chat-kind span immediately preceding the
+  // currently selected one in end-time order across the whole session.
+  const priorRef = useMemo<SpanNode | null>(() => {
+    if (mode !== "DELTA" || !sessionTreeQ.data || !span_id) return null;
+    const all = flatChatSpansSorted(sessionTreeQ.data.tree);
+    const idx = all.findIndex((s) => s.span_id === span_id);
+    if (idx <= 0) return null;
+    return all[idx - 1];
+  }, [mode, sessionTreeQ.data, span_id]);
+
+  const priorSpanQ = useQuery({
+    queryKey: ["span", priorRef?.trace_id, priorRef?.span_id],
+    queryFn: () => api.getSpan(priorRef!.trace_id, priorRef!.span_id),
+    enabled: !!priorRef,
+  });
+
+  const prior = useMemo<BuildArgs["prior"]>(() => {
+    if (mode !== "DELTA") return null;
+    const pa = priorSpanQ.data?.span.attributes ?? null;
+    if (!pa) return null;
+    // If the prior span has no captured content, fall back to FULL for
+    // system/tool_defs (treat as if there were no prior).
+    const sys = parseSystemInstructions(pa);
+    const tools = parseToolDefinitions(pa);
+    if (sys.length === 0 && tools.length === 0) return null;
+    return { systemParts: sys, toolDefs: tools };
+  }, [mode, priorSpanQ.data]);
+
   const tree = useMemo<Node | null>(() => {
     if (!isChat) return null;
     return buildTree({
@@ -341,10 +617,14 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
       toolDefs: parseToolDefinitions(a),
       inputMessages: parseInputMessages(a),
       outputMessages: parseOutputMessages(a),
+      mode,
+      prior,
     });
-  }, [isChat, a]);
+  }, [isChat, a, mode, prior]);
 
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set<string>(["root"]));
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set<string>(["root", "root/input"]),
+  );
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
   const toggle = (id: string) => {
@@ -380,6 +660,24 @@ export function InputBreakdownScenario({ column }: { column: Column }) {
             <span className="dim">kind</span>
             <KindBadge k={detail.span.kind_class} />
           </>
+        )}
+        {isChat && (
+          <span className="ib-mode-toggle" role="group" aria-label="view mode">
+            <button
+              type="button"
+              className={`ib-mode-btn${mode === "DELTA" ? " active" : ""}`}
+              onClick={() => setMode("DELTA")}
+            >
+              DELTA
+            </button>
+            <button
+              type="button"
+              className={`ib-mode-btn${mode === "FULL" ? " active" : ""}`}
+              onClick={() => setMode("FULL")}
+            >
+              FULL
+            </button>
+          </span>
         )}
       </ColumnHeader>
 
@@ -466,7 +764,8 @@ function NodeView({
   const isOpen = expanded.has(node.id);
   const hasChildren = node.children.length > 0;
   const hasPrim = !!node.primitive && node.primitive.length > 0;
-  const collapsible = hasChildren || hasPrim;
+  const hasDiff = !!node.diffSegments && node.diffSegments.length > 0;
+  const collapsible = hasChildren || hasPrim || hasDiff;
   const hov = hoveredNodeId === node.id;
   const [expandedPrims, setExpandedPrims] = useState<Set<string>>(() => new Set());
   const togglePrim = (id: string) => {
@@ -488,11 +787,30 @@ function NodeView({
         <span className="ib-caret">{collapsible ? (isOpen ? "▾" : "▸") : "·"}</span>
         <span className="ib-chip">{node.type.replace(/_/g, " ")}</span>
         <span className="ib-label">{node.label}</span>
+        {node.badge && (
+          <span className={`tag ib-badge-${node.badge.toLowerCase()}`}>{node.badge}</span>
+        )}
         {node.meta && <span className="ib-meta dim">{node.meta}</span>}
         <span className="ib-size">{fmtKB(node.bytes)}</span>
       </div>
       {isOpen && (
         <div className="ib-children">
+          {hasDiff && (
+            <div className="ib-diff" onClick={(e) => e.stopPropagation()}>
+              {node.diffSegments!.map((seg, i) => {
+                const cls = seg.added
+                  ? "ib-diff-add"
+                  : seg.removed
+                  ? "ib-diff-rem"
+                  : "ib-diff-eq";
+                return (
+                  <span key={i} className={cls}>
+                    {seg.value}
+                  </span>
+                );
+              })}
+            </div>
+          )}
           {hasPrim && (
             <div className="ib-prims">
               {node.primitive!.map((p, i) => {
