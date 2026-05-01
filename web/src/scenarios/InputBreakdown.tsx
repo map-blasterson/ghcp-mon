@@ -225,7 +225,13 @@ function buildPartNode(part: Part, idPath: string): Node {
       { key: "id", value: stringifyPrim(shortenId(tr.id ?? "")) },
     ];
     if (!respNode && tr.response !== undefined) {
-      primitive.push({ key: "response", value: stringifyPrim(respParsed) });
+      // Render string responses raw (no JSON.stringify wrapping) so
+      // embedded newlines render as actual line breaks via the
+      // .ib-prim-v `white-space: pre-wrap` rule. Non-strings still go
+      // through stringifyPrim for stable formatting.
+      const value =
+        typeof respParsed === "string" ? respParsed : stringifyPrim(respParsed);
+      primitive.push({ key: "response", value });
     }
     return {
       id: idPath, type: "tool_call_response_part", label: "tool_call_response", bytes,
