@@ -1,0 +1,51 @@
+{
+  "collapse-filter": false,
+  "search": "",
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": false,
+  "showOrphans": true,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "tag:#impl/rust  ",
+      "color": {
+        "a": 1,
+        "rgb": 14701138
+      }
+    },
+    {
+      "query": "tag:#req/hlr  ",
+      "color": {
+        "a": 1,
+        "rgb": 65297
+      }
+    },
+    {
+      "query": "tag:#domain  ",
+      "color": {
+        "a": 1,
+        "rgb": 9134591
+      }
+    },
+    {
+      "query": "tag:#impl/typescript  ",
+      "color": {
+        "a": 1,
+        "rgb": 16774912
+      }
+    }
+  ],
+  "collapse-display": false,
+  "showArrow": false,
+  "textFadeMultiplier": 0,
+  "nodeSizeMultiplier": 1,
+  "lineSizeMultiplier": 1,
+  "collapse-forces": false,
+  "centerStrength": 0.496751559251559,
+  "repelStrength": 10.7341476091476,
+  "linkStrength": 0.720893970893971,
+  "linkDistance": 224,
+  "scale": 1,
+  "close": false
+}

@@ -1,0 +1,18 @@
+---
+type: impl
+source: web/src/scenarios/Spans.tsx
+lang: typescript
+tags:
+  - impl/original
+  - impl/typescript
+---
+Original source file for reverse-engineered requirements.
+
+## Source For
+- [[Spans scenario two modes session vs traces]]
+- [[Spans live invalidation on ingest events]]
+- [[Span selection routes by kind class allow list]]
+- [[Spans follows latest tool span]]
+- [[Traces list dims rows below kind filter]]
+- [[Span tree row publishes hovered chat ancestor]]
+- [[Bash command chip extracts primary words]]

@@ -1,0 +1,218 @@
+{
+  "main": {
+    "id": "8fd72add53f3004a",
+    "type": "split",
+    "children": [
+      {
+        "id": "d894a511927e6339",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "5bf3e32beff843c8",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Graph view"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "f3a3900e7473de1b",
+    "type": "split",
+    "children": [
+      {
+        "id": "6892c00a1751816e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "843d66fd2fa0e0e0",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "9bacc92b195c2ba1",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "021ce1e76c4cef2b",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "09059e30e7646482",
+    "type": "split",
+    "children": [
+      {
+        "id": "b5091e8333000229",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "620e470daa0581aa",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "789eabc39d065ca0",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "83963dfdecc3ae93",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "40762275dedb844d",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "c098333e0f89a681",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ],
+        "currentTab": 2
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "5bf3e32beff843c8",
+  "lastOpenFiles": [
+    "backend/__teststubs/AppError Tests.md",
+    "backend/__teststubs/Server Router Tests.md",
+    "backend/__teststubs/DB Module Tests.md",
+    "backend/__teststubs/REST API Tests.md",
+    "backend/__teststubs/Broadcaster Tests.md",
+    "backend/__teststubs/Model Envelope Tests.md",
+    "backend/__teststubs/CLI Main Tests.md",
+    "backend/__teststubs/Replay Endpoint Tests.md",
+    "backend/__teststubs/Normalize Pipeline Tests.md",
+    "backend/__teststubs/Static Assets Tests.md",
+    "backend/__teststubs/Ingest Pipeline Tests.md",
+    "backend/__teststubs/OTLP Handlers Tests.md",
+    "backend/__teststubs/WS Handler Tests.md",
+    "backend/__teststubs/DAO Tests.md",
+    "backend/__teststubs/Local Session Tests.md",
+    "backend/__teststubs",
+    "backend/llr/Chat turn tool count refreshed.md",
+    "backend/llr/Session counters refreshed on session upsert.md",
+    "backend/llr/Placeholder creation emits placeholder events.md",
+    "backend/llr/Session upsert emits derived session event.md",
+    "backend/llr/Placeholder upgrade preserved across reingest.md",
+    "backend/llr/Hook start event derives hook invocation.md",
+    "backend/llr/Logs not normalized currently.md",
+    "backend/llr/Span events idempotently replaced on span upsert.md",
+    "backend/llr/Span upsert by trace and span id.md",
+    "backend/llr/Projection pointers resolved via ancestor walk.md",
+    "backend/llr/Chat token usage attributes create context snapshot.md",
+    "backend/__cheatsheets",
+    "frontend/impl",
+    "frontend/llr",
+    "frontend/hlr",
+    "frontend",
+    "backend/impl",
+    "backend/llr",
+    "backend/hlr",
+    "backend"
+  ]
+}

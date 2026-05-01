@@ -1,0 +1,27 @@
+# Frontend Source Files
+
+- web/src/main.tsx
+- web/src/App.tsx
+- web/src/api/client.ts
+- web/src/api/types.ts
+- web/src/api/ws.ts
+- web/src/state/hover.ts
+- web/src/state/live.ts
+- web/src/state/workspace.ts
+- web/src/components/CodeBlock.tsx
+- web/src/components/Column.tsx
+- web/src/components/ColumnHeader.tsx
+- web/src/components/ContextGrowthWidget.tsx
+- web/src/components/Inspector.tsx
+- web/src/components/JsonView.tsx
+- web/src/components/KindBadge.tsx
+- web/src/components/MessageView.tsx
+- web/src/components/Workspace.tsx
+- web/src/components/content.ts
+- web/src/scenarios/index.ts
+- web/src/scenarios/LiveSessions.tsx
+- web/src/scenarios/Spans.tsx
+- web/src/scenarios/ToolDetail.tsx
+- web/src/scenarios/InputBreakdown.tsx
+- web/src/scenarios/RawBrowser.tsx
+- web/src/scenarios/FileTouches.tsx
