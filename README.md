@@ -68,3 +68,10 @@ See `./plan.md` for the project plan, `./supplemental.md` for the supplemental r
 
 - [OpenTelemetry Semantic Conventions — Gen AI Spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/)
 
+## Demo
+
+
+
+https://github.com/user-attachments/assets/0e8b20fe-cba2-467f-9914-60a23b4fa0cb
+
+
