@@ -67,3 +67,9 @@ See `./plan.md` for the project plan, `./supplemental.md` for the supplemental r
 ## References
 
 - [OpenTelemetry Semantic Conventions — Gen AI Spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/)
+
+## Demo
+
+https://github.com/map-blasterson/ghcp-mon/raw/main/doc/demo.mp4
+
+<video src="doc/demo.mp4" controls width="100%"></video>
