@@ -978,7 +978,7 @@ details[open] > summary::before { content: "▾ "; }
   cursor: default;
 }
 
-/* ---- InputBreakdown DELTA/FULL toggle + diff badges ---- */
+/* ---- ChatDetail DELTA/FULL toggle + diff badges ---- */
 .ib-mode-toggle {
   display: inline-flex;
   margin-left: 6px;

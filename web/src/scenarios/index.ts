@@ -3,7 +3,7 @@ import { LiveSessionsScenario } from "./LiveSessions";
 import { SpansScenario } from "./Spans";
 import { ToolDetailScenario } from "./ToolDetail";
 import { RawBrowserScenario } from "./RawBrowser";
-import { InputBreakdownScenario } from "./InputBreakdown";
+import { ChatDetailScenario } from "./ChatDetail";
 import { FileTouchesScenario } from "./FileTouches";
 
 import type { Column } from "../state/workspace";
@@ -15,6 +15,6 @@ export const SCENARIOS: Record<ScenarioType, ScenarioComp> = {
   spans: SpansScenario,
   tool_detail: ToolDetailScenario,
   raw_browser: RawBrowserScenario,
-  input_breakdown: InputBreakdownScenario,
+  input_breakdown: ChatDetailScenario,
   file_touches: FileTouchesScenario,
 };

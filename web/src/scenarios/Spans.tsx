@@ -27,7 +27,7 @@ const KINDS: Array<KindClass | ""> = [
 
 // Sort key for sibling ordering: completion-time ascending, with
 // start_unix_ns and span_pk as tie-breakers. Mirrors the convention
-// used by InputBreakdown's flatChatSpansSorted so cross-column
+// used by ChatDetail's flatChatSpansSorted so cross-column
 // selection feels consistent.
 function sortKey(n: SpanNode): number {
   return n.end_unix_ns ?? n.start_unix_ns ?? n.span_pk ?? 0;
@@ -638,7 +638,7 @@ function ReportIntentText({
 
 // Renders one hash-colored chicklet per primary command word in a bash
 // tool call's arguments (split on `&&`). Fetches the span detail
-// (cached and shared with FileTouches/ToolDetail/InputBreakdown via the
+// (cached and shared with FileTouches/ToolDetail/ChatDetail via the
 // ["span", trace_id, span_id] query key) and parses
 // gen_ai.tool.call.arguments.command.
 function BashCommandChip({ trace_id, span_id }: { trace_id: string; span_id: string }) {

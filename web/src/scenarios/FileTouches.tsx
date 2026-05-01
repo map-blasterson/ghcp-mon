@@ -16,7 +16,7 @@ import type { SpanRow } from "../api/types";
 //   1. /api/spans?session=<cid>&kind=execute_tool   → SpanRow[]
 //   2. SpanRow.name is "execute_tool <tool_name>"; filter to view/edit/create.
 //   3. /api/spans/:trace_id/:span_id per matching span (cached, shared
-//      with ToolDetail / InputBreakdown via the ["span", trace, span]
+//      with ToolDetail / ChatDetail via the ["span", trace, span]
 //      query key) to read gen_ai.tool.call.arguments.path.
 //
 // Refreshes via the same WS feed Spans uses so newly-arrived tool calls
@@ -155,7 +155,7 @@ export function FileTouchesScenario({ column }: { column: Column }) {
   }, [spansQ.data]);
 
   // Fetch each matching span's detail. The query key matches ToolDetail /
-  // InputBreakdown so cache is shared.
+  // ChatDetail so cache is shared.
   const detailQs = useQueries({
     queries: candidateSpans.map((s) => ({
       queryKey: ["span", s.trace_id, s.span_id],

@@ -566,7 +566,7 @@ function flatChatSpansSorted(tree: SpanNode[]): SpanNode[] {
 
 // ---- Component ----
 
-export function InputBreakdownScenario({ column }: { column: Column }) {
+export function ChatDetailScenario({ column }: { column: Column }) {
   const trace_id = column.config.selected_trace_id;
   const span_id = column.config.selected_span_id;
   const [mode, setMode] = useState<Mode>("DELTA");
