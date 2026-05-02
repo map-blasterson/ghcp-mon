@@ -309,11 +309,7 @@ async fn upsert_external_tool_call(
 struct AncestorRow {
     agent_run_pk: Option<i64>,
     chat_turn_pk: Option<i64>,
-    #[allow(dead_code)]
-    chat_turn_span_pk: Option<i64>,
     tool_call_pk: Option<i64>,
-    #[allow(dead_code)]
-    tool_call_span_pk: Option<i64>,
     nearest_invoker_span_pk: Option<i64>,
     conv_id: Option<String>,
 }
@@ -335,12 +331,8 @@ async fn walk_ancestors(pool: &SqlitePool, span_pk: i64) -> sqlx::Result<Ancesto
              WHERE a.depth > 0 ORDER BY a.depth ASC LIMIT 1) AS agent_run_pk,
           (SELECT ct.turn_pk FROM ancestors a JOIN chat_turns ct ON ct.span_pk = a.span_pk
              WHERE a.depth > 0 ORDER BY a.depth ASC LIMIT 1) AS chat_turn_pk,
-          (SELECT a.span_pk FROM ancestors a JOIN chat_turns ct ON ct.span_pk = a.span_pk
-             WHERE a.depth > 0 ORDER BY a.depth ASC LIMIT 1) AS chat_turn_span_pk,
           (SELECT tc.tool_call_pk FROM ancestors a JOIN tool_calls tc ON tc.span_pk = a.span_pk
              WHERE a.depth > 0 ORDER BY a.depth ASC LIMIT 1) AS tool_call_pk,
-          (SELECT a.span_pk FROM ancestors a JOIN tool_calls tc ON tc.span_pk = a.span_pk
-             WHERE a.depth > 0 ORDER BY a.depth ASC LIMIT 1) AS tool_call_span_pk,
           (SELECT a.span_pk FROM ancestors a
              WHERE a.depth > 0 AND (
                EXISTS (SELECT 1 FROM tool_calls tc WHERE tc.span_pk = a.span_pk) OR
