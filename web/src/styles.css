@@ -333,7 +333,15 @@ a:hover { text-decoration: underline; }
   font-size: 10px;
 }
 .tag.ok { color: var(--accent-2); border-color: var(--accent-2); }
-.tag.err { color: var(--err); border-color: var(--err); }
+.tag.err {
+  color: #ffd6d6;
+  border: 1px solid #ff3b3b;
+  background: repeating-linear-gradient(
+    -45deg,
+    #2a2a2a 0 3px,
+    #5a1414 3px 6px
+  );
+}
 .tag.warn { color: var(--warn); border-color: var(--warn); }
 
 /* Color-coded kind_class labels. Used everywhere a span's class is

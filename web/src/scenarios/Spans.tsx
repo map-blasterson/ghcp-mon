@@ -528,22 +528,23 @@ function SpanTreeNode({
 
 export function ProjectionChips({ projection }: { projection: SpanProjection | null | undefined }) {
   if (!projection) return null;
-  const plain: string[] = [];
+  const plain: { label: string; cls?: string }[] = [];
   const hashed: string[] = [];
   if (projection.chat_turn) {
     const ct = projection.chat_turn;
     const tok = `${ct.input_tokens ?? "?"}/${ct.output_tokens ?? "?"}`;
-    plain.push(`tokens ${tok}`);
-    if (ct.model) plain.push(ct.model);
+    plain.push({ label: `tokens ${tok}` });
+    if (ct.model) plain.push({ label: ct.model });
   }
   if (projection.tool_call) {
     const tc = projection.tool_call;
     if (tc.tool_name) hashed.push(tc.tool_name);
-    if (tc.status_code != null && tc.status_code !== 0) plain.push(`err ${tc.status_code}`);
+    if (tc.status_code != null && tc.status_code !== 0)
+      plain.push({ label: `err ${tc.status_code}`, cls: "err" });
   }
   if (projection.agent_run) {
     const ar = projection.agent_run;
-    if (ar.agent_name) plain.push(`agent ${ar.agent_name}`);
+    if (ar.agent_name) plain.push({ label: `agent ${ar.agent_name}` });
   }
   if (projection.external_tool_call) {
     const ext = projection.external_tool_call;
@@ -558,8 +559,12 @@ export function ProjectionChips({ projection }: { projection: SpanProjection | n
       {plain.length > 0 && (
         <span className="dim">
           {plain.map((c, i) => (
-            <span key={`p-${i}`} className="tag" style={{ marginRight: 4 }}>
-              {c}
+            <span
+              key={`p-${i}`}
+              className={c.cls ? `tag ${c.cls}` : "tag"}
+              style={{ marginRight: 4 }}
+            >
+              {c.label}
             </span>
           ))}
         </span>
