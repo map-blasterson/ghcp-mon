@@ -143,7 +143,7 @@ export function TextBlock({
     children
   );
 
-  const wrapperClass = `tb-block${className ? " " + className : ""}`;
+  const wrapperClass = `tb-block${className ? " " + className : ""}${phase === "active" ? " tb-active" : ""}`;
 
   // ---- cursor tracking -----------------------------------------------------
   // While the block is hovered (icon phase) or search is active, position the

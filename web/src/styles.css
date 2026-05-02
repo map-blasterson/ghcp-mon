@@ -846,6 +846,18 @@ details[open] > summary::before { content: "▾ "; }
   min-width: 0;
 }
 
+/* While search is active, suppress text selection in the block so
+ * click-cycling matches doesn't drag-select the body text. The input
+ * itself overrides this so the user can still select within the query. */
+.tb-block.tb-active {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tb-block.tb-active .tb-search-input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .tb-search-icon {
   position: absolute;
   top: 0;
