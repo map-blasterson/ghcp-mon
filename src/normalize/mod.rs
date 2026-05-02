@@ -309,6 +309,7 @@ async fn upsert_external_tool_call(
 struct AncestorRow {
     agent_run_pk: Option<i64>,
     chat_turn_pk: Option<i64>,
+    #[allow(dead_code)]
     chat_turn_span_pk: Option<i64>,
     tool_call_pk: Option<i64>,
     #[allow(dead_code)]
