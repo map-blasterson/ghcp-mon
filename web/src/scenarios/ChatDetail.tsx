@@ -883,20 +883,22 @@ function NodeView({
       {isOpen && (
         <div className="ib-children">
           {hasDiff && (
-            <div className="ib-diff" onClick={(e) => e.stopPropagation()}>
-              {node.diffSegments!.map((seg, i) => {
-                const cls = seg.added
-                  ? "ib-diff-add"
-                  : seg.removed
-                  ? "ib-diff-rem"
-                  : "ib-diff-eq";
-                return (
-                  <span key={i} className={cls}>
-                    {seg.value}
-                  </span>
-                );
-              })}
-            </div>
+            <TextBlock searchable className="ib-diff-tb">
+              <div className="ib-diff" onClick={(e) => e.stopPropagation()}>
+                {node.diffSegments!.map((seg, i) => {
+                  const cls = seg.added
+                    ? "ib-diff-add"
+                    : seg.removed
+                    ? "ib-diff-rem"
+                    : "ib-diff-eq";
+                  return (
+                    <span key={i} className={cls}>
+                      {seg.value}
+                    </span>
+                  );
+                })}
+              </div>
+            </TextBlock>
           )}
           {hasPrim && (
             <div className="ib-prims">

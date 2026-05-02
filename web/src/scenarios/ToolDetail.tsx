@@ -6,6 +6,7 @@ import type { Column } from "../state/workspace";
 import { ColumnHeader } from "../components/ColumnHeader";
 import { JsonView } from "../components/JsonView";
 import { CodeBlock, langFromPath } from "../components/CodeBlock";
+import { TextBlock } from "../components/TextBlock";
 import {
   fmtNs,
   fmtClock,
@@ -184,27 +185,33 @@ function GenericArgs({ attributes }: { attributes: Record<string, unknown> }) {
               {codeFields.map(([k, v]) => (
                 <div key={`code-${k}`}>
                   <div className="label" style={{ marginTop: 4 }}>{k}</div>
-                  <pre className="edit-diff">{v}</pre>
+                  <TextBlock searchable text={v} preClassName="edit-diff" />
                 </div>
               ))}
               {restObj && (
-                <pre className="json" style={{ marginTop: codeFields.length ? 4 : 0 }}>
-                  {prettyJson(restObj)}
-                </pre>
+                <TextBlock searchable>
+                  <pre className="json" style={{ marginTop: codeFields.length ? 4 : 0 }}>
+                    {prettyJson(restObj)}
+                  </pre>
+                </TextBlock>
               )}
               {!restObj && codeFields.length === 0 && (
-                <pre className="json">{prettyJson(args)}</pre>
+                <TextBlock searchable text={prettyJson(args)} preClassName="json" />
               )}
             </>
           ) : (
-            <pre className="json">{prettyJson(args)}</pre>
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
           )}
         </div>
       )}
       {result != null && (
         <div className="shell">
           <div className="label">result</div>
-          {typeof result === "string" ? <pre>{result}</pre> : <pre className="json">{prettyJson(result)}</pre>}
+          {typeof result === "string" ? (
+            <TextBlock searchable text={result} />
+          ) : (
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+          )}
         </div>
       )}
     </>
@@ -249,27 +256,31 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {oldStr != null && (
             <>
               <div className="label" style={{ marginTop: 4 }}>old_str</div>
-              <CodeBlock
-                language={lang}
-                text={oldStr}
-                className="edit-diff edit-diff-old"
-              />
+              <TextBlock searchable>
+                <CodeBlock
+                  language={lang}
+                  text={oldStr}
+                  className="edit-diff edit-diff-old"
+                />
+              </TextBlock>
             </>
           )}
           {newStr != null && (
             <>
               <div className="label" style={{ marginTop: 4 }}>new_str</div>
-              <CodeBlock
-                language={lang}
-                text={newStr}
-                className="edit-diff edit-diff-new"
-              />
+              <TextBlock searchable>
+                <CodeBlock
+                  language={lang}
+                  text={newStr}
+                  className="edit-diff edit-diff-new"
+                />
+              </TextBlock>
             </>
           )}
           {extraObj && (
             <>
               <div className="label" style={{ marginTop: 4 }}>other</div>
-              <pre className="json">{prettyJson(extraObj)}</pre>
+              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" />
             </>
           )}
         </div>
@@ -277,7 +288,11 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
       {result != null && (
         <div className="shell">
           <div className="label">result</div>
-          {typeof result === "string" ? <pre>{result}</pre> : <pre className="json">{prettyJson(result)}</pre>}
+          {typeof result === "string" ? (
+            <TextBlock searchable text={result} />
+          ) : (
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+          )}
         </div>
       )}
     </>
@@ -341,7 +356,7 @@ function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {extraObj && (
             <>
               <div className="label" style={{ marginTop: 4 }}>other</div>
-              <pre className="json">{prettyJson(extraObj)}</pre>
+              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" />
             </>
           )}
         </div>
@@ -353,13 +368,17 @@ function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
             lns != null ? (
               <div className="lineno-block edit-diff">
                 <pre className="lns">{lns}</pre>
-                <CodeBlock language={lang} text={body} />
+                <TextBlock searchable>
+                  <CodeBlock language={lang} text={body} />
+                </TextBlock>
               </div>
             ) : (
-              <CodeBlock language={lang} text={body} className="edit-diff" />
+              <TextBlock searchable>
+                <CodeBlock language={lang} text={body} className="edit-diff" />
+              </TextBlock>
             )
           ) : (
-            <pre className="json">{prettyJson(result)}</pre>
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
           )}
         </div>
       )}
@@ -409,14 +428,16 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
               {prompt != null && (
                 <>
                   <div className="label" style={{ marginTop: 6 }}>prompt</div>
-                  <div className="markdown-body">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{prompt}</ReactMarkdown>
-                  </div>
+                  <TextBlock searchable>
+                    <div className="markdown-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{prompt}</ReactMarkdown>
+                    </div>
+                  </TextBlock>
                 </>
               )}
             </>
           ) : (
-            <pre className="json">{prettyJson(args)}</pre>
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
           )}
         </div>
       )}
@@ -424,11 +445,13 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
-            </div>
+            <TextBlock searchable>
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+              </div>
+            </TextBlock>
           ) : (
-            <pre className="json">{prettyJson(result)}</pre>
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
           )}
         </div>
       )}
@@ -465,7 +488,7 @@ function ReadAgentArgs({ attributes }: { attributes: Record<string, unknown> }) 
               ))}
             </div>
           ) : (
-            <pre className="json">{prettyJson(args)}</pre>
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
           )}
         </div>
       )}
@@ -473,11 +496,13 @@ function ReadAgentArgs({ attributes }: { attributes: Record<string, unknown> }) 
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <div className="markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
-            </div>
+            <TextBlock searchable>
+              <div className="markdown-body">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
+              </div>
+            </TextBlock>
           ) : (
-            <pre className="json">{prettyJson(result)}</pre>
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
           )}
         </div>
       )}
