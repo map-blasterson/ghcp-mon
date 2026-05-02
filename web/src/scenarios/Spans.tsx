@@ -258,11 +258,16 @@ export function SpansScenario({ column }: { column: Column }) {
           }
         >
           <option value="">all</option>
-          {sessionsQ.data?.sessions.map((s) => (
-            <option key={s.conversation_id} value={s.conversation_id}>
-              {s.conversation_id.slice(0, 8)} · {s.latest_model ?? "—"}
-            </option>
-          ))}
+          {sessionsQ.data?.sessions.map((s) => {
+            const shortId = s.conversation_id.slice(0, 8);
+            const name =
+              s.local_name && s.local_name.trim().length > 0 ? s.local_name : null;
+            return (
+              <option key={s.conversation_id} value={s.conversation_id}>
+                {name ? `${name} · ${shortId}` : shortId}
+              </option>
+            );
+          })}
         </select>
         <span className="dim">kind</span>
         <select
