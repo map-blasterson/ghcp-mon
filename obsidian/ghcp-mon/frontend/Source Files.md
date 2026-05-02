@@ -16,6 +16,7 @@
 - web/src/components/JsonView.tsx
 - web/src/components/KindBadge.tsx
 - web/src/components/MessageView.tsx
+- web/src/components/TextBlock.tsx
 - web/src/components/Workspace.tsx
 - web/src/components/content.ts
 - web/src/scenarios/index.ts
@@ -25,3 +26,4 @@
 - web/src/scenarios/ChatDetail.tsx
 - web/src/scenarios/RawBrowser.tsx
 - web/src/scenarios/FileTouches.tsx
+- web/src/styles.css

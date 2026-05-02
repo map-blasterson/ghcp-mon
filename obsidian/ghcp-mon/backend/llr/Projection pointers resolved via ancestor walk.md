@@ -4,7 +4,7 @@ tags:
   - req/llr
   - domain/normalize
 ---
-After upserting a span and any projection row, the normalizer MUST walk the span's ancestors (up to depth 64, joining `spans` on `trace_id` + `parent_span_id`) and back-fill `parent_agent_run_pk`/`parent_span_pk` on the row's `agent_runs`, and `agent_run_pk`/`chat_turn_pk`/`conversation_id` on its `chat_turns`/`tool_calls`/`external_tool_calls`/`hook_invocations`/`skill_invocations` projections, using `COALESCE` so existing values are not overwritten.
+After upserting a span and any projection row, the normalizer MUST walk the span's ancestors (up to depth 64, joining `spans` on `trace_id` + `parent_span_id`) and back-fill `parent_agent_run_pk`/`parent_span_pk` on the row's `agent_runs`, `agent_run_pk`/`chat_turn_pk`/`conversation_id` on its `chat_turns`/`tool_calls`/`external_tool_calls`/`hook_invocations`/`skill_invocations` projections, and on `context_snapshots` rows for the span back-fill `conversation_id` plus `chat_turn_pk` (looked up directly via `chat_turns.span_pk = ?` since the chat_turn lives at depth 0, which the ancestor walk excludes), using `COALESCE` so existing values are not overwritten.
 
 ## Rationale
 Projections store flat parent pointers for cheap querying; ancestor walk derives them from the recursive parent chain whenever any new span lands.

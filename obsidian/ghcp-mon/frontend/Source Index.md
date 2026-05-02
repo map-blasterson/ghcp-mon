@@ -15,3 +15,4 @@ See [[Source Files]] for the manifest of files reverse-engineered into this vaul
 - [[File Touch Tree]]
 - [[Context Growth Widget]]
 - [[Raw Record Browser]]
+- [[Searchable Text Block]]

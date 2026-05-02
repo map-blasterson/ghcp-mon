@@ -6,15 +6,23 @@ import { useWorkspace } from "../state/workspace";
 import { ColumnHeader } from "../components/ColumnHeader";
 import { useLiveFeed } from "../state/live";
 import { parseToolCallArguments } from "../components/content";
-import type { SpanRow } from "../api/types";
+import type { SpanNode } from "../api/types";
 
 // File-touches scenario: aggregates every `view`, `edit`, and `create`
 // tool call observed in the selected session and lays the touched paths
 // out as a collapsible filesystem tree.
 //
 // Pure frontend composition — no new backend endpoint:
-//   1. /api/spans?session=<cid>&kind=execute_tool   → SpanRow[]
-//   2. SpanRow.name is "execute_tool <tool_name>"; filter to view/edit/create.
+//   1. /api/sessions/<cid>/span-tree → SpanNode[] (shares the
+//      ["session-span-tree", session] cache with the Spans column).
+//      We use this rather than /api/spans?session=&kind=execute_tool
+//      because the latter only returns tool spans once their
+//      tool_calls.conversation_id has been backfilled by the ancestor
+//      walk — which in the Copilot flow waits for the parent chat span
+//      to end. The session-span-tree endpoint is trace-scoped and
+//      surfaces tool spans as soon as they land.
+//   2. Walk the tree: a SpanNode whose kind_class is "execute_tool" and
+//      whose name parses to view/edit/create is a candidate.
 //   3. /api/spans/:trace_id/:span_id per matching span (cached, shared
 //      with ToolDetail / ChatDetail via the ["span", trace, span]
 //      query key) to read gen_ai.tool.call.arguments.path.
@@ -123,9 +131,9 @@ export function FileTouchesScenario({ column }: { column: Column }) {
     }
   }, [session, columns, column.id, column.config, updateColumn]);
 
-  const spansQ = useQuery({
-    queryKey: ["spans", { session, kind: "execute_tool", limit: 1000 }],
-    queryFn: () => api.listSpans({ session, kind: "execute_tool", limit: 1000 }),
+  const treeQ = useQuery({
+    queryKey: ["session-span-tree", session],
+    queryFn: () => api.getSessionSpanTree(session!),
     enabled: !!session,
   });
 
@@ -135,24 +143,30 @@ export function FileTouchesScenario({ column }: { column: Column }) {
   ]);
   useEffect(() => {
     if (!session) return;
-    qc.invalidateQueries({ queryKey: ["spans", { session, kind: "execute_tool", limit: 1000 }] });
+    qc.invalidateQueries({ queryKey: ["session-span-tree", session] });
   }, [tick, session, qc]);
 
-  // Filter to the three file-touch tools by parsing the span name.
-  // Span names emitted by Copilot follow `execute_tool <tool_name>` —
-  // see reference/span_hierarchy.md and reference/copilot-content.log.
-  const candidateSpans = useMemo<Array<SpanRow & { tool_name: string }>>(() => {
-    const rows = spansQ.data?.spans ?? [];
-    const out: Array<SpanRow & { tool_name: string }> = [];
-    for (const r of rows) {
-      const parts = r.name.split(" ");
-      if (parts.length < 2) continue;
-      const tool = parts.slice(1).join(" ");
-      if (!TRACKED_TOOLS.has(tool)) continue;
-      out.push({ ...r, tool_name: tool });
-    }
+  // Walk the session span tree and pull out execute_tool spans whose
+  // name parses to one of the file-touch tools. Span names emitted by
+  // Copilot follow `execute_tool <tool_name>` — see
+  // reference/span_hierarchy.md and reference/copilot-content.log.
+  const candidateSpans = useMemo<Array<SpanNode & { tool_name: string }>>(() => {
+    const out: Array<SpanNode & { tool_name: string }> = [];
+    const visit = (n: SpanNode) => {
+      if (n.kind_class === "execute_tool") {
+        const parts = n.name.split(" ");
+        if (parts.length >= 2) {
+          const tool = parts.slice(1).join(" ");
+          if (TRACKED_TOOLS.has(tool)) {
+            out.push({ ...n, tool_name: tool });
+          }
+        }
+      }
+      for (const c of n.children) visit(c);
+    };
+    for (const root of treeQ.data?.tree ?? []) visit(root);
     return out;
-  }, [spansQ.data]);
+  }, [treeQ.data]);
 
   // Fetch each matching span's detail. The query key matches ToolDetail /
   // ChatDetail so cache is shared.
@@ -291,7 +305,7 @@ export function FileTouchesScenario({ column }: { column: Column }) {
       <div className="col-body" style={{ overflow: "auto" }}>
         {!session ? (
           <div className="empty-state">Pick a session in the Live sessions column.</div>
-        ) : spansQ.isLoading ? (
+        ) : treeQ.isLoading ? (
           <div className="empty-state">loading spans…</div>
         ) : candidateSpans.length === 0 ? (
           <div className="empty-state">no view / edit / create tool calls yet</div>

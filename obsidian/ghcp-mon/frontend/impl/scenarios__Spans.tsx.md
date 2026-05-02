@@ -13,6 +13,8 @@ Original source file for reverse-engineered requirements.
 - [[Spans live invalidation on ingest events]]
 - [[Span selection routes by kind class allow list]]
 - [[Spans follows latest tool span]]
+- [[Spans execute_tool selection auto-advances chat detail]]
+- [[Spans direct chat selection clears tool call hint]]
 - [[Traces list dims rows below kind filter]]
 - [[Span tree row publishes hovered chat ancestor]]
 - [[Bash command chip extracts primary words]]

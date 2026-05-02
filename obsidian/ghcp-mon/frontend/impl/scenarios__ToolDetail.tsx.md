@@ -19,3 +19,4 @@ Original source file for reverse-engineered requirements.
 - [[Read agent tool renders result as markdown]]
 - [[Generic tool renders args splitting code-ish strings]]
 - [[Tool detail empty state when no content captured]]
+- [[Tool detail body blocks wrap in TextBlock for search]]
