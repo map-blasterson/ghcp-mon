@@ -14,6 +14,11 @@ export interface TextBlockProps {
   preClassName?: string;
   truncatable?: boolean;
   searchable?: boolean;
+  // Controlled expand/collapse for truncatable mode. The chevron affordance
+  // was removed — callers drive open/close from elsewhere (e.g. ChatDetail
+  // toggles via clicks on the .ib-prim-k key span). When `open` is omitted
+  // the block stays collapsed.
+  open?: boolean;
 }
 
 type SearchPhase = "idle" | "icon" | "active";
@@ -104,9 +109,8 @@ export function TextBlock({
   preClassName,
   truncatable = false,
   searchable = true,
+  open,
 }: TextBlockProps) {
-  const [open, setOpen] = useState(false);
-
   // Search state machine.
   const [phase, setPhase] = useState<SearchPhase>("idle");
   const [query, setQuery] = useState("");
@@ -122,10 +126,11 @@ export function TextBlock({
   const isLong =
     truncatable && typeof text === "string" &&
     (text.length > 200 || text.includes("\n"));
+  const effectiveOpen = !!open;
 
   const body = text !== undefined ? (
     <pre
-      className={`${preClassName ?? ""}${isLong ? " ib-prim-v-clip" : ""}${isLong && open ? " open" : ""}`.trim()}
+      className={`${preClassName ?? ""}${isLong ? " ib-prim-v-clip" : ""}${isLong && effectiveOpen ? " open" : ""}`.trim()}
     >
       {text}
     </pre>
@@ -305,20 +310,6 @@ export function TextBlock({
       onClick={onBlockClick}
       onContextMenu={onBlockContextMenu}
     >
-      {isLong && (
-        <button
-          type="button"
-          className="tb-expand-hit"
-          aria-label={open ? "Collapse" : "Expand"}
-          aria-expanded={open}
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen((v) => !v);
-          }}
-        >
-          <span className="ib-caret">{open ? "▾" : "▸"}</span>
-        </button>
-      )}
       {phase === "active" && (
         <div className="tb-search-header" aria-hidden="true">
           <span className="tb-search-header-l">{headerLeft}</span>

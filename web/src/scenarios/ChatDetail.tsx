@@ -849,6 +849,32 @@ function SummaryBar({
   );
 }
 
+function isPrimTruncatable(value: string): boolean {
+  return typeof value === "string" && (value.length > 200 || value.includes("\n"));
+}
+
+// Cursor-following [+]/[-] icon. Mounted only while the user is hovering a
+// truncatable .ib-prim-k key span. We attach the mousemove listener at mount
+// time; React strict mode double-mount is harmless because the cleanup
+// removes the listener.
+function KeyCursorIcon({ open }: { open: boolean }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onMove = (e: MouseEvent) => {
+      el.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 12}px)`;
+    };
+    window.addEventListener("mousemove", onMove);
+    return () => window.removeEventListener("mousemove", onMove);
+  }, []);
+  return (
+    <span ref={ref} className="kc-cursor-icon" aria-hidden="true">
+      {open ? "[-]" : "[+]"}
+    </span>
+  );
+}
+
 function NodeView({
   node, depth, expanded, toggle, hoveredNodeId, setHoveredNodeId,
 }: {
@@ -861,6 +887,20 @@ function NodeView({
   const hasDiff = !!node.diffSegments && node.diffSegments.length > 0;
   const collapsible = hasChildren || hasPrim || hasDiff;
   const hov = hoveredNodeId === node.id;
+
+  // Per-NodeView prim expand state. Was hoisted into TextBlock during
+  // Phase 1; restored here so the click target can move from the body to
+  // the .ib-prim-k key span.
+  const [expandedPrims, setExpandedPrims] = useState<Set<string>>(() => new Set());
+  const togglePrim = (pid: string) => {
+    setExpandedPrims((prev) => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid);
+      else next.add(pid);
+      return next;
+    });
+  };
+  const [hoveredPrimKey, setHoveredPrimKey] = useState<string | null>(null);
 
   return (
     <div className={`ib-node ib-type-${node.type}`} style={{ marginLeft: depth === 0 ? 0 : 10 }}>
@@ -904,10 +944,40 @@ function NodeView({
             <div className="ib-prims">
               {node.primitive!.map((p, i) => {
                 const pid = `${node.id}__p${i}`;
+                const truncatable = isPrimTruncatable(p.value);
+                const primOpen = expandedPrims.has(pid);
+                const isHover = hoveredPrimKey === pid;
                 return (
                   <div className="ib-prim" key={pid}>
-                    <span className="ib-prim-k">{p.key}</span>
-                    <TextBlock truncatable text={p.value} preClassName="ib-prim-v" />
+                    <span
+                      className={`ib-prim-k${truncatable ? " clickable" : ""}`}
+                      onClick={
+                        truncatable
+                          ? (e) => {
+                              e.stopPropagation();
+                              togglePrim(pid);
+                            }
+                          : undefined
+                      }
+                      onMouseEnter={
+                        truncatable ? () => setHoveredPrimKey(pid) : undefined
+                      }
+                      onMouseLeave={
+                        truncatable
+                          ? () =>
+                              setHoveredPrimKey((cur) => (cur === pid ? null : cur))
+                          : undefined
+                      }
+                    >
+                      {p.key}
+                    </span>
+                    <TextBlock
+                      truncatable
+                      text={p.value}
+                      preClassName="ib-prim-v"
+                      open={primOpen}
+                    />
+                    {truncatable && isHover && <KeyCursorIcon open={primOpen} />}
                   </div>
                 );
               })}
