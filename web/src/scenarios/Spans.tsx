@@ -246,16 +246,28 @@ export function SpansScenario({ column }: { column: Column }) {
         <span className="dim">session</span>
         <select
           value={session ?? ""}
-          onChange={(e) =>
+          onChange={(e) => {
+            const next = e.target.value || undefined;
             updateColumn(column.id, {
               config: {
                 ...column.config,
-                session: e.target.value || undefined,
+                session: next,
                 selected_trace_id: undefined,
                 selected_span_id: undefined,
               },
-            })
-          }
+            });
+            // Mirror LiveSessions.onSelect: propagate the session change
+            // to sibling columns whose scenarios are session-scoped, so
+            // FileTouches / ChatDetail / other Spans columns stay in sync.
+            columns.forEach((c) => {
+              if (c.id === column.id) return;
+              if (
+                ["spans", "chat_detail", "file_touches"].includes(c.scenarioType)
+              ) {
+                updateColumn(c.id, { config: { ...c.config, session: next } });
+              }
+            });
+          }}
         >
           <option value="">all</option>
           {sessionsQ.data?.sessions.map((s) => {
