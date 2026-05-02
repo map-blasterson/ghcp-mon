@@ -6,6 +6,7 @@ import type { Column } from "../state/workspace";
 import type { SpanNode } from "../api/types";
 import { ColumnHeader } from "../components/ColumnHeader";
 import { KindBadge } from "../components/KindBadge";
+import { TextBlock } from "../components/TextBlock";
 import {
   NO_CONTENT_LINE,
   parseInputMessages,
@@ -860,14 +861,6 @@ function NodeView({
   const hasDiff = !!node.diffSegments && node.diffSegments.length > 0;
   const collapsible = hasChildren || hasPrim || hasDiff;
   const hov = hoveredNodeId === node.id;
-  const [expandedPrims, setExpandedPrims] = useState<Set<string>>(() => new Set());
-  const togglePrim = (id: string) => {
-    setExpandedPrims((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
 
   return (
     <div className={`ib-node ib-type-${node.type}`} style={{ marginLeft: depth === 0 ? 0 : 10 }}>
@@ -909,18 +902,10 @@ function NodeView({
             <div className="ib-prims">
               {node.primitive!.map((p, i) => {
                 const pid = `${node.id}__p${i}`;
-                const primOpen = expandedPrims.has(pid);
-                const isLong = p.value.length > 200 || p.value.includes("\n");
                 return (
                   <div className="ib-prim" key={pid}>
                     <span className="ib-prim-k">{p.key}</span>
-                    <span
-                      className={`ib-prim-v${isLong ? " ib-prim-v-clip" : ""}${isLong && primOpen ? " open" : ""}`}
-                      onClick={isLong ? (e) => { e.stopPropagation(); togglePrim(pid); } : undefined}
-                      title={isLong ? (primOpen ? "click to collapse" : "click to expand") : undefined}
-                    >
-                      {p.value}
-                    </span>
+                    <TextBlock truncatable text={p.value} preClassName="ib-prim-v" />
                   </div>
                 );
               })}

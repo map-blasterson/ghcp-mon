@@ -802,14 +802,43 @@ details[open] > summary::before { content: "▾ "; }
   -webkit-line-clamp: 5;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  cursor: zoom-in;
   position: relative;
 }
 .ib-prim-v-clip.open {
   display: block;
   -webkit-line-clamp: unset;
   overflow: visible;
-  cursor: zoom-out;
+}
+
+.tb-block {
+  position: relative;
+  min-width: 0;
+}
+.tb-block > pre {
+  margin: 0;
+}
+.tb-expand-hit {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--fg-mute);
+  z-index: 1;
+}
+.tb-expand-hit:hover {
+  background: var(--bg-1);
+}
+.tb-expand-hit > .ib-caret {
+  width: auto;
 }
 
 .te-tabs {
