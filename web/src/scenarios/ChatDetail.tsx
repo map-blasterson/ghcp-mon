@@ -289,6 +289,14 @@ interface BuildArgs {
   toolDefs: unknown[];
   inputMessages: Message[];
   outputMessages: Message[];
+  // Whether the underlying attribute key was present on the span. Absent
+  // keys cause the corresponding subtree to be omitted entirely (rather
+  // than rendered as "0 parts" or, in DELTA mode, as a phantom diff
+  // against the previous chat span).
+  hasSystem: boolean;
+  hasToolDefs: boolean;
+  hasInputMessages: boolean;
+  hasOutputMessages: boolean;
   mode: Mode;
   prior: { systemParts: Part[]; toolDefs: unknown[] } | null;
 }
@@ -500,41 +508,50 @@ function buildToolDefsNode(
 }
 
 function buildTree({
-  systemParts, toolDefs, inputMessages, outputMessages, mode, prior,
+  systemParts, toolDefs, inputMessages, outputMessages,
+  hasSystem, hasToolDefs, hasInputMessages, hasOutputMessages,
+  mode, prior,
 }: BuildArgs): Node {
-  const sysNode = buildSystemNode(systemParts, mode, prior);
-  const tdNode = buildToolDefsNode(toolDefs, mode, prior);
+  const inputChildren: Node[] = [];
+  if (hasSystem) inputChildren.push(buildSystemNode(systemParts, mode, prior));
+  if (hasToolDefs) inputChildren.push(buildToolDefsNode(toolDefs, mode, prior));
+  if (hasInputMessages) {
+    const inChildren = inputMessages.map((m, i) =>
+      buildMessageNode(m, `root/input/input_messages/${i}`),
+    );
+    inputChildren.push({
+      id: "root/input/input_messages", type: "input_messages_root", label: "input messages",
+      bytes: safeBytes(inputMessages), children: inChildren,
+      meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"} · per-turn delta`,
+    });
+  }
 
-  const inChildren = inputMessages.map((m, i) =>
-    buildMessageNode(m, `root/input/input_messages/${i}`),
-  );
-  const inMsgsNode: Node = {
-    id: "root/input/input_messages", type: "input_messages_root", label: "input messages",
-    bytes: safeBytes(inputMessages), children: inChildren,
-    meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"} · per-turn delta`,
-  };
-
-  const inputChildren = [sysNode, tdNode, inMsgsNode];
   const inputBytes = inputChildren.reduce((a, c) => a + c.bytes, 0);
-  const inputRoot: Node = {
-    id: "root/input", type: "input_root", label: "context input",
-    bytes: inputBytes, children: inputChildren,
-  };
+  const rootChildren: Node[] = [];
+  if (inputChildren.length > 0) {
+    rootChildren.push({
+      id: "root/input", type: "input_root", label: "context input",
+      bytes: inputBytes, children: inputChildren,
+    });
+  }
 
-  const outChildren = outputMessages.map((m, i) =>
-    buildMessageNode(m, `root/output/${i}`),
-  );
-  const outputBytes = safeBytes(outputMessages);
-  const outputRoot: Node = {
-    id: "root/output", type: "output_root", label: "context output",
-    bytes: outputBytes, children: outChildren,
-    meta: `${outputMessages.length} message${outputMessages.length === 1 ? "" : "s"}`,
-  };
+  let outputBytes = 0;
+  if (hasOutputMessages) {
+    const outChildren = outputMessages.map((m, i) =>
+      buildMessageNode(m, `root/output/${i}`),
+    );
+    outputBytes = safeBytes(outputMessages);
+    rootChildren.push({
+      id: "root/output", type: "output_root", label: "context output",
+      bytes: outputBytes, children: outChildren,
+      meta: `${outputMessages.length} message${outputMessages.length === 1 ? "" : "s"}`,
+    });
+  }
 
   return {
     id: "root", type: "root", label: "chat detail",
     bytes: inputBytes + outputBytes,
-    children: [inputRoot, outputRoot],
+    children: rootChildren,
   };
 }
 
@@ -628,11 +645,16 @@ export function ChatDetailScenario({ column }: { column: Column }) {
 
   const tree = useMemo<Node | null>(() => {
     if (!isChat) return null;
+    const attrs = a as Record<string, unknown>;
     return buildTree({
       systemParts: parseSystemInstructions(a),
       toolDefs: parseToolDefinitions(a),
       inputMessages: parseInputMessages(a),
       outputMessages: parseOutputMessages(a),
+      hasSystem: "gen_ai.system_instructions" in attrs,
+      hasToolDefs: "gen_ai.tool.definitions" in attrs,
+      hasInputMessages: "gen_ai.input.messages" in attrs,
+      hasOutputMessages: "gen_ai.output.messages" in attrs,
       mode,
       prior,
     });
