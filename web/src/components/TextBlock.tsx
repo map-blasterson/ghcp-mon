@@ -122,6 +122,11 @@ export function TextBlock({
   const iconRef = useRef<HTMLSpanElement | null>(null);
   const inputWrapRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // Last mouse position relative to the wrapper, kept in a ref so we can
+  // seed a freshly-mounted target (e.g. the search input on click) with an
+  // initial transform — otherwise it flashes at translate(0,0) (the
+  // header) until the next mousemove.
+  const lastMouseRef = useRef<{ x: number; y: number } | null>(null);
 
   const isLong =
     truncatable && typeof text === "string" &&
@@ -153,10 +158,18 @@ export function TextBlock({
     const target = phase === "active" ? inputWrapRef.current : iconRef.current;
     if (!target) return;
 
+    // Seed the new target with the last known cursor position so it doesn't
+    // flash at translate(0,0) (the header) until the first mousemove.
+    if (lastMouseRef.current) {
+      const { x, y } = lastMouseRef.current;
+      target.style.transform = `translate(${x}px, ${y}px)`;
+    }
+
     const onMove = (e: MouseEvent) => {
       const rect = wrap.getBoundingClientRect();
       const x = e.clientX - rect.left + ICON_OFFSET;
       const y = e.clientY - rect.top + ICON_OFFSET;
+      lastMouseRef.current = { x, y };
       target.style.transform = `translate(${x}px, ${y}px)`;
     };
     wrap.addEventListener("mousemove", onMove);
