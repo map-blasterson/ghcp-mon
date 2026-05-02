@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "ghcp-mon"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "assert_matches",
