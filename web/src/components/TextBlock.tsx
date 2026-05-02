@@ -190,7 +190,12 @@ export function TextBlock({
 
   // ---- exit wiring: column mouseleave, ESC, right-click -------------------
   const exitSearch = useCallback(() => {
-    setPhase("idle");
+    // If the cursor is still over the block, hop straight back to the
+    // icon phase so the ?/ glyph reappears immediately. Otherwise the
+    // user has to leave the block and re-enter to reactivate it because
+    // mouseenter doesn't refire while the cursor is already inside.
+    const stillHovering = !!wrapperRef.current?.matches(":hover");
+    setPhase(stillHovering ? "icon" : "idle");
     setQuery("");
     setMatchIndex(0);
     setMatchCount(0);
