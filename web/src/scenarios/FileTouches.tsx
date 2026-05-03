@@ -8,8 +8,8 @@ import { useLiveFeed } from "../state/live";
 import { parseToolCallArguments } from "../components/content";
 import type { SpanNode } from "../api/types";
 
-// File-touches scenario: aggregates every `view`, `edit`, and `create`
-// tool call observed in the selected session and lays the touched paths
+// File-touches scenario: aggregates every `view`, `edit`, `create`, and
+// `apply_patch` tool call observed in the selected session and lays the touched paths
 // out as a collapsible filesystem tree.
 //
 // Pure frontend composition — no new backend endpoint:
@@ -22,10 +22,11 @@ import type { SpanNode } from "../api/types";
 //      to end. The session-span-tree endpoint is trace-scoped and
 //      surfaces tool spans as soon as they land.
 //   2. Walk the tree: a SpanNode whose kind_class is "execute_tool" and
-//      whose name parses to view/edit/create is a candidate.
+//      whose name parses to view/edit/create/apply_patch is a candidate.
 //   3. /api/spans/:trace_id/:span_id per matching span (cached, shared
 //      with ToolDetail / ChatDetail via the ["span", trace, span]
-//      query key) to read gen_ai.tool.call.arguments.path.
+//      query key) to read gen_ai.tool.call.arguments.path, or patch file
+//      headers for apply_patch.
 //
 // Refreshes via the same WS feed Spans uses so newly-arrived tool calls
 // fold in live.
@@ -33,7 +34,7 @@ import type { SpanNode } from "../api/types";
 type AccessKind = "read" | "write" | "both";
 
 const READ_TOOLS = new Set(["view"]);
-const WRITE_TOOLS = new Set(["edit", "create"]);
+const WRITE_TOOLS = new Set(["edit", "create", "apply_patch"]);
 const TRACKED_TOOLS = new Set([...READ_TOOLS, ...WRITE_TOOLS]);
 
 interface Touch {
@@ -112,6 +113,35 @@ function accessClass(a: AccessKind | null): string {
   }
 }
 
+function extractApplyPatchPaths(args: unknown): string[] {
+  let patchText: string | null = null;
+  if (typeof args === "string") {
+    patchText = args;
+  } else if (args && typeof args === "object" && !Array.isArray(args)) {
+    const obj = args as Record<string, unknown>;
+    if (typeof obj.patch === "string") patchText = obj.patch;
+    else if (typeof obj.input === "string") patchText = obj.input;
+  }
+  if (!patchText) return [];
+
+  const paths = new Set<string>();
+  for (const line of patchText.split(/\r?\n/)) {
+    const match = line.match(
+      /^\*\*\* (?:(?:Add|Update|Delete) File:|Move to:) (.+)$/
+    );
+    const path = match?.[1]?.trim();
+    if (path) paths.add(path);
+  }
+  return [...paths];
+}
+
+function extractTouchPaths(toolName: string, args: unknown): string[] {
+  if (toolName === "apply_patch") return extractApplyPatchPaths(args);
+  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+  const path = (args as Record<string, unknown>).path;
+  return typeof path === "string" && path ? [path] : [];
+}
+
 export function FileTouchesScenario({ column }: { column: Column }) {
   const qc = useQueryClient();
   const columns = useWorkspace((s) => s.columns);
@@ -186,17 +216,16 @@ export function FileTouchesScenario({ column }: { column: Column }) {
       const d = detailQs[i]?.data;
       if (!d) continue;
       const args = parseToolCallArguments(d.span.attributes ?? {});
-      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
-      const path = (args as Record<string, unknown>).path;
-      if (typeof path !== "string" || !path) continue;
       const access: "read" | "write" = WRITE_TOOLS.has(s.tool_name) ? "write" : "read";
-      out.push({
-        path,
-        tool: s.tool_name,
-        access,
-        span_pk: s.span_pk,
-        start_ns: s.start_unix_ns,
-      });
+      for (const path of extractTouchPaths(s.tool_name, args)) {
+        out.push({
+          path,
+          tool: s.tool_name,
+          access,
+          span_pk: s.span_pk,
+          start_ns: s.start_unix_ns,
+        });
+      }
     }
     return out;
   }, [candidateSpans, detailQs]);
@@ -267,7 +296,7 @@ export function FileTouchesScenario({ column }: { column: Column }) {
       <ColumnHeader column={column}>
         <span
           className="ft-warn"
-          data-tip="This is a rough guess based on view/edit/create tool calls. It does not include file accesses performed via the bash/shell tool."
+          data-tip="This is a rough guess based on view/edit/create/apply_patch tool calls. It does not include file accesses performed via the bash/shell tool."
           aria-label="Approximate data warning"
         >
           [!]
@@ -308,7 +337,7 @@ export function FileTouchesScenario({ column }: { column: Column }) {
         ) : treeQ.isLoading ? (
           <div className="empty-state">loading spans…</div>
         ) : candidateSpans.length === 0 ? (
-          <div className="empty-state">no view / edit / create tool calls yet</div>
+          <div className="empty-state">no view / edit / create / apply_patch tool calls yet</div>
         ) : touches.length === 0 && detailsLoading ? (
           <div className="empty-state">loading tool args…</div>
         ) : touches.length === 0 ? (
