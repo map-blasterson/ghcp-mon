@@ -7,7 +7,6 @@ import { ColumnHeader } from "../components/ColumnHeader";
 import { useLiveFeed } from "../state/live";
 import { useHoverState } from "../state/hover";
 import { fmtNs, fmtClock, parseToolCallArguments } from "../components/content";
-import { SpanInspector } from "../components/Inspector";
 import { kindLabel, kindClass as kindCls, HashTag, RollingDots } from "../components/KindBadge";
 import type {
   KindClass,
@@ -196,8 +195,6 @@ export function SpansScenario({ column }: { column: Column }) {
     onPickSpan(trace_id, span_id, kind_class ?? "other");
   };
 
-  const inspectorTraceId = column.config.selected_trace_id;
-
   // "Follow latest tool call" convenience: if the user is currently
   // sitting on what was the most-recent tool span, auto-advance the
   // selection forward as new tool spans arrive. Once the user picks
@@ -300,40 +297,23 @@ export function SpansScenario({ column }: { column: Column }) {
           ))}
         </select>
       </ColumnHeader>
-      <div
-        className="col-body"
-        style={{ display: "grid", gridTemplateRows: "4fr 1fr", overflow: "hidden" }}
-      >
-        <div
-          className="list"
-          style={{ borderBottom: "1px solid var(--border)", overflow: "auto" }}
-        >
-          {session ? (
-            <SpanTreeView
-              tree={tree}
-              loading={sessionTreeQ.isLoading}
-              kindFilter={kind_filter}
-              selectedSpanId={selected_span_id}
-              onSelect={onPickSpan}
-            />
-          ) : (
-            <TracesList
-              rows={traces}
-              loading={tracesQ.isLoading}
-              kindFilter={kind_filter}
-              onSelect={onPickTrace}
-            />
-          )}
-        </div>
-        <div style={{ overflow: "auto" }}>
-          {!inspectorTraceId || !selected_span_id ? (
-            <div className="empty-state">
-              {session ? "select a span" : "select a trace"}
-            </div>
-          ) : (
-            <SpanInspector trace_id={inspectorTraceId} span_id={selected_span_id} />
-          )}
-        </div>
+      <div className="col-body list" style={{ overflow: "auto" }}>
+        {session ? (
+          <SpanTreeView
+            tree={tree}
+            loading={sessionTreeQ.isLoading}
+            kindFilter={kind_filter}
+            selectedSpanId={selected_span_id}
+            onSelect={onPickSpan}
+          />
+        ) : (
+          <TracesList
+            rows={traces}
+            loading={tracesQ.isLoading}
+            kindFilter={kind_filter}
+            onSelect={onPickTrace}
+          />
+        )}
       </div>
     </>
   );

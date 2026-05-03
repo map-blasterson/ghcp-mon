@@ -4,7 +4,7 @@ tags:
   - req/hlr
   - domain/traces
 ---
-The dashboard renders the trace/span hierarchy for a selected session as an expandable tree, falls back to a recent-traces list when no session is picked, lets the user inspect a span in place, and routes the selection to other columns based on span kind.
+The dashboard renders the trace/span hierarchy for a selected session as an expandable tree, falls back to a recent-traces list when no session is picked, and routes the selection to linked columns based on span kind so the user can inspect a span in a sibling detail column.
 
 ## Derived LLRs
 - [[Spans scenario two modes session vs traces]]
