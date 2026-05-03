@@ -507,6 +507,9 @@ function SpanTreeNode({
         {node.projection?.tool_call?.tool_name === "bash" && (
           <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />
         )}
+        {node.projection?.tool_call?.tool_name === "skill" && (
+          <SkillNameChip trace_id={node.trace_id} span_id={node.span_id} />
+        )}
         <ReportIntentTitle nodes={node.children} />
         <span className="sec">{fmtNs(dur)}</span>
         <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
@@ -688,4 +691,22 @@ function BashCommandChip({ trace_id, span_id }: { trace_id: string; span_id: str
       {overflow && <span className="tag" style={{ marginRight: 4 }}>…</span>}
     </>
   );
+}
+
+// Renders a green "skill" badge with the invoked skill's name. Pulls the
+// span's full attributes (cached under the same ["span", trace_id, span_id]
+// query key as BashCommandChip) and parses gen_ai.tool.call.arguments.skill.
+function SkillNameChip({ trace_id, span_id }: { trace_id: string; span_id: string }) {
+  const q = useQuery({
+    queryKey: ["span", trace_id, span_id],
+    queryFn: () => api.getSpan(trace_id, span_id),
+    enabled: !!trace_id && !!span_id,
+    staleTime: 30_000,
+  });
+  if (!q.data) return null;
+  const args = parseToolCallArguments(q.data.span.attributes ?? {});
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const skill = (args as Record<string, unknown>).skill;
+  if (typeof skill !== "string" || skill.length === 0) return null;
+  return <span className="tag skill" style={{ marginRight: 4 }}>{skill}</span>;
 }

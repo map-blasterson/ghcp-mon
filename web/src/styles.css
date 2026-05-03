@@ -343,6 +343,15 @@ a:hover { text-decoration: underline; }
   );
 }
 .tag.warn { color: var(--warn); border-color: var(--warn); }
+.tag.skill {
+  color: #d6ffd6;
+  border: 1px solid #3bff3b;
+  background: repeating-linear-gradient(
+    -45deg,
+    #2a2a2a 0 3px,
+    #145a14 3px 6px
+  );
+}
 
 /* Color-coded kind_class labels. Used everywhere a span's class is
    displayed (tree rows, inspector, breakdown header, trace chips). */
