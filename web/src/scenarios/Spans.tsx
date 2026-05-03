@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { Column } from "../state/workspace";
 import { useWorkspace } from "../state/workspace";
@@ -69,6 +69,18 @@ function findNextChatSiblingId(tree: SpanNode[], span_id: string): string | unde
     }
   }
   return undefined;
+}
+
+function flattenSpanTree(tree: SpanNode[]): SpanNode[] {
+  const rows: SpanNode[] = [];
+  const walk = (nodes: SpanNode[]) => {
+    for (const n of nodes) {
+      rows.push(n);
+      walk(n.children ?? []);
+    }
+  };
+  walk(tree);
+  return rows;
 }
 
 // Trace-centric scenario.
@@ -311,6 +323,7 @@ export function SpansScenario({ column }: { column: Column }) {
             rows={traces}
             loading={tracesQ.isLoading}
             kindFilter={kind_filter}
+            selectedSpanId={selected_span_id}
             onSelect={onPickTrace}
           />
         )}
@@ -325,11 +338,13 @@ function TracesList({
   rows,
   loading,
   kindFilter,
+  selectedSpanId,
   onSelect,
 }: {
   rows: TraceSummary[];
   loading: boolean;
   kindFilter: KindClass | undefined;
+  selectedSpanId: string | undefined;
   onSelect: (trace_id: string, span_id?: string, kind_class?: KindClass) => void;
 }) {
   // The kind filter dims traces that have zero spans of that kind so the
@@ -344,6 +359,32 @@ function TracesList({
     [rows, kindFilter]
   );
 
+  const selectableRows = useMemo(
+    () => decorated.filter(({ r }) => r.root?.span_id),
+    [decorated]
+  );
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    if (selectableRows.length === 0) return;
+
+    const current = selectableRows.findIndex(
+      ({ r }) => r.root?.span_id === selectedSpanId
+    );
+    const nextIndex =
+      e.key === "ArrowDown"
+        ? current < 0
+          ? 0
+          : Math.min(current + 1, selectableRows.length - 1)
+        : current < 0
+          ? selectableRows.length - 1
+          : Math.max(current - 1, 0);
+    const next = selectableRows[nextIndex].r.root;
+    if (!next || next.span_id === selectedSpanId) return;
+    onSelect(selectableRows[nextIndex].r.trace_id, next.span_id, next.kind_class);
+  };
+
   if (loading) return <div className="empty-state">loading…</div>;
   if (rows.length === 0)
     return (
@@ -354,7 +395,11 @@ function TracesList({
     );
 
   return (
-    <>
+    <div
+      tabIndex={0}
+      onMouseDown={(e) => e.currentTarget.focus({ preventScroll: true })}
+      onKeyDown={onKeyDown}
+    >
       {decorated.map(({ r, dim }) => {
         const dur =
           r.first_seen_ns != null && r.last_seen_ns != null
@@ -365,7 +410,7 @@ function TracesList({
         return (
           <div
             key={r.trace_id}
-            className={`row${dim ? " dim" : ""}`}
+            className={`row${r.root?.span_id === selectedSpanId ? " sel" : ""}${dim ? " dim" : ""}`}
             onClick={() => onSelect(r.trace_id, r.root?.span_id, r.root?.kind_class)}
           >
             <span className="pri mono">{rootName}</span>
@@ -381,7 +426,7 @@ function TracesList({
           </div>
         );
       })}
-    </>
+    </div>
   );
 }
 
@@ -421,10 +466,34 @@ function SpanTreeView({
   selectedSpanId: string | undefined;
   onSelect: (t: string, s: string, k: KindClass) => void;
 }) {
+  const rows = useMemo(() => flattenSpanTree(tree), [tree]);
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    if (rows.length === 0) return;
+
+    const current = rows.findIndex((n) => n.span_id === selectedSpanId);
+    const nextIndex =
+      e.key === "ArrowDown"
+        ? current < 0
+          ? 0
+          : Math.min(current + 1, rows.length - 1)
+        : current < 0
+          ? rows.length - 1
+          : Math.max(current - 1, 0);
+    const next = rows[nextIndex];
+    if (!next || next.span_id === selectedSpanId) return;
+    onSelect(next.trace_id, next.span_id, next.kind_class);
+  };
+
   if (loading) return <div className="empty-state">loading…</div>;
   if (tree.length === 0) return <div className="empty-state">no spans in trace</div>;
   return (
-    <>
+    <div
+      tabIndex={0}
+      onMouseDown={(e) => e.currentTarget.focus({ preventScroll: true })}
+      onKeyDown={onKeyDown}
+    >
       {tree.map((n) => (
         <SpanTreeNode
           key={n.span_pk}
@@ -436,7 +505,7 @@ function SpanTreeView({
           chatAncestorPk={null}
         />
       ))}
-    </>
+    </div>
   );
 }
 
@@ -470,9 +539,14 @@ function SpanTreeNode({
     node.kind_class === "chat" ? node.span_pk : chatAncestorPk;
   const childChatAncestorPk =
     node.kind_class === "chat" ? node.span_pk : chatAncestorPk;
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (sel) rowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [sel]);
   return (
     <div>
       <div
+        ref={rowRef}
         className={`row${sel ? " sel" : ""}${dim ? " dim" : ""}`}
         style={{ paddingLeft: depth * 12 + 6 }}
         onClick={() => onSelect(node.trace_id, node.span_id, node.kind_class)}
