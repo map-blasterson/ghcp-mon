@@ -2,7 +2,7 @@
 
 Local-first telemetry collector + realtime dashboard for the GitHub Copilot CLI's OpenTelemetry export.
 
-![screenshot](doc/screenshot.png)
+<img width="2875" height="1803" alt="image" src="https://github.com/user-attachments/assets/800253d9-ac66-424e-af47-b49ef39d7838" />
 
 ## Usage
 
