@@ -34,7 +34,7 @@ export function App() {
           ))}
         </select>
         <button onClick={reset} title="Reset to default workspace">reset</button>
-        <span className="dim">ws</span>
+        <span className="dim">{connected ? "connected" : "disconnected"}</span>
         <span className={`status-dot${connected ? " on" : ""}`} title={connected ? "connected" : "disconnected"} />
       </div>
       <Workspace />
