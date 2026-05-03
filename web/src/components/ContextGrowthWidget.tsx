@@ -308,6 +308,7 @@ function Legend() {
       style={{ display: "flex", gap: 10, fontSize: 11, color: "var(--fg-dim)" }}
     >
       <span><Sw c="#60a5fa" />input</span>
+      <span><Sw c="#93c5fd" />sub-agent input</span>
       <span><Sw c="#fb923c" />output</span>
       <span><Sw c="#fde047" />reasoning</span>
       <span style={{ color: "#facc15" }}>┄ limit</span>
@@ -383,7 +384,7 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
             display: "flex",
             alignItems: "flex-end",
             justifyContent: "flex-start",
-            gap: 2,
+            gap: 3,
             minWidth: 0,
           }}
         >
@@ -405,7 +406,7 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
               title={`token_limit = ${maxLimit}`}
             />
           )}
-          {rows.map(({ m, info }, i) => {
+          {rows.map(({ m, info }) => {
             const isSub = info.invokeAgentDepth > 1;
             const rawInp = m.input_tokens ?? 0;
             const cacheR = m.cache_read_tokens ?? 0;
@@ -416,21 +417,9 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
             const out = m.output_tokens ?? 0;
             const rea = m.reasoning_tokens ?? 0;
             const total = inp + out + rea;
-            const prevIsSub =
-              i > 0 ? rows[i - 1].info.invokeAgentDepth > 1 : isSub;
-            const nextIsSub =
-              i < rows.length - 1
-                ? rows[i + 1].info.invokeAgentDepth > 1
-                : isSub;
-            const groupBreak = i > 0 && prevIsSub !== isSub;
-            // Sub-agent tint extends 3px past the cell only at the run
-            // boundaries; interior cells of a sub-agent run paint flush
-            // so adjacent overlays don't double-brighten.
-            const tintLeft = isSub && !prevIsSub ? -3 : 0;
-            const tintRight = isSub && !nextIsSub ? -3 : 0;
             const isHovered = hoveredChatPk === info.span_pk;
             const colors = {
-              input: "#60a5fa",
+              input: isSub ? "#93c5fd" : "#60a5fa",
               output: "#fb923c",
               reasoning: "#fde047",
             };
@@ -451,7 +440,6 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                   height: "100%",
                   display: "flex",
                   flexDirection: "column-reverse",
-                  marginLeft: groupBreak ? 6 : 0,
                   borderBottom: `4px solid ${
                     isHovered ? "#facc15" : "transparent"
                   }`,
@@ -467,21 +455,6 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                   (isSub ? "\n(sub-agent)" : "")
                 }
               >
-                {isSub && (
-                  <div
-                    aria-hidden
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      bottom: 0,
-                      left: tintLeft,
-                      right: tintRight,
-                      background: "rgba(255,255,255,0.08)",
-                      pointerEvents: "none",
-                      zIndex: 0,
-                    }}
-                  />
-                )}
                 <div
                   style={{
                     position: "relative",

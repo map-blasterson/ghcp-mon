@@ -9,7 +9,7 @@ A persistent widget at the bottom of the workspace charts per-turn context-token
 ## Derived LLRs
 - [[Context widget binds to first column session]]
 - [[Context widget includes sub-agent chats]]
-- [[Context widget tints sub-agent column background]]
+- [[Context widget colors sub-agent input bar distinctly]]
 - [[Context widget chart visual styling]]
 - [[Context widget stack chart per turn]]
 - [[Context widget drag resize 5 to 80 vh]]
