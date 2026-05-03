@@ -378,7 +378,8 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
           style={{
             flex: 1,
             position: "relative",
-            padding: "6px 8px 0 0",
+            padding: "0 8px 0 0",
+            borderTop: "1px solid var(--border)",
             display: "flex",
             alignItems: "flex-end",
             justifyContent: "flex-start",
