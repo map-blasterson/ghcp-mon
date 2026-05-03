@@ -867,6 +867,19 @@ details[open] > summary::before { content: "▾ "; }
   -webkit-user-select: text;
 }
 
+/* When search is active in a prim row, suppress the sibling [+]/[-]
+ * cursor icon (it follows hover on the prim-k label and would
+ * otherwise appear alongside the floating ?/ input). */
+.ib-prim:has(.tb-block.tb-active) .kc-cursor-icon { display: none; }
+
+/* The floating ?/ search input only follows the cursor while it's
+ * over the block (mousemove only fires there). When the cursor
+ * leaves, hide the input so it doesn't sit stranded at the last
+ * position; it reappears at the cursor on re-entry. */
+.tb-block.tb-active:not(:hover) .tb-search-input-wrap {
+  visibility: hidden;
+}
+
 .tb-search-icon {
   position: absolute;
   top: 0;
