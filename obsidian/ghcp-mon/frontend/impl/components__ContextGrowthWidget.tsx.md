@@ -10,7 +10,7 @@ Original source file for reverse-engineered requirements.
 
 ## Source For
 - [[Context widget binds to first column session]]
-- [[Context widget excludes sub-agent chats]]
+- [[Context widget includes sub-agent chats]]
 - [[Context widget stack chart per turn]]
 - [[Context widget drag resize 5 to 80 vh]]
 - [[Context widget hide and show toggle]]
