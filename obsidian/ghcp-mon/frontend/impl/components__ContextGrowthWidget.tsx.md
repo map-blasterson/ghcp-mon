@@ -16,3 +16,4 @@ Original source file for reverse-engineered requirements.
 - [[Context widget hide and show toggle]]
 - [[Context widget hovered chat highlights matching column]]
 - [[Context widget live invalidation on chat turn and span events]]
+- [[Context widget merges chat span snapshots per span_pk]]

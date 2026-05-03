@@ -21,3 +21,5 @@ This CSS file defines the visual rules referenced by class names from the React 
 - [[Chat detail key cursor icon follows pointer]]
 - [[Chat detail mode toggle DELTA FULL]]
 - [[Chat detail DELTA diffs against prior chat span]]
+- [[Skill name chip shows skill argument]]
+- [[TextBlock search header shows match counter]]

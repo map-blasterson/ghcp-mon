@@ -18,3 +18,5 @@ Original source file for reverse-engineered requirements.
 - [[Traces list dims rows below kind filter]]
 - [[Span tree row publishes hovered chat ancestor]]
 - [[Bash command chip extracts primary words]]
+- [[Skill name chip shows skill argument]]
+- [[Report intent title shows on parent row]]

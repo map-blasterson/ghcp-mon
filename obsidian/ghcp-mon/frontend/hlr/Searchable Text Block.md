@@ -15,3 +15,4 @@ Any sufficiently large rendered-text block in the dashboard offers an inline, cu
 - [[TextBlock exits search on column-body leave or right-click]]
 - [[TextBlock current match scrolls into view]]
 - [[TextBlock truncatable controlled by open prop]]
+- [[TextBlock search header shows match counter]]

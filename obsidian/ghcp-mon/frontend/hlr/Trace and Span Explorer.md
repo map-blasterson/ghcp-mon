@@ -16,6 +16,8 @@ The dashboard renders the trace/span hierarchy for a selected session as an expa
 - [[Traces list dims rows below kind filter]]
 - [[Span tree row publishes hovered chat ancestor]]
 - [[Bash command chip extracts primary words]]
+- [[Skill name chip shows skill argument]]
+- [[Report intent title shows on parent row]]
 - [[Span inspector fetches and renders detail]]
 - [[Span detail view renders projection sub-blocks]]
 - [[Span detail view shows parent and children]]
