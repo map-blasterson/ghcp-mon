@@ -116,6 +116,7 @@ export function ContextGrowthWidget() {
         input_tokens: null,
         output_tokens: null,
         reasoning_tokens: null,
+        cache_read_tokens: null,
         latest_ns: -1,
       };
       if (s.token_limit != null && (cur.token_limit == null || s.token_limit > cur.token_limit)) {
@@ -125,11 +126,13 @@ export function ContextGrowthWidget() {
         if (s.input_tokens != null) cur.input_tokens = s.input_tokens;
         if (s.output_tokens != null) cur.output_tokens = s.output_tokens;
         if (s.reasoning_tokens != null) cur.reasoning_tokens = s.reasoning_tokens;
+        if (s.cache_read_tokens != null) cur.cache_read_tokens = s.cache_read_tokens;
         cur.latest_ns = s.captured_ns;
       } else {
         if (cur.input_tokens == null && s.input_tokens != null) cur.input_tokens = s.input_tokens;
         if (cur.output_tokens == null && s.output_tokens != null) cur.output_tokens = s.output_tokens;
         if (cur.reasoning_tokens == null && s.reasoning_tokens != null) cur.reasoning_tokens = s.reasoning_tokens;
+        if (cur.cache_read_tokens == null && s.cache_read_tokens != null) cur.cache_read_tokens = s.cache_read_tokens;
       }
       byPk.set(s.span_pk, cur);
     }
@@ -144,21 +147,21 @@ export function ContextGrowthWidget() {
   const { maxLimit, yMax } = useMemo(() => {
     let ml = 0;
     let mc = 0;
-    for (const { m } of rows) {
-      if (m.token_limit != null && m.token_limit > ml) ml = m.token_limit;
-      const tot =
-        (m.input_tokens ?? 0) +
-        (m.output_tokens ?? 0) +
-        (m.reasoning_tokens ?? 0);
-      if (tot > mc) mc = tot;
+    // maxCurrent is the max `current_tokens` reported by usage_info_event
+    // snapshots (i.e., the largest observed context-window occupancy),
+    // not the max bar height. Sub-agent chat spans don't emit
+    // usage_info_event, so their per-call prompt sizes (which can be
+    // millions of tokens because they replay history) don't dominate
+    // the y-axis — they clip above the chart instead.
+    for (const s of snapshots) {
+      if (s.token_limit != null && s.token_limit > ml) ml = s.token_limit;
+      if (s.current_tokens != null && s.current_tokens > mc) {
+        mc = s.current_tokens;
+      }
     }
-    // When a token_limit is known, extend the y-axis to show it (with
-    // ~10% headroom) so the dotted yellow limit line is visible above
-    // the bars. When no snapshot carries a token_limit, fall back to
-    // the tallest bar.
     const yMax = ml > 0 ? Math.max(ml * 1.10, mc) : mc || 1;
     return { maxLimit: ml, yMax };
-  }, [rows]);
+  }, [snapshots]);
 
   if (!visible) {
     return (
@@ -275,6 +278,7 @@ interface MergedRow {
   input_tokens: number | null;
   output_tokens: number | null;
   reasoning_tokens: number | null;
+  cache_read_tokens: number | null;
   latest_ns: number;
 }
 
@@ -401,14 +405,29 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
             />
           )}
           {rows.map(({ m, info }, i) => {
-            const inp = m.input_tokens ?? 0;
+            const rawInp = m.input_tokens ?? 0;
+            const cacheR = m.cache_read_tokens ?? 0;
+            // input_tokens from the API is the full prompt size for the
+            // call, which includes cache_read_tokens (the cached portion
+            // re-sent to the model). For the chart we want only the
+            // fresh, non-cached input.
+            const inp = Math.max(0, rawInp - cacheR);
             const out = m.output_tokens ?? 0;
             const rea = m.reasoning_tokens ?? 0;
             const total = inp + out + rea;
             const isSub = info.invokeAgentDepth > 1;
             const prevIsSub =
               i > 0 ? rows[i - 1].info.invokeAgentDepth > 1 : isSub;
+            const nextIsSub =
+              i < rows.length - 1
+                ? rows[i + 1].info.invokeAgentDepth > 1
+                : isSub;
             const groupBreak = i > 0 && prevIsSub !== isSub;
+            // Sub-agent tint extends 3px past the cell only at the run
+            // boundaries; interior cells of a sub-agent run paint flush
+            // so adjacent overlays don't double-brighten.
+            const tintLeft = isSub && !prevIsSub ? -3 : 0;
+            const tintRight = isSub && !nextIsSub ? -3 : 0;
             const isHovered = hoveredChatPk === info.span_pk;
             const colors = {
               input: "#60a5fa",
@@ -440,7 +459,7 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                 }}
                 title={
                   `span_pk=${info.span_pk}\n` +
-                  `input=${inp}\n` +
+                  `input=${inp} (raw=${rawInp}, cache_read=${cacheR})\n` +
                   `output=${out}\n` +
                   `reasoning=${rea}\n` +
                   `total=${total}\n` +
@@ -455,8 +474,8 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                       position: "absolute",
                       top: 0,
                       bottom: 0,
-                      left: -3,
-                      right: -3,
+                      left: tintLeft,
+                      right: tintRight,
                       background: "rgba(255,255,255,0.08)",
                       pointerEvents: "none",
                       zIndex: 0,
