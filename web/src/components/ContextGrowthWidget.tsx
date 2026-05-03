@@ -218,20 +218,18 @@ export function ContextGrowthWidget() {
           flex: "0 0 auto",
         }}
       />
-      <div
-        className="ctx-header"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "2px 6px",
-          fontSize: 12,
-          flex: "0 0 auto",
-        }}
-      >
-        <span className="dim">context growth</span>
-        {session && <span className="dim">— {session}</span>}
-        <span style={{ flex: 1 }} />
+      <div className="ctx-widget-header" style={{ flex: "0 0 auto" }}>
+        <span className="brand-mini">context growth</span>
+        {session && (
+          <>
+            <span className="dim">session</span>
+            <span className="mono">{session.slice(0, 8)}</span>
+          </>
+        )}
+        <span className="dim">
+          {rows.length} turn{rows.length === 1 ? "" : "s"}
+        </span>
+        <span className="spacer" />
         <Legend />
         <button
           onClick={() => setVisible(false)}
@@ -311,7 +309,6 @@ function Legend() {
       <span><Sw c="#93c5fd" />sub-agent input</span>
       <span><Sw c="#fb923c" />output</span>
       <span><Sw c="#fde047" />reasoning</span>
-      <span style={{ color: "#facc15" }}>┄ limit</span>
     </div>
   );
 }
