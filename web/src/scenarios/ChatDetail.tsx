@@ -193,7 +193,10 @@ function buildPartNode(part: Part, idPath: string): Node {
     const preview = content.length > 80 ? content.slice(0, 80) + "…" : content;
     return {
       id: idPath, type: ibType, label: t, bytes, children: [],
-      primitive: [{ key: "content", value: stringifyPrim(content) }],
+      // Render content raw (no JSON.stringify wrapping) so embedded
+      // newlines render as actual line breaks via the .ib-prim-v
+      // `white-space: pre-wrap` rule, matching tool_call_response.
+      primitive: [{ key: "content", value: content }],
       meta: `${content.length} ch · "${preview.replace(/\n/g, " ")}"`,
     };
   }
@@ -273,7 +276,8 @@ function buildToolDefNode(def: unknown, idPath: string): Node {
       { key: "type", value: stringifyPrim(t) },
       { key: "name", value: stringifyPrim(name) },
     ];
-    if (desc) primitive.push({ key: "description", value: stringifyPrim(desc) });
+    // Render description raw so embedded newlines render as line breaks.
+    if (desc) primitive.push({ key: "description", value: desc });
     return {
       id: idPath, type: "tool_def", label: name, bytes: safeBytes(def),
       children: paramsNode ? [paramsNode] : [], primitive, meta: t,
@@ -385,7 +389,9 @@ function buildSystemPartChildren(systemParts: Part[], idBase: string): Node[] {
       return {
         id: `${idBase}/parts/${i}`, type: "system_part", label: t,
         bytes: safeBytes(p), children: [],
-        primitive: [{ key: "content", value: stringifyPrim(content) }],
+        // Render content raw (no JSON.stringify wrapping) so embedded
+        // newlines render as line breaks.
+        primitive: [{ key: "content", value: content }],
         meta: `${content.length} ch`,
       };
     }
