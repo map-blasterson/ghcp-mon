@@ -1,5 +1,7 @@
 /target
 /data
+/dist
+/obsidian/ghcp-mon/.obsidian/workspace.json
 *.db
 *.db-wal
 *.db-shm
