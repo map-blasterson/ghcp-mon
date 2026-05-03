@@ -405,17 +405,16 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
             />
           )}
           {rows.map(({ m, info }, i) => {
+            const isSub = info.invokeAgentDepth > 1;
             const rawInp = m.input_tokens ?? 0;
             const cacheR = m.cache_read_tokens ?? 0;
-            // input_tokens from the API is the full prompt size for the
-            // call, which includes cache_read_tokens (the cached portion
-            // re-sent to the model). For the chart we want only the
-            // fresh, non-cached input.
-            const inp = Math.max(0, rawInp - cacheR);
+            // For sub-agents, exclude cache_read_tokens (the replayed
+            // cached prompt) so the bar reflects only fresh per-call
+            // input. For the root agent, keep input_tokens as-is.
+            const inp = isSub ? Math.max(0, rawInp - cacheR) : rawInp;
             const out = m.output_tokens ?? 0;
             const rea = m.reasoning_tokens ?? 0;
             const total = inp + out + rea;
-            const isSub = info.invokeAgentDepth > 1;
             const prevIsSub =
               i > 0 ? rows[i - 1].info.invokeAgentDepth > 1 : isSub;
             const nextIsSub =
