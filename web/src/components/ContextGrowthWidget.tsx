@@ -169,16 +169,13 @@ export function ContextGrowthWidget() {
         className="ctx-collapsed"
         onClick={() => setVisible(true)}
         style={{
-          position: "fixed",
-          left: 6,
-          bottom: 6,
           padding: "2px 8px",
           background: "var(--bg-1)",
           color: "var(--fg)",
-          border: "1px solid var(--border)",
-          borderRadius: 3,
+          border: "none",
+          borderTop: "1px solid var(--border)",
+          textAlign: "left",
           cursor: "pointer",
-          zIndex: 50,
         }}
         title="show context growth"
       >
@@ -191,17 +188,12 @@ export function ContextGrowthWidget() {
     <div
       className="ctx-widget"
       style={{
-        position: "fixed",
-        left: 0,
-        right: 0,
-        bottom: 0,
         height: `${heightVh}vh`,
         background: "var(--bg-1)",
         color: "var(--fg)",
         borderTop: "1px solid var(--border)",
         display: "flex",
         flexDirection: "column",
-        zIndex: 40,
       }}
     >
       <div
@@ -395,8 +387,8 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                 top: `${limitTopPct}%`,
                 height: 1,
                 backgroundImage:
-                  "linear-gradient(to right, #facc15 0, #facc15 10px, transparent 10px, transparent 16px)",
-                backgroundSize: "16px 1px",
+                  "linear-gradient(to right, rgba(250, 204, 21, 0.6) 0, rgba(250, 204, 21, 0.6) 4px, transparent 4px, transparent 8px)",
+                backgroundSize: "8px 1px",
                 backgroundRepeat: "repeat-x",
                 pointerEvents: "none",
               }}

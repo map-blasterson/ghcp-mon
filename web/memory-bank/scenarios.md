@@ -38,6 +38,26 @@ The HLRs covered here are:
 - **Follow latest tool span.** While `selected_span_id` matches the previously-latest tool span (kind `execute_tool` or `external_tool`) in the session tree, auto-advances the selection to the new latest tool span when one arrives; stops auto-advancing as soon as the user changes selection away. (`frontend/llr/Spans follows latest tool span.md`)
 - **Traces list dimming.** When `kind_filter` is set in trace-list mode, rows whose `kind_counts[kind_filter] === 0` get the `dim` class; they are NOT hidden, so placeholder/partial traces remain visible. (`frontend/llr/Traces list dims rows below kind filter.md`)
 - **Hover ancestor publishing.** On `mouseenter` over a span tree row, publishes via `useHoverState.setHoveredChatPk` the `span_pk` of the row's nearest chat ancestor (or itself if it is a chat span), or `null` if no chat ancestor; on `mouseleave` publishes `null`. Drives the cross-component highlight in the Context Growth widget. (`frontend/llr/Span tree row publishes hovered chat ancestor.md`)
+- **Skill name chip.** For every span tree row whose
+  `projection.tool_call.tool_name === "skill"`, fetches detail via the shared
+  `["span", trace_id, span_id]` query (`staleTime: 30_000`), parses
+  `gen_ai.tool.call.arguments` via `parseToolCallArguments`, and — when the
+  parsed value is a non-array object whose `skill` property is a non-empty
+  string — renders `<span class="tag skill">{skill}</span>` on the row. The
+  `.tag.skill` style (green diagonal-stripe background) distinguishes it from
+  the bash command chips. (`frontend/llr/Skill name chip shows skill argument.md`)
+- **Report intent title on parent row.** For every span tree row, scans the
+  row's direct children for spans whose
+  `projection.tool_call.tool_name === "report_intent"`, picks the one with the
+  largest `start_unix_ns ?? span_pk ?? 0` (latest by start time), fetches its
+  detail via the shared `["span", trace_id, span_id]` query
+  (`staleTime: 30_000`), parses `gen_ai.tool.call.arguments` via
+  `parseToolCallArguments`, and — when the parsed value is a non-array object
+  whose `intent` property is a non-empty string — renders that text as a
+  white-coloured title appended to the parent row
+  (`<span style="margin-left: 6px; color: #fff">{intent}</span>`). Surfaces the
+  agent's announced intent on the parent (typically `invoke_agent` or `chat`)
+  row without expanding it. (`frontend/llr/Report intent title shows on parent row.md`)
 - **Bash command chips.** For every span tree row whose `projection.tool_call.tool_name === "bash"`, fetches detail via `["span", trace_id, span_id]`, parses `gen_ai.tool.call.arguments.command`, splits on whitespace-bounded `&&` / `||` / `|`, takes the first non-`KEY=value` token of each segment, basenames it, truncates at 24 chars (with `…`), and renders up to 6 hash-coloured chips with a `…` overflow chip when there are more. (`frontend/llr/Bash command chip extracts primary words.md`)
 - **Span inspector.** `SpanInspector` runs `useQuery({ queryKey: ["span", trace_id, span_id], queryFn: () => api.getSpan(...) })`, rendering `"loading…"` while pending, `"span not found"` on error/no-data, and otherwise `SpanDetailView`. The query key is shared with sibling scenarios so the cache hits across columns. (`frontend/llr/Span inspector fetches and renders detail.md`)
 - **Detail view — projections.** `SpanDetailView` renders every projection sub-block present on `detail.projection` (`chat_turn`, `tool_call`, `agent_run`, `external_tool_call`) inside an open `<details>` block whose body is a `JsonView` of the projection record; omits the section entirely when `projection` is empty. (`frontend/llr/Span detail view renders projection sub-blocks.md`)
@@ -165,6 +185,8 @@ Functionally these three LLRs are essential to ToolDetail's behavior (native-vs-
 - `frontend/llr/Traces list dims rows below kind filter.md`
 - `frontend/llr/Span tree row publishes hovered chat ancestor.md`
 - `frontend/llr/Bash command chip extracts primary words.md`
+- `frontend/llr/Skill name chip shows skill argument.md`
+- `frontend/llr/Report intent title shows on parent row.md`
 - `frontend/llr/Span inspector fetches and renders detail.md`
 - `frontend/llr/Span detail view renders projection sub-blocks.md`
 - `frontend/llr/Span detail view shows parent and children.md`

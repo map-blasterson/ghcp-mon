@@ -79,6 +79,16 @@ primitives via the registry plumbed through `Column`.
   across reloads, so users can mentally map tool/agent names to hues
   (`Hash color stable hue via FNV-1a`).
 
+### Searchable text block (TextBlock)
+
+- While `TextBlock` is in the `active` search phase, it renders a sticky
+  `<div class="tb-search-header" aria-hidden="true">` at the top of the block
+  containing two spans: the left span reads `"${matchIndex + 1} of
+  ${matchCount} matches"` when `query` is non-empty and `matchCount > 0`, and
+  `"0 matches"` otherwise; the right span is the static keybinding hint
+  `"(shift)+LMB (prev)/(next)"`
+  (`TextBlock search header shows match counter`).
+
 ### Content & format helpers (content.ts, MessageView, JsonView, CodeBlock)
 
 - `attrs(span)` returns `span.attributes` when it is a non-null object;
@@ -154,6 +164,20 @@ primitives via the registry plumbed through `Column`.
   whose `invoke_agent` ancestor depth is `≤ 1`. This avoids double-counting
   sub-agent chat turns against the parent agent's context budget
   (`Context widget excludes sub-agent chats`).
+- For each admitted chat span, the widget merges its per-`span_pk`
+  `context_snapshots` into a single `MergedRow`
+  `{ span_pk, token_limit, input_tokens, output_tokens, reasoning_tokens,
+  cache_read_tokens, latest_ns }`: snapshots whose `span_pk` is null or absent
+  from the chat-span map are dropped; `token_limit` is the maximum non-null
+  value seen; the four token counters take the value from the snapshot with
+  the largest `captured_ns` (overwriting only when non-null) and back-fill any
+  still-null field from any earlier snapshot carrying a non-null value. Merged
+  rows are returned sorted ascending by the chat span's `start_unix_ns`
+  (null treated as `0`). This combines the per-turn `usage_info_event`
+  snapshot (carrying `token_limit` + `current_tokens`) with the `chat_span`
+  snapshot (carrying `input` / `output` / `reasoning` / `cache_read`) into one
+  row per turn regardless of arrival order
+  (`Context widget merges chat span snapshots per span_pk`).
 - The chart renders one stacked column per chat turn (one bar per `span_pk`),
   with stacked sub-bars for `input`, `output`, and `reasoning` token counts,
   and overlays a horizontal limit line at the maximum `token_limit` observed
@@ -329,6 +353,8 @@ Exported components/functions per file (named precisely from the LLRs):
   - `frontend/llr/Context widget hide and show toggle.md`
   - `frontend/llr/Context widget hovered chat highlights matching column.md`
   - `frontend/llr/Context widget live invalidation on chat turn and span events.md`
+  - `frontend/llr/Context widget merges chat span snapshots per span_pk.md`
+  - `frontend/llr/TextBlock search header shows match counter.md`
 
 - **Source files (under `web/src/components/`):**
   - `CodeBlock.tsx`
@@ -340,4 +366,5 @@ Exported components/functions per file (named precisely from the LLRs):
   - `JsonView.tsx`
   - `KindBadge.tsx`
   - `MessageView.tsx`
+  - `TextBlock.tsx`
   - `Workspace.tsx`
