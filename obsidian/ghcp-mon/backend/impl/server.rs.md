@@ -14,3 +14,4 @@ Original source file for reverse-engineered requirements.
 - [[OTLP body limit 64 MiB]]
 - [[API router exposes session and span endpoints]]
 - [[API allows any origin via CORS]]
+- [[API body limit 64 MiB]]

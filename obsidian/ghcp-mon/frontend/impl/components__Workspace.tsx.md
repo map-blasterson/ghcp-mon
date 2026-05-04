@@ -10,6 +10,7 @@ Original source file for reverse-engineered requirements.
 
 ## Source For
 - [[Workspace lays out columns by weight with ResizeObserver]]
-- [[Workspace minimum column width 120 px]]
+- [[Workspace minimum column width 280 px]]
 - [[Resizer drag rebalances two adjacent column weights]]
 - [[Empty workspace shows empty state]]
+- [[Workspace measures natural min-content width per column]]

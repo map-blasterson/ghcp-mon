@@ -19,3 +19,4 @@ Original source file for reverse-engineered requirements.
 - [[TextBlock truncatable controlled by open prop]]
 - [[TextBlock search header shows match counter]]
 - [[TextBlock accepts external search query prop]]
+- [[TextBlock external query suppresses interactive exit gestures]]

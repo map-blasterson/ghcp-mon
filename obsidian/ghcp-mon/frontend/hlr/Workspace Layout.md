@@ -15,7 +15,7 @@ The dashboard presents the user with a configurable workspace of side-by-side sc
 - [[Workspace migration drops obsolete scenario types]]
 - [[Default workspace seeds four columns]]
 - [[Workspace lays out columns by weight with ResizeObserver]]
-- [[Workspace minimum column width 120 px]]
+- [[Workspace minimum column width 280 px]]
 - [[Resizer drag rebalances two adjacent column weights]]
 - [[Empty workspace shows empty state]]
 - [[Column body dispatches by scenario type]]

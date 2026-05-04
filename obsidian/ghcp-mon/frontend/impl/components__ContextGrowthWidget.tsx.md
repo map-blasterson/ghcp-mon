@@ -17,3 +17,6 @@ Original source file for reverse-engineered requirements.
 - [[Context widget hovered chat highlights matching column]]
 - [[Context widget live invalidation on chat turn and span events]]
 - [[Context widget merges chat span snapshots per span_pk]]
+- [[Context widget bar click selects chat in Spans column]]
+- [[Context widget colors sub-agent input bar distinctly]]
+- [[Context widget chart visual styling]]

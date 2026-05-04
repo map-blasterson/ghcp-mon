@@ -24,3 +24,5 @@ Original source file for reverse-engineered requirements.
 - [[API delete session purges traces and projections]]
 - [[API list sessions enriched with local workspace metadata]]
 - [[API session detail enriched with local workspace metadata]]
+- [[API search spans by text within session]]
+- [[API search requires session and query parameters]]

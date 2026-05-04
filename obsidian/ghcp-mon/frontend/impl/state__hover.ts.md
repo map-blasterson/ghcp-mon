@@ -10,3 +10,4 @@ Original source file for reverse-engineered requirements.
 
 ## Source For
 - [[Hover store publishes hovered chat pk]]
+- [[Hover store publishes clicked chat signal]]

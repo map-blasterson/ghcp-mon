@@ -15,3 +15,4 @@ Original source file for reverse-engineered requirements.
 - [[File touches sort directories first then alphabetical]]
 - [[File touches expand and collapse all controls]]
 - [[File touches live invalidation on tool events]]
+- [[File touches extracts paths from apply_patch headers]]
