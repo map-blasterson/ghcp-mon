@@ -744,8 +744,9 @@ function SpanTreeNode({
               toggleCollapse(node.span_id);
             }}
             aria-label={collapsed ? "expand" : "collapse"}
+            style={collapsed ? { display: "inline-block", transform: "rotate(-90deg)" } : undefined}
           >
-            {collapsed ? "▸" : "▾"}
+            ▾
           </button>
         ) : (
           <span className="row-action" style={{ visibility: "hidden" }}>▾</span>
