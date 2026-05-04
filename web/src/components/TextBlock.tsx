@@ -194,7 +194,14 @@ export function TextBlock({
   }, []);
 
   // ---- exit wiring: column mouseleave, ESC, right-click -------------------
+  // Track whether current activation was driven externally so interactive
+  // exit gestures (mouseleave, ESC) don't kill externally-driven highlights.
+  const externallyDriven = !!externalQuery;
+
   const exitSearch = useCallback(() => {
+    // Never dismiss search that's held open by an external query — that
+    // lifecycle is owned by the externalQuery prop (cleared → idle).
+    if (externallyDriven) return;
     // If the cursor is still over the block, hop straight back to the
     // icon phase so the ?/ glyph reappears immediately. Otherwise the
     // user has to leave the block and re-enter to reactivate it because
@@ -204,7 +211,7 @@ export function TextBlock({
     setQuery("");
     setMatchIndex(0);
     setMatchCount(0);
-  }, []);
+  }, [externallyDriven]);
 
   useEffect(() => {
     if (phase !== "active") return;
