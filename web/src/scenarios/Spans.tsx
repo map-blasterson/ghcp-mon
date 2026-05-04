@@ -828,7 +828,8 @@ function SkillNameChip({ trace_id, span_id }: { trace_id: string; span_id: strin
 }
 
 // Renders a white-outlined badge showing the file name (basename) when the
-// tool call's arguments contain a "path" property.
+// tool call's arguments contain a "path" property, or the domain when they
+// contain a "url" property.
 function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string }) {
   const q = useQuery({
     queryKey: ["span", trace_id, span_id],
@@ -839,16 +840,41 @@ function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string 
   if (!q.data) return null;
   const args = parseToolCallArguments(q.data.span.attributes ?? {});
   if (!args || typeof args !== "object" || Array.isArray(args)) return null;
-  const pathVal = (args as Record<string, unknown>).path;
-  if (typeof pathVal !== "string" || pathVal.length === 0) return null;
-  const fileName = pathVal.split("/").pop() ?? pathVal;
-  if (!fileName) return null;
-  return (
-    <span
-      className="tag"
-      style={{ color: "#fff", borderColor: "#fff", marginRight: 4 }}
-    >
-      {fileName}
-    </span>
-  );
+  const rec = args as Record<string, unknown>;
+
+  // Try "path" → show basename
+  const pathVal = rec.path;
+  if (typeof pathVal === "string" && pathVal.length > 0) {
+    const fileName = pathVal.split("/").pop() ?? pathVal;
+    if (fileName) {
+      return (
+        <span
+          className="tag"
+          style={{ color: "#fff", borderColor: "#fff", marginRight: 4 }}
+        >
+          {fileName}
+        </span>
+      );
+    }
+  }
+
+  // Try "url" → show domain only (no scheme, no path)
+  const urlVal = rec.url;
+  if (typeof urlVal === "string" && urlVal.length > 0) {
+    try {
+      const domain = new URL(urlVal).hostname;
+      if (domain) {
+        return (
+          <span
+            className="tag"
+            style={{ color: "#fff", borderColor: "#fff", marginRight: 4 }}
+          >
+            {domain}
+          </span>
+        );
+      }
+    } catch { /* malformed URL — skip */ }
+  }
+
+  return null;
 }
