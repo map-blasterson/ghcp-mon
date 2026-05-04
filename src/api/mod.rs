@@ -652,6 +652,10 @@ pub struct SearchQuery {
     pub q: Option<String>,
     pub session: Option<String>,
     pub limit: Option<i64>,
+    /// When "delta", chat-kind results are filtered to exclude matches in
+    /// attributes that are unchanged from the prior chat span (e.g.
+    /// system_instructions, tool.definitions).
+    pub mode: Option<String>,
 }
 
 pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuery>) -> AppResult<Json<Value>> {
@@ -665,6 +669,7 @@ pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuer
     };
     let lim = sq.limit.unwrap_or(50).clamp(1, 200);
     let pattern = format!("%{}%", query);
+    let is_delta = sq.mode.as_deref() == Some("delta");
 
     // Find all span_pks in this session (same session-scoping logic as list_spans).
     // Then search across name, attributes_json, tool_calls.tool_name, agent_runs.agent_name,
@@ -698,9 +703,52 @@ pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuer
 
     let query_lower = query.to_lowercase();
 
+    // Attributes that ChatDetail diffs between consecutive chat spans.
+    // In delta mode, matches in these fields are suppressed when the
+    // parsed JSON value is identical to the prior chat span's.
+    const DELTA_DIFFED_ATTRS: &[&str] = &[
+        "gen_ai.system_instructions",
+        "gen_ai.tool.definitions",
+    ];
+
+    // If delta mode is active, fetch prior-chat-span attributes for
+    // every chat span in the session in one pass via LAG().
+    // Map: span_pk → prior_attributes_json (parsed).
+    let prior_attrs: std::collections::HashMap<i64, Value> = if is_delta {
+        let prior_rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+            r#"
+            WITH session_chats AS (
+                SELECT s.span_pk, s.attributes_json,
+                       COALESCE(s.end_unix_ns, s.start_unix_ns, 0) AS sort_key
+                  FROM spans s
+                 WHERE (
+                       json_extract(s.attributes_json, '$."gen_ai.conversation.id"') = ?1
+                    OR EXISTS (SELECT 1 FROM chat_turns WHERE span_pk = s.span_pk AND conversation_id = ?1)
+                 )
+                 AND s.name LIKE 'chat%'
+            ),
+            ordered AS (
+                SELECT span_pk,
+                       LAG(attributes_json) OVER (ORDER BY sort_key, span_pk) AS prior_attrs
+                  FROM session_chats
+            )
+            SELECT span_pk, prior_attrs FROM ordered WHERE prior_attrs IS NOT NULL
+            "#,
+        ).bind(&session).fetch_all(&s.pool).await?;
+        prior_rows.into_iter().filter_map(|(pk, pa)| {
+            let pa_str = pa?;
+            serde_json::from_str::<Value>(&pa_str).ok().map(|v| (pk, v))
+        }).collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut out: Vec<Value> = Vec::with_capacity(rows.len());
     for (pk, tr, sp, par, name, st, en, state, attrs_str) in &rows {
         let mut matches: Vec<Value> = Vec::new();
+        let kind_class = classify(name);
+        let is_chat = kind_class == "chat";
+        let cur_attrs: Option<Value> = serde_json::from_str(attrs_str).ok();
 
         // Check span name.
         if name.to_lowercase().contains(&query_lower) {
@@ -708,7 +756,7 @@ pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuer
         }
 
         // Check attributes_json values.
-        if let Ok(attrs_v) = serde_json::from_str::<Value>(attrs_str) {
+        if let Some(ref attrs_v) = cur_attrs {
             if let Some(obj) = attrs_v.as_object() {
                 for (k, v) in obj {
                     let text = match v {
@@ -716,6 +764,18 @@ pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuer
                         _ => v.to_string(),
                     };
                     if text.to_lowercase().contains(&query_lower) {
+                        // In delta mode for chat spans, suppress matches in
+                        // attributes that are identical to the prior chat span.
+                        if is_delta && is_chat {
+                            if DELTA_DIFFED_ATTRS.contains(&k.as_str()) {
+                                if let Some(prior_v) = prior_attrs.get(pk) {
+                                    if prior_v.get(k) == Some(v) {
+                                        continue; // unchanged — skip
+                                    }
+                                }
+                                // No prior → first chat span → all content is active
+                            }
+                        }
                         matches.push(json!({"field": format!("attributes.{}", k), "fragment": text}));
                     }
                 }
@@ -759,9 +819,15 @@ pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuer
             }
         }
 
+        // In delta mode, drop chat spans that have no remaining matches
+        // after filtering out unchanged-attribute hits.
+        if is_delta && is_chat && matches.is_empty() {
+            continue;
+        }
+
         out.push(json!({
             "span_pk": pk, "trace_id": tr, "span_id": sp, "parent_span_id": par,
-            "name": name, "kind_class": classify(name),
+            "name": name, "kind_class": kind_class,
             "start_unix_ns": st, "end_unix_ns": en,
             "ingestion_state": state,
             "projection": proj.get(pk).cloned().unwrap_or(json!({})),

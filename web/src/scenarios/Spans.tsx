@@ -165,9 +165,16 @@ export function SpansScenario({ column }: { column: Column }) {
     }
   }, [session]);
 
+  // Read chat_mode from sibling chat_detail column for delta-aware search.
+  const chatMode = useMemo(() => {
+    const cd = columns.find((c) => c.scenarioType === "chat_detail");
+    return cd?.config.chat_mode ?? "DELTA";
+  }, [columns]);
+  const searchMode = chatMode === "DELTA" ? "delta" : undefined;
+
   const searchQ = useQuery({
-    queryKey: ["search-spans", session, debouncedSearch],
-    queryFn: () => api.searchSpans({ q: debouncedSearch, session: session! }),
+    queryKey: ["search-spans", session, debouncedSearch, searchMode],
+    queryFn: () => api.searchSpans({ q: debouncedSearch, session: session!, mode: searchMode }),
     enabled: !!session && debouncedSearch.length > 0,
   });
 
