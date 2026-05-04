@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { SpanNode } from "../api/types";
@@ -8,6 +8,8 @@ import { useLiveFeed } from "../state/live";
 
 interface ChatSpanInfo {
   span_pk: number;
+  trace_id: string;
+  span_id: string;
   start_unix_ns: number | null;
   invokeAgentDepth: number;
 }
@@ -21,6 +23,8 @@ function collectChatSpans(
     if (n.kind_class === "chat") {
       out.push({
         span_pk: n.span_pk,
+        trace_id: n.trace_id,
+        span_id: n.span_id,
         start_unix_ns: n.start_unix_ns,
         invokeAgentDepth: depth,
       });
@@ -38,6 +42,15 @@ export function ContextGrowthWidget() {
   const columns = useWorkspace((s) => s.columns);
   const hoveredChatPk = useHoverState((s) => s.hoveredChatPk);
   const qc = useQueryClient();
+
+  const setClickedChat = useHoverState((s) => s.setClickedChat);
+
+  const onBarClick = useCallback(
+    (traceId: string, spanId: string) => {
+      setClickedChat({ traceId, spanId });
+    },
+    [setClickedChat],
+  );
 
   // First column with a session bound is the widget's session.
   const session = useMemo(() => {
@@ -255,6 +268,7 @@ export function ContextGrowthWidget() {
             yMax={yMax}
             maxLimit={maxLimit}
             hoveredChatPk={hoveredChatPk}
+            onBarClick={onBarClick}
           />
         )}
       </div>
@@ -277,6 +291,7 @@ interface ChartProps {
   yMax: number;
   maxLimit: number;
   hoveredChatPk: number | null;
+  onBarClick: (traceId: string, spanId: string) => void;
 }
 
 function Legend() {
@@ -311,7 +326,7 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
+function Chart({ rows, yMax, maxLimit, hoveredChatPk, onBarClick }: ChartProps) {
   const limitTopPct = (1 - maxLimit / yMax) * 100;
   const Y_AXIS_W = 44;
   const X_AXIS_H = 18;
@@ -421,6 +436,7 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
               <div
                 key={info.span_pk}
                 className={cls}
+                onClick={() => onBarClick(info.trace_id, info.span_id)}
                 style={{
                   position: "relative",
                   flex: 1,
@@ -429,6 +445,7 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk }: ChartProps) {
                   height: "100%",
                   display: "flex",
                   flexDirection: "column-reverse",
+                  cursor: "pointer",
                   borderBottom: `4px solid ${
                     isHovered ? "#facc15" : "transparent"
                   }`,

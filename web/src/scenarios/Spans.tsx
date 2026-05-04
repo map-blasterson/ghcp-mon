@@ -291,6 +291,18 @@ export function SpansScenario({ column }: { column: Column }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latestToolSpan, selected_span_id]);
 
+  // Consume click-from-widget signal: when the context growth chart bar
+  // is clicked, select the corresponding chat span in the tree.
+  const clickedChat = useHoverState((s) => s.clickedChat);
+  const setClickedChat = useHoverState((s) => s.setClickedChat);
+  useEffect(() => {
+    if (!clickedChat) return;
+    onPickSpan(clickedChat.traceId, clickedChat.spanId, "chat");
+    setClickedChat(null);
+    // onPickSpan omitted — same rationale as above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clickedChat, setClickedChat]);
+
   return (
     <>
       <ColumnHeader column={column}>
