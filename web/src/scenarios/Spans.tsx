@@ -71,16 +71,54 @@ function findNextChatSiblingId(tree: SpanNode[], span_id: string): string | unde
   return undefined;
 }
 
-function flattenSpanTree(tree: SpanNode[]): SpanNode[] {
+function flattenSpanTree(tree: SpanNode[], collapsed?: Set<string>): SpanNode[] {
   const rows: SpanNode[] = [];
   const walk = (nodes: SpanNode[]) => {
     for (const n of nodes) {
       rows.push(n);
+      if (collapsed?.has(n.span_id)) continue;
       walk(n.children ?? []);
     }
   };
   walk(tree);
   return rows;
+}
+
+// Build a map from each span_id to its parent span_id in the tree.
+function buildParentMap(tree: SpanNode[]): Map<string, string> {
+  const m = new Map<string, string>();
+  const walk = (nodes: SpanNode[], parentId: string | null) => {
+    for (const n of nodes) {
+      if (parentId) m.set(n.span_id, parentId);
+      walk(n.children ?? [], n.span_id);
+    }
+  };
+  walk(tree, null);
+  return m;
+}
+
+// Collect all ancestor span_ids of a set of target span_ids.
+function collectAncestors(targets: Iterable<string>, parentMap: Map<string, string>): Set<string> {
+  const ancestors = new Set<string>();
+  for (const id of targets) {
+    let cur = parentMap.get(id);
+    while (cur) {
+      if (ancestors.has(cur)) break;
+      ancestors.add(cur);
+      cur = parentMap.get(cur);
+    }
+  }
+  return ancestors;
+}
+
+// Check if targetId is a descendant of ancestorId in the tree.
+function isDescendant(targetId: string, ancestorId: string, parentMap: Map<string, string>): boolean {
+  let cur = parentMap.get(targetId);
+  while (cur) {
+    if (cur === ancestorId) return true;
+    cur = parentMap.get(cur);
+  }
+  return false;
 }
 
 // Trace-centric scenario.
@@ -375,6 +413,7 @@ export function SpansScenario({ column }: { column: Column }) {
       <div className="col-body list" style={{ overflow: "auto" }}>
         {session ? (
           <SpanTreeView
+            key={session}
             tree={tree}
             loading={sessionTreeQ.isLoading}
             kindFilter={kind_filter}
@@ -532,7 +571,60 @@ function SpanTreeView({
   onSelect: (t: string, s: string, k: KindClass) => void;
   searchHitSpanIds: Set<string> | null;
 }) {
-  const rows = useMemo(() => flattenSpanTree(tree), [tree]);
+  const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
+
+  const parentMap = useMemo(() => buildParentMap(tree), [tree]);
+
+  // Ancestors that must be expanded for search hits + selection to be visible.
+  const forcedExpandAncestors = useMemo(() => {
+    const targets: string[] = [];
+    if (searchHitSpanIds) {
+      for (const id of searchHitSpanIds) targets.push(id);
+    }
+    if (selectedSpanId) targets.push(selectedSpanId);
+    if (targets.length === 0) return new Set<string>();
+    return collectAncestors(targets, parentMap);
+  }, [searchHitSpanIds, selectedSpanId, parentMap]);
+
+  const effectiveCollapsed = useMemo(() => {
+    if (forcedExpandAncestors.size === 0) return userCollapsed;
+    const out = new Set<string>();
+    for (const id of userCollapsed) {
+      if (!forcedExpandAncestors.has(id)) out.add(id);
+    }
+    return out;
+  }, [userCollapsed, forcedExpandAncestors]);
+
+  const toggleCollapse = useCallback(
+    (span_id: string) => {
+      setUserCollapsed((prev) => {
+        const next = new Set(prev);
+        if (next.has(span_id)) {
+          next.delete(span_id);
+        } else {
+          next.add(span_id);
+          // If the selected span is inside the subtree being collapsed,
+          // move selection to the collapsing node.
+          if (selectedSpanId && isDescendant(selectedSpanId, span_id, parentMap)) {
+            // Find the collapsing node to get its trace_id and kind_class.
+            const flat = flattenSpanTree(tree);
+            const node = flat.find((n) => n.span_id === span_id);
+            if (node) onSelect(node.trace_id, node.span_id, node.kind_class);
+          }
+        }
+        return next;
+      });
+    },
+    // onSelect/parentMap/tree recreate each render; only selection identity matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedSpanId, parentMap, tree],
+  );
+
+  const rows = useMemo(
+    () => flattenSpanTree(tree, effectiveCollapsed),
+    [tree, effectiveCollapsed],
+  );
+
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
@@ -570,6 +662,8 @@ function SpanTreeView({
           onSelect={onSelect}
           chatAncestorPk={null}
           searchHitSpanIds={searchHitSpanIds}
+          effectiveCollapsed={effectiveCollapsed}
+          toggleCollapse={toggleCollapse}
         />
       ))}
     </div>
@@ -584,6 +678,8 @@ function SpanTreeNode({
   onSelect,
   chatAncestorPk,
   searchHitSpanIds,
+  effectiveCollapsed,
+  toggleCollapse,
 }: {
   node: SpanNode;
   depth: number;
@@ -592,6 +688,8 @@ function SpanTreeNode({
   onSelect: (t: string, s: string, k: KindClass) => void;
   chatAncestorPk: number | null;
   searchHitSpanIds: Set<string> | null;
+  effectiveCollapsed: Set<string>;
+  toggleCollapse: (span_id: string) => void;
 }) {
   const isSearchActive = searchHitSpanIds !== null;
   const isSearchHit = isSearchActive && searchHitSpanIds.has(node.span_id);
@@ -603,10 +701,6 @@ function SpanTreeNode({
       ? node.end_unix_ns - node.start_unix_ns
       : null;
   const setHoveredChatPk = useHoverState((s) => s.setHoveredChatPk);
-  // The chat to highlight in the context-growth widget when hovering
-  // this row: the nearest chat ancestor, or this node itself if it's a
-  // chat span. Non-chat spans without any chat ancestor (e.g. orphan
-  // tool spans) publish null and produce no highlight.
   const hoverChatPk =
     node.kind_class === "chat" ? node.span_pk : chatAncestorPk;
   const childChatAncestorPk =
@@ -615,6 +709,8 @@ function SpanTreeNode({
   useEffect(() => {
     if (sel) rowRef.current?.scrollIntoView({ block: "nearest" });
   }, [sel]);
+  const hasChildren = node.children.length > 0;
+  const collapsed = effectiveCollapsed.has(node.span_id);
   return (
     <div>
       <div
@@ -640,19 +736,34 @@ function SpanTreeNode({
         <ReportIntentTitle nodes={node.children} />
         <span className="sec">{fmtNs(dur)}</span>
         <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
+        {hasChildren && (
+          <button
+            className="row-action"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleCollapse(node.span_id);
+            }}
+            aria-label={collapsed ? "expand" : "collapse"}
+          >
+            {collapsed ? "▸" : "▾"}
+          </button>
+        )}
       </div>
-      {node.children.map((c) => (
-        <SpanTreeNode
-          key={c.span_pk}
-          node={c}
-          depth={depth + 1}
-          kindFilter={kindFilter}
-          selectedSpanId={selectedSpanId}
-          onSelect={onSelect}
-          chatAncestorPk={childChatAncestorPk}
-          searchHitSpanIds={searchHitSpanIds}
-        />
-      ))}
+      {!collapsed &&
+        node.children.map((c) => (
+          <SpanTreeNode
+            key={c.span_pk}
+            node={c}
+            depth={depth + 1}
+            kindFilter={kindFilter}
+            selectedSpanId={selectedSpanId}
+            onSelect={onSelect}
+            chatAncestorPk={childChatAncestorPk}
+            searchHitSpanIds={searchHitSpanIds}
+            effectiveCollapsed={effectiveCollapsed}
+            toggleCollapse={toggleCollapse}
+          />
+        ))}
     </div>
   );
 }
