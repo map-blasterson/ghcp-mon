@@ -624,6 +624,7 @@ function SpanTreeNode({
         {node.projection?.tool_call?.tool_name === "skill" && (
           <SkillNameChip trace_id={node.trace_id} span_id={node.span_id} />
         )}
+        <TargetBadge trace_id={node.trace_id} span_id={node.span_id} />
         <ReportIntentTitle nodes={node.children} />
         <span className="sec">{fmtNs(dur)}</span>
         <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
@@ -824,4 +825,30 @@ function SkillNameChip({ trace_id, span_id }: { trace_id: string; span_id: strin
   const skill = (args as Record<string, unknown>).skill;
   if (typeof skill !== "string" || skill.length === 0) return null;
   return <span className="tag skill" style={{ marginRight: 4 }}>{skill}</span>;
+}
+
+// Renders a white-outlined badge showing the file name (basename) when the
+// tool call's arguments contain a "path" property.
+function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string }) {
+  const q = useQuery({
+    queryKey: ["span", trace_id, span_id],
+    queryFn: () => api.getSpan(trace_id, span_id),
+    enabled: !!trace_id && !!span_id,
+    staleTime: 30_000,
+  });
+  if (!q.data) return null;
+  const args = parseToolCallArguments(q.data.span.attributes ?? {});
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const pathVal = (args as Record<string, unknown>).path;
+  if (typeof pathVal !== "string" || pathVal.length === 0) return null;
+  const fileName = pathVal.split("/").pop() ?? pathVal;
+  if (!fileName) return null;
+  return (
+    <span
+      className="tag"
+      style={{ color: "#fff", borderColor: "#fff", marginRight: 4 }}
+    >
+      {fileName}
+    </span>
+  );
 }
