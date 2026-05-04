@@ -1184,3 +1184,7 @@ mark.tb-match-current {
 .ib-diff-eq  { color: var(--fg-mute); }
 .ib-diff-add { background: rgba(46, 160, 67, 0.18); color: var(--accent-2); }
 .ib-diff-rem { background: rgba(248, 81, 73, 0.18); color: var(--err); text-decoration: line-through; }
+.ib-diff-eq mark.tb-match,
+.ib-diff-rem mark.tb-match { background: transparent; outline: none; }
+.ib-diff-eq mark.tb-match-current,
+.ib-diff-rem mark.tb-match-current { background: transparent; outline: none; }

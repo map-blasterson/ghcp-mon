@@ -731,6 +731,7 @@ export function ChatDetailScenario({ column }: { column: Column }) {
     const q = searchQuery.toLowerCase();
 
     // Collect text from a node's primitive values and diff segments.
+    // In DELTA mode, only added diff segments count as "active".
     const nodeHasMatch = (n: Node): boolean => {
       if (n.primitive) {
         for (const p of n.primitive) {
@@ -739,6 +740,7 @@ export function ChatDetailScenario({ column }: { column: Column }) {
       }
       if (n.diffSegments) {
         for (const seg of n.diffSegments) {
+          if (mode === "DELTA" && !seg.added) continue;
           if (seg.value.toLowerCase().includes(q)) return true;
         }
       }
@@ -766,7 +768,7 @@ export function ChatDetailScenario({ column }: { column: Column }) {
         return next;
       });
     }
-  }, [searchQuery, tree]);
+  }, [searchQuery, tree, mode]);
 
   const treeWrapRef = useRef<HTMLDivElement | null>(null);
   const [arrowTop, setArrowTop] = useState<number | null>(null);
