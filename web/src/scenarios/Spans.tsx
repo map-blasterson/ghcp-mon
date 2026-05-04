@@ -736,7 +736,7 @@ function SpanTreeNode({
         <ReportIntentTitle nodes={node.children} />
         <span className="sec">{fmtNs(dur)}</span>
         <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
-        {hasChildren && (
+        {hasChildren ? (
           <button
             className="row-action"
             onClick={(e) => {
@@ -747,6 +747,8 @@ function SpanTreeNode({
           >
             {collapsed ? "▸" : "▾"}
           </button>
+        ) : (
+          <span className="row-action" style={{ visibility: "hidden" }}>▾</span>
         )}
       </div>
       {!collapsed &&
