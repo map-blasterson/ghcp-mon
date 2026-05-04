@@ -971,7 +971,10 @@ function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string 
   // Try "path" → show basename
   const pathVal = rec.path;
   if (typeof pathVal === "string" && pathVal.length > 0) {
-    const fileName = pathVal.split("/").pop() ?? pathVal;
+    // Windows paths start with a drive letter (e.g. C:\); split on \ only there.
+    // On Unix, \ is an escape character in paths (e.g. my\ file.txt), not a separator.
+    const isWindows = /^[a-zA-Z]:[\\\/]/.test(pathVal);
+    const fileName = pathVal.split(isWindows ? /[\\/]/ : "/").pop() ?? pathVal;
     if (fileName) {
       return (
         <span
