@@ -726,7 +726,7 @@ function SpanTreeNode({
           <span className="tag warn"><RollingDots /></span>
         )}
         <ProjectionChips projection={node.projection} />
-        {node.projection?.tool_call?.tool_name === "bash" && (
+        {(node.projection?.tool_call?.tool_name === "bash" || node.projection?.tool_call?.tool_name === "powershell") && (
           <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />
         )}
         {node.projection?.tool_call?.tool_name === "skill" && (
