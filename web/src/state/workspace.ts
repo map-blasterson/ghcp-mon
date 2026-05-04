@@ -24,6 +24,9 @@ export interface ColumnConfig {
   // Propagated from the Spans column's debounced search input so
   // detail columns can drive their own highlighting / auto-expand.
   search_query?: string;
+  // ChatDetail's DELTA/FULL view mode, lifted to config so sibling
+  // columns (e.g. Spans search) can coordinate mode-aware behaviour.
+  chat_mode?: "DELTA" | "FULL";
   raw_type?: string;
   tool_name_filter?: string;
   kind_filter?: KindClass;

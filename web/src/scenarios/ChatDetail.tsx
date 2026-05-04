@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { diffWordsWithSpace, type Change } from "diff";
 import { api } from "../api/client";
 import type { Column } from "../state/workspace";
+import { useWorkspace } from "../state/workspace";
 import type { SpanNode } from "../api/types";
 import { ColumnHeader } from "../components/ColumnHeader";
 import { KindBadge } from "../components/KindBadge";
@@ -588,12 +589,68 @@ function flatChatSpansSorted(tree: SpanNode[]): SpanNode[] {
   return out;
 }
 
-// ---- Component ----
+// ---- Hook: shared tree + diff + active-node computation ----
 
-export function ChatDetailScenario({ column }: { column: Column }) {
+/** Checks whether a node's "active" content (respecting DELTA mode) contains the query. */
+function nodeHasActiveMatch(n: Node, q: string, isDelta: boolean): boolean {
+  if (n.primitive) {
+    for (const p of n.primitive) {
+      if (p.value.toLowerCase().includes(q)) return true;
+    }
+  }
+  if (n.diffSegments) {
+    for (const seg of n.diffSegments) {
+      if (isDelta && !seg.added) continue;
+      if (seg.value.toLowerCase().includes(q)) return true;
+    }
+  }
+  return false;
+}
+
+/** Walk the tree and collect IDs of nodes (+ their ancestors) with active matches. */
+function computeActiveNodeIds(root: Node, searchQuery: string, isDelta: boolean): Set<string> {
+  const result = new Set<string>();
+  if (!searchQuery) return result;
+  const q = searchQuery.toLowerCase();
+  const walk = (node: Node, ancestors: string[]) => {
+    if (nodeHasActiveMatch(node, q, isDelta)) {
+      for (const a of ancestors) result.add(a);
+      result.add(node.id);
+    }
+    const nextAncestors = [...ancestors, node.id];
+    for (const child of node.children) walk(child, nextAncestors);
+  };
+  walk(root, []);
+  return result;
+}
+
+interface ChatTreeResult {
+  /** The detail query result (raw span). */
+  detail: ReturnType<typeof api.getSpan> extends Promise<infer T> ? T : never;
+  detailLoading: boolean;
+  /** Whether the selected span is a chat span. */
+  isChat: boolean;
+  /** Parsed attributes (only if isChat). */
+  attrs: Record<string, unknown>;
+  /** The built tree (null if not a chat span). */
+  tree: Node | null;
+  /** Current view mode. */
+  mode: Mode;
+  /** Update the view mode (persisted to column config). */
+  setMode: (m: Mode) => void;
+  /** The active search query from the Spans column. */
+  searchQuery: string;
+  /** Node IDs (+ their ancestors) whose active content matches the search query. */
+  activeNodeIds: Set<string>;
+}
+
+function useChatTree(column: Column): ChatTreeResult {
   const trace_id = column.config.selected_trace_id;
   const span_id = column.config.selected_span_id;
-  const [mode, setMode] = useState<Mode>("DELTA");
+  const updateColumn = useWorkspace((s) => s.updateColumn);
+  const mode: Mode = column.config.chat_mode === "FULL" ? "FULL" : "DELTA";
+  const setMode = (m: Mode) =>
+    updateColumn(column.id, { config: { ...column.config, chat_mode: m } });
 
   const q = useQuery({
     queryKey: ["span", trace_id, span_id],
@@ -603,17 +660,17 @@ export function ChatDetailScenario({ column }: { column: Column }) {
 
   const detail = q.data;
   const isChat = detail?.span.kind_class === "chat";
-  const a = useMemo(
-    () => (isChat ? detail.span.attributes ?? {} : {}),
+  const attrs = useMemo(
+    () => (isChat ? (detail.span.attributes ?? {}) as Record<string, unknown> : {} as Record<string, unknown>),
     [isChat, detail]
   );
 
   // Resolve the conversation_id from the current chat span. Without it
   // we cannot locate prior chat spans, and DELTA mode degrades to FULL.
   const cid = useMemo(() => {
-    const v = (a as Record<string, unknown>)["gen_ai.conversation.id"];
+    const v = attrs["gen_ai.conversation.id"];
     return typeof v === "string" ? v : null;
-  }, [a]);
+  }, [attrs]);
 
   const sessionTreeQ = useQuery({
     queryKey: ["session-span-tree", cid],
@@ -641,8 +698,6 @@ export function ChatDetailScenario({ column }: { column: Column }) {
     if (mode !== "DELTA") return null;
     const pa = priorSpanQ.data?.span.attributes ?? null;
     if (!pa) return null;
-    // If the prior span has no captured content, fall back to FULL for
-    // system/tool_defs (treat as if there were no prior).
     const sys = parseSystemInstructions(pa);
     const tools = parseToolDefinitions(pa);
     if (sys.length === 0 && tools.length === 0) return null;
@@ -651,12 +706,11 @@ export function ChatDetailScenario({ column }: { column: Column }) {
 
   const tree = useMemo<Node | null>(() => {
     if (!isChat) return null;
-    const attrs = a as Record<string, unknown>;
     return buildTree({
-      systemParts: parseSystemInstructions(a),
-      toolDefs: parseToolDefinitions(a),
-      inputMessages: parseInputMessages(a),
-      outputMessages: parseOutputMessages(a),
+      systemParts: parseSystemInstructions(attrs),
+      toolDefs: parseToolDefinitions(attrs),
+      inputMessages: parseInputMessages(attrs),
+      outputMessages: parseOutputMessages(attrs),
       hasSystem: "gen_ai.system_instructions" in attrs,
       hasToolDefs: "gen_ai.tool.definitions" in attrs,
       hasInputMessages: "gen_ai.input.messages" in attrs,
@@ -664,7 +718,38 @@ export function ChatDetailScenario({ column }: { column: Column }) {
       mode,
       prior,
     });
-  }, [isChat, a, mode, prior]);
+  }, [isChat, attrs, mode, prior]);
+
+  const searchQuery = (column.config.search_query as string | undefined) ?? "";
+
+  // Single walk: compute which nodes have active-content matches.
+  const activeNodeIds = useMemo<Set<string>>(() => {
+    if (!tree || !searchQuery) return new Set();
+    return computeActiveNodeIds(tree, searchQuery, mode === "DELTA");
+  }, [tree, searchQuery, mode]);
+
+  return {
+    detail: detail!,
+    detailLoading: q.isLoading,
+    isChat,
+    attrs,
+    tree,
+    mode,
+    setMode,
+    searchQuery,
+    activeNodeIds,
+  };
+}
+
+// ---- Component ----
+
+export function ChatDetailScenario({ column }: { column: Column }) {
+  const {
+    detail, detailLoading, isChat, attrs: a, tree, mode, setMode,
+    searchQuery, activeNodeIds,
+  } = useChatTree(column);
+  const trace_id = column.config.selected_trace_id;
+  const span_id = column.config.selected_span_id;
 
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set<string>(["root", "root/input"]),
@@ -708,14 +793,11 @@ export function ChatDetailScenario({ column }: { column: Column }) {
   }, [targetMessageNodeId]);
 
   // ---- Span search: auto-expand ancestors of matching nodes ----
-  const searchQuery = (column.config.search_query as string | undefined) ?? "";
-  // Track which node IDs were expanded by search (not by user) so we
-  // can remove them when the query is cleared.
+  // Uses activeNodeIds from the hook (single tree walk, no duplication).
   const searchExpandedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!searchQuery || !tree) {
-      // Remove search-expanded nodes, keeping user-expanded ones.
+    if (!searchQuery || !tree || activeNodeIds.size === 0) {
       if (searchExpandedRef.current.size > 0) {
         const toRemove = searchExpandedRef.current;
         setExpanded((prev) => {
@@ -728,47 +810,13 @@ export function ChatDetailScenario({ column }: { column: Column }) {
       return;
     }
 
-    const q = searchQuery.toLowerCase();
-
-    // Collect text from a node's primitive values and diff segments.
-    // In DELTA mode, only added diff segments count as "active".
-    const nodeHasMatch = (n: Node): boolean => {
-      if (n.primitive) {
-        for (const p of n.primitive) {
-          if (p.value.toLowerCase().includes(q)) return true;
-        }
-      }
-      if (n.diffSegments) {
-        for (const seg of n.diffSegments) {
-          if (mode === "DELTA" && !seg.added) continue;
-          if (seg.value.toLowerCase().includes(q)) return true;
-        }
-      }
-      return false;
-    };
-
-    // Walk tree collecting matching node IDs and their ancestor paths.
-    const toExpand = new Set<string>();
-    const walk = (node: Node, ancestors: string[]) => {
-      if (nodeHasMatch(node)) {
-        for (const a of ancestors) toExpand.add(a);
-        // Also expand the matching node itself so its content is visible.
-        toExpand.add(node.id);
-      }
-      const nextAncestors = [...ancestors, node.id];
-      for (const child of node.children) walk(child, nextAncestors);
-    };
-    walk(tree, []);
-
-    searchExpandedRef.current = toExpand;
-    if (toExpand.size > 0) {
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        for (const id of toExpand) next.add(id);
-        return next;
-      });
-    }
-  }, [searchQuery, tree, mode]);
+    searchExpandedRef.current = activeNodeIds;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const id of activeNodeIds) next.add(id);
+      return next;
+    });
+  }, [searchQuery, tree, activeNodeIds]);
 
   const treeWrapRef = useRef<HTMLDivElement | null>(null);
   const [arrowTop, setArrowTop] = useState<number | null>(null);
@@ -860,7 +908,7 @@ export function ChatDetailScenario({ column }: { column: Column }) {
         <div className="ib-summary">
           {!trace_id || !span_id ? (
             <div className="empty-state">Select a chat span in the Spans column.</div>
-          ) : q.isLoading ? (
+          ) : detailLoading ? (
             <div className="empty-state">loading…</div>
           ) : !detail ? (
             <div className="empty-state">span not found</div>

@@ -13,3 +13,4 @@ Original source file for reverse-engineered requirements.
 - [[Workspace migration drops obsolete scenario types]]
 - [[Default workspace seeds four columns]]
 - [[Spans search propagates query to detail columns]]
+- [[Chat detail mode toggle DELTA FULL]]
