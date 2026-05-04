@@ -243,6 +243,31 @@ export interface RawRecord {
 }
 export interface ListRawResponse { raw: RawRecord[]; }
 
+// ------------------------- search --------------------------------------
+
+export interface SearchMatch {
+  field: string;
+  fragment: string;
+}
+
+export interface SearchSpanResult {
+  span_pk: number;
+  trace_id: string;
+  span_id: string;
+  parent_span_id: Nullable<string>;
+  name: string;
+  kind_class: KindClass;
+  start_unix_ns: Nullable<UnixNs>;
+  end_unix_ns: Nullable<UnixNs>;
+  ingestion_state: string;
+  projection: SpanProjection;
+  matches: SearchMatch[];
+}
+
+export interface SearchResponse {
+  results: SearchSpanResult[];
+}
+
 // ------------------------- WS envelopes ---------------------------------
 
 export type WsKind = "hello" | "span" | "metric" | "log" | "derived" | "trace";

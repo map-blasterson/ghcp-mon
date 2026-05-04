@@ -5,6 +5,7 @@ import type {
   ListSpansResponse,
   ListTracesResponse,
   RawRecordType,
+  SearchResponse,
   SessionDetail,
   SessionSpanTreeResponse,
   SpanDetail,
@@ -67,4 +68,6 @@ export const api = {
     getJson<TraceDetailResponse>(`/api/traces/${trace_id}`),
   listRaw: (opts: { type?: RawRecordType; limit?: number } = {}) =>
     getJson<ListRawResponse>(`/api/raw${qs({ type: opts.type, limit: opts.limit ?? 100 })}`),
+  searchSpans: (opts: { q: string; session: string; limit?: number }) =>
+    getJson<SearchResponse>(`/api/search${qs({ q: opts.q, session: opts.session, limit: opts.limit })}`),
 };

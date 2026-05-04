@@ -645,6 +645,133 @@ pub async fn list_session_contexts(State(s): State<AppState>, Path(cid): Path<St
     Ok(Json(json!({"conversation_id": cid, "context_snapshots": out})))
 }
 
+// ------------------------- /api/search ---------------------------------
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub session: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn search_spans(State(s): State<AppState>, Query(sq): Query<SearchQuery>) -> AppResult<Json<Value>> {
+    let session = match &sq.session {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return Err(AppError::BadRequest("missing required parameter: session".into())),
+    };
+    let query = match &sq.q {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return Err(AppError::BadRequest("missing required parameter: q".into())),
+    };
+    let lim = sq.limit.unwrap_or(50).clamp(1, 200);
+    let pattern = format!("%{}%", query);
+
+    // Find all span_pks in this session (same session-scoping logic as list_spans).
+    // Then search across name, attributes_json, tool_calls.tool_name, agent_runs.agent_name,
+    // and span_events name/attributes.
+    let rows: Vec<(i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String, String)> = sqlx::query_as(
+        r#"
+        WITH session_spans AS (
+            SELECT s.span_pk, s.trace_id, s.span_id, s.parent_span_id, s.name,
+                   s.start_unix_ns, s.end_unix_ns, s.ingestion_state, s.attributes_json
+              FROM spans s
+             WHERE json_extract(s.attributes_json, '$."gen_ai.conversation.id"') = ?1
+                OR EXISTS (SELECT 1 FROM agent_runs WHERE span_pk = s.span_pk AND conversation_id = ?1)
+                OR EXISTS (SELECT 1 FROM chat_turns WHERE span_pk = s.span_pk AND conversation_id = ?1)
+                OR EXISTS (SELECT 1 FROM tool_calls WHERE span_pk = s.span_pk AND conversation_id = ?1)
+        )
+        SELECT span_pk, trace_id, span_id, parent_span_id, name,
+               start_unix_ns, end_unix_ns, ingestion_state, attributes_json
+          FROM session_spans
+         WHERE name LIKE ?2 COLLATE NOCASE
+            OR attributes_json LIKE ?2 COLLATE NOCASE
+            OR EXISTS (SELECT 1 FROM tool_calls tc WHERE tc.span_pk = session_spans.span_pk AND tc.tool_name LIKE ?2 COLLATE NOCASE)
+            OR EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.span_pk = session_spans.span_pk AND ar.agent_name LIKE ?2 COLLATE NOCASE)
+            OR EXISTS (SELECT 1 FROM span_events se WHERE se.span_pk = session_spans.span_pk AND (se.name LIKE ?2 COLLATE NOCASE OR se.attributes_json LIKE ?2 COLLATE NOCASE))
+         ORDER BY COALESCE(start_unix_ns, 0) DESC
+         LIMIT ?3
+        "#,
+    ).bind(&session).bind(&pattern).bind(lim).fetch_all(&s.pool).await?;
+
+    let pks: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    let proj = load_projections(&s.pool, &pks).await?;
+
+    let query_lower = query.to_lowercase();
+
+    let mut out: Vec<Value> = Vec::with_capacity(rows.len());
+    for (pk, tr, sp, par, name, st, en, state, attrs_str) in &rows {
+        let mut matches: Vec<Value> = Vec::new();
+
+        // Check span name.
+        if name.to_lowercase().contains(&query_lower) {
+            matches.push(json!({"field": "name", "fragment": name}));
+        }
+
+        // Check attributes_json values.
+        if let Ok(attrs_v) = serde_json::from_str::<Value>(attrs_str) {
+            if let Some(obj) = attrs_v.as_object() {
+                for (k, v) in obj {
+                    let text = match v {
+                        Value::String(s) => s.clone(),
+                        _ => v.to_string(),
+                    };
+                    if text.to_lowercase().contains(&query_lower) {
+                        matches.push(json!({"field": format!("attributes.{}", k), "fragment": text}));
+                    }
+                }
+            }
+        }
+
+        // Check tool_calls.tool_name.
+        let tc_names: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT tool_name FROM tool_calls WHERE span_pk = ?"
+        ).bind(pk).fetch_all(&s.pool).await?;
+        for (tn,) in tc_names {
+            if let Some(ref n) = tn {
+                if n.to_lowercase().contains(&query_lower) {
+                    matches.push(json!({"field": "tool_calls.tool_name", "fragment": n}));
+                }
+            }
+        }
+
+        // Check agent_runs.agent_name.
+        let ar_names: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT agent_name FROM agent_runs WHERE span_pk = ?"
+        ).bind(pk).fetch_all(&s.pool).await?;
+        for (an,) in ar_names {
+            if let Some(ref n) = an {
+                if n.to_lowercase().contains(&query_lower) {
+                    matches.push(json!({"field": "agent_runs.agent_name", "fragment": n}));
+                }
+            }
+        }
+
+        // Check span_events name and attributes.
+        let events: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, attributes_json FROM span_events WHERE span_pk = ?"
+        ).bind(pk).fetch_all(&s.pool).await?;
+        for (ename, eattrs) in &events {
+            if ename.to_lowercase().contains(&query_lower) {
+                matches.push(json!({"field": "span_events.name", "fragment": ename}));
+            }
+            if eattrs.to_lowercase().contains(&query_lower) {
+                matches.push(json!({"field": "span_events.attributes", "fragment": eattrs}));
+            }
+        }
+
+        out.push(json!({
+            "span_pk": pk, "trace_id": tr, "span_id": sp, "parent_span_id": par,
+            "name": name, "kind_class": classify(name),
+            "start_unix_ns": st, "end_unix_ns": en,
+            "ingestion_state": state,
+            "projection": proj.get(pk).cloned().unwrap_or(json!({})),
+            "matches": matches,
+        }));
+    }
+
+    Ok(Json(json!({"results": out})))
+}
+
 // ------------------------- raw -----------------------------------------
 
 pub async fn list_raw(State(s): State<AppState>, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {

@@ -24,3 +24,5 @@ The dashboard renders the trace/span hierarchy for a selected session as an expa
 - [[Placeholder ingestion state shown with rolling dots]]
 - [[Kind badge label renames raw kinds]]
 - [[Hash color stable hue via FNV-1a]]
+- [[Spans searchbox queries server on input]]
+- [[Spans search results highlight matching nodes]]

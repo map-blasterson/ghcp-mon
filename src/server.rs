@@ -46,6 +46,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/api/sessions/:cid/span-tree", get(api::get_session_span_tree))
         .route("/api/sessions/:cid/contexts", get(api::list_session_contexts))
         .route("/api/spans", get(api::list_spans))
+        .route("/api/search", get(api::search_spans))
         .route("/api/spans/:trace_id/:span_id", get(api::get_span))
         .route("/api/traces", get(api::list_traces))
         .route("/api/traces/:trace_id", get(api::get_trace))

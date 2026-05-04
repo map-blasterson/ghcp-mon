@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { Column } from "../state/workspace";
 import { useWorkspace } from "../state/workspace";
@@ -145,6 +145,36 @@ export function SpansScenario({ column }: { column: Column }) {
 
   const traces = tracesQ.data?.traces ?? [];
   const tree = sessionTreeQ.data?.tree ?? [];
+
+  // --- search state ---
+  const [searchText, setSearchText] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const onSearchChange = useCallback((text: string) => {
+    setSearchText(text);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedSearch(text), 300);
+  }, []);
+
+  // Clear search when session is deselected.
+  useEffect(() => {
+    if (!session) {
+      setSearchText("");
+      setDebouncedSearch("");
+    }
+  }, [session]);
+
+  const searchQ = useQuery({
+    queryKey: ["search-spans", session, debouncedSearch],
+    queryFn: () => api.searchSpans({ q: debouncedSearch, session: session! }),
+    enabled: !!session && debouncedSearch.length > 0,
+  });
+
+  const searchHitSpanIds: Set<string> | null = useMemo(() => {
+    if (!session || !debouncedSearch || !searchQ.data) return null;
+    return new Set(searchQ.data.results.map((r) => r.span_id));
+  }, [session, debouncedSearch, searchQ.data]);
 
   // Applicability map: which scenario types accept selections from
   // which span kinds. Selecting a chat span only updates input-breakdown
@@ -308,6 +338,15 @@ export function SpansScenario({ column }: { column: Column }) {
             </option>
           ))}
         </select>
+        {session && (
+          <input
+            type="text"
+            placeholder="search…"
+            value={searchText}
+            onChange={(e) => onSearchChange(e.target.value)}
+            style={{ marginLeft: 6, minWidth: 80, flex: "1 1 auto" }}
+          />
+        )}
       </ColumnHeader>
       <div className="col-body list" style={{ overflow: "auto" }}>
         {session ? (
@@ -317,6 +356,7 @@ export function SpansScenario({ column }: { column: Column }) {
             kindFilter={kind_filter}
             selectedSpanId={selected_span_id}
             onSelect={onPickSpan}
+            searchHitSpanIds={searchHitSpanIds}
           />
         ) : (
           <TracesList
@@ -459,12 +499,14 @@ function SpanTreeView({
   kindFilter,
   selectedSpanId,
   onSelect,
+  searchHitSpanIds,
 }: {
   tree: SpanNode[];
   loading: boolean;
   kindFilter: KindClass | undefined;
   selectedSpanId: string | undefined;
   onSelect: (t: string, s: string, k: KindClass) => void;
+  searchHitSpanIds: Set<string> | null;
 }) {
   const rows = useMemo(() => flattenSpanTree(tree), [tree]);
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -503,6 +545,7 @@ function SpanTreeView({
           selectedSpanId={selectedSpanId}
           onSelect={onSelect}
           chatAncestorPk={null}
+          searchHitSpanIds={searchHitSpanIds}
         />
       ))}
     </div>
@@ -516,6 +559,7 @@ function SpanTreeNode({
   selectedSpanId,
   onSelect,
   chatAncestorPk,
+  searchHitSpanIds,
 }: {
   node: SpanNode;
   depth: number;
@@ -523,8 +567,12 @@ function SpanTreeNode({
   selectedSpanId: string | undefined;
   onSelect: (t: string, s: string, k: KindClass) => void;
   chatAncestorPk: number | null;
+  searchHitSpanIds: Set<string> | null;
 }) {
-  const dim = !!kindFilter && node.kind_class !== kindFilter;
+  const isSearchActive = searchHitSpanIds !== null;
+  const isSearchHit = isSearchActive && searchHitSpanIds.has(node.span_id);
+  const searchMiss = isSearchActive && !isSearchHit;
+  const dim = !isSearchActive && !!kindFilter && node.kind_class !== kindFilter;
   const sel = selectedSpanId === node.span_id;
   const dur =
     node.start_unix_ns != null && node.end_unix_ns != null
@@ -547,7 +595,7 @@ function SpanTreeNode({
     <div>
       <div
         ref={rowRef}
-        className={`row${sel ? " sel" : ""}${dim ? " dim" : ""}`}
+        className={`row${sel ? " sel" : ""}${isSearchHit ? " search-hit" : ""}${searchMiss ? " search-miss" : ""}${dim ? " dim" : ""}`}
         style={{ paddingLeft: depth * 12 + 6 }}
         onClick={() => onSelect(node.trace_id, node.span_id, node.kind_class)}
         onMouseEnter={() => setHoveredChatPk(hoverChatPk ?? null)}
@@ -577,6 +625,7 @@ function SpanTreeNode({
           selectedSpanId={selectedSpanId}
           onSelect={onSelect}
           chatAncestorPk={childChatAncestorPk}
+          searchHitSpanIds={searchHitSpanIds}
         />
       ))}
     </div>

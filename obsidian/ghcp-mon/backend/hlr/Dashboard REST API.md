@@ -21,3 +21,5 @@ The system exposes a JSON REST API over an HTTP listener so the dashboard fronte
 - [[API list session contexts ordered by capture]]
 - [[API list raw filterable by record type]]
 - [[API list query limit clamped]]
+- [[API search spans by text within session]]
+- [[API search requires session and query parameters]]

@@ -255,6 +255,16 @@ a:hover { text-decoration: underline; }
 .list .row .sec { color: var(--fg-dim); }
 .list .row .mono { font-family: var(--mono); }
 .list .row .right { margin-left: auto; color: var(--fg-mute); }
+
+/* Search miss: fully desaturate text, badges, tags, and fade row. */
+.list .row.search-miss {
+  filter: saturate(0);
+  opacity: 0.35;
+}
+/* Search hit: subtle highlight so matches pop against dimmed siblings. */
+.list .row.search-hit {
+  background: rgba(106, 160, 255, 0.08);
+}
 .list .row .row-action {
   background: transparent;
   border: 1px solid transparent;
