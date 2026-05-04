@@ -21,6 +21,9 @@ export interface ColumnConfig {
   // it. Cleared whenever chat_detail is updated with a directly
   // picked chat span.
   selected_tool_call_id?: string;
+  // Propagated from the Spans column's debounced search input so
+  // detail columns can drive their own highlighting / auto-expand.
+  search_query?: string;
   raw_type?: string;
   tool_name_filter?: string;
   kind_filter?: KindClass;

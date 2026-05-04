@@ -20,3 +20,4 @@ Original source file for reverse-engineered requirements.
 - [[Generic tool renders args splitting code-ish strings]]
 - [[Tool detail empty state when no content captured]]
 - [[Tool detail body blocks wrap in TextBlock for search]]
+- [[Detail columns pass span search query to TextBlocks]]

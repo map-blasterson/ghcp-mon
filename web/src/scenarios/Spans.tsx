@@ -176,6 +176,18 @@ export function SpansScenario({ column }: { column: Column }) {
     return new Set(searchQ.data.results.map((r) => r.span_id));
   }, [session, debouncedSearch, searchQ.data]);
 
+  // Propagate the debounced search query to sibling detail columns so
+  // they can drive their own highlighting / auto-expand behavior.
+  useEffect(() => {
+    columns.forEach((c) => {
+      if (c.scenarioType !== "chat_detail" && c.scenarioType !== "tool_detail") return;
+      const prev = (c.config.search_query as string | undefined) ?? "";
+      const next = debouncedSearch;
+      if (prev === next) return;
+      updateColumn(c.id, { config: { ...c.config, search_query: next } });
+    });
+  }, [debouncedSearch, columns, updateColumn]);
+
   // Applicability map: which scenario types accept selections from
   // which span kinds. Selecting a chat span only updates input-breakdown
   // (and the spans column itself); selecting a tool span only updates

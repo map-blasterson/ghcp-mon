@@ -20,6 +20,7 @@ import type { SpanDetail } from "../api/types";
 export function ToolDetailScenario({ column }: { column: Column }) {
   const trace_id = column.config.selected_trace_id;
   const span_id = column.config.selected_span_id;
+  const searchQuery = (column.config.search_query as string | undefined) || undefined;
 
   const q = useQuery({
     queryKey: ["span", trace_id, span_id],
@@ -41,9 +42,9 @@ export function ToolDetailScenario({ column }: { column: Column }) {
         ) : !q.data ? (
           <div className="empty-state">span not found</div>
         ) : q.data.projection.tool_call ? (
-          <ToolDetailBody detail={q.data} />
+          <ToolDetailBody detail={q.data} externalQuery={searchQuery} />
         ) : q.data.projection.external_tool_call ? (
-          <ExternalToolDetailBody detail={q.data} />
+          <ExternalToolDetailBody detail={q.data} externalQuery={searchQuery} />
         ) : (
           <div className="empty-state">selected span is not a tool call</div>
         )}
@@ -52,7 +53,7 @@ export function ToolDetailScenario({ column }: { column: Column }) {
   );
 }
 
-function ToolDetailBody({ detail }: { detail: SpanDetail }) {
+function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externalQuery?: string }) {
   const tc = detail.projection.tool_call!;
   const span = detail.span;
   const dur =
@@ -83,15 +84,15 @@ function ToolDetailBody({ detail }: { detail: SpanDetail }) {
       <div className="section">
         <h4>args / result</h4>
         {tc.tool_name === "edit" ? (
-          <EditArgs attributes={a} />
+          <EditArgs attributes={a} externalQuery={externalQuery} />
         ) : tc.tool_name === "view" ? (
-          <ViewArgs attributes={a} />
+          <ViewArgs attributes={a} externalQuery={externalQuery} />
         ) : tc.tool_name === "read_agent" ? (
-          <ReadAgentArgs attributes={a} />
+          <ReadAgentArgs attributes={a} externalQuery={externalQuery} />
         ) : tc.tool_name === "task" ? (
-          <TaskArgs attributes={a} />
+          <TaskArgs attributes={a} externalQuery={externalQuery} />
         ) : (
-          <GenericArgs attributes={a} />
+          <GenericArgs attributes={a} externalQuery={externalQuery} />
         )}
       </div>
       <div className="section">
@@ -108,7 +109,7 @@ function ToolDetailBody({ detail }: { detail: SpanDetail }) {
 // present on ExternalToolCallProjection. Falls back to GenericArgs for
 // args/result since the tool_name comes from an external source and we
 // don't have specialized renderers for it.
-function ExternalToolDetailBody({ detail }: { detail: SpanDetail }) {
+function ExternalToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externalQuery?: string }) {
   const ext = detail.projection.external_tool_call!;
   const span = detail.span;
   const dur =
@@ -140,7 +141,7 @@ function ExternalToolDetailBody({ detail }: { detail: SpanDetail }) {
       </div>
       <div className="section">
         <h4>args / result</h4>
-        <GenericArgs attributes={a} />
+        <GenericArgs attributes={a} externalQuery={externalQuery} />
       </div>
       <div className="section">
         <h4>raw span attributes</h4>
@@ -150,7 +151,7 @@ function ExternalToolDetailBody({ detail }: { detail: SpanDetail }) {
   );
 }
 
-function GenericArgs({ attributes }: { attributes: Record<string, unknown> }) {
+function GenericArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
   if (args == null && result == null) return <div className="no-content">{NO_CONTENT_LINE}</div>;
@@ -185,22 +186,22 @@ function GenericArgs({ attributes }: { attributes: Record<string, unknown> }) {
               {codeFields.map(([k, v]) => (
                 <div key={`code-${k}`}>
                   <div className="label" style={{ marginTop: 4 }}>{k}</div>
-                  <TextBlock searchable text={v} preClassName="edit-diff" />
+                  <TextBlock searchable text={v} preClassName="edit-diff" externalQuery={externalQuery} />
                 </div>
               ))}
               {restObj && (
-                <TextBlock searchable>
+                <TextBlock searchable externalQuery={externalQuery}>
                   <pre className="json" style={{ marginTop: codeFields.length ? 4 : 0 }}>
                     {prettyJson(restObj)}
                   </pre>
                 </TextBlock>
               )}
               {!restObj && codeFields.length === 0 && (
-                <TextBlock searchable text={prettyJson(args)} preClassName="json" />
+                <TextBlock searchable text={prettyJson(args)} preClassName="json" externalQuery={externalQuery} />
               )}
             </>
           ) : (
-            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -208,9 +209,9 @@ function GenericArgs({ attributes }: { attributes: Record<string, unknown> }) {
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <TextBlock searchable text={result} />
+            <TextBlock searchable text={result} externalQuery={externalQuery} />
           ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -224,7 +225,7 @@ function GenericArgs({ attributes }: { attributes: Record<string, unknown> }) {
 //   - new_str        green, with newlines preserved verbatim
 //   - any other args fall through as JSON
 //   - result         same fallback as GenericArgs
-function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
+function EditArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
   const argsObj =
@@ -256,7 +257,7 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {oldStr != null && (
             <>
               <div className="label" style={{ marginTop: 4 }}>old_str</div>
-              <TextBlock searchable>
+              <TextBlock searchable externalQuery={externalQuery}>
                 <CodeBlock
                   language={lang}
                   text={oldStr}
@@ -268,7 +269,7 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {newStr != null && (
             <>
               <div className="label" style={{ marginTop: 4 }}>new_str</div>
-              <TextBlock searchable>
+              <TextBlock searchable externalQuery={externalQuery}>
                 <CodeBlock
                   language={lang}
                   text={newStr}
@@ -280,7 +281,7 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {extraObj && (
             <>
               <div className="label" style={{ marginTop: 4 }}>other</div>
-              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" />
+              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" externalQuery={externalQuery} />
             </>
           )}
         </div>
@@ -289,9 +290,9 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <TextBlock searchable text={result} />
+            <TextBlock searchable text={result} externalQuery={externalQuery} />
           ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -303,7 +304,7 @@ function EditArgs({ attributes }: { attributes: Record<string, unknown> }) {
 //   - path           plain
 //   - any other args fall through as JSON (e.g. view_range)
 //   - result         syntax-highlighted using the path's extension
-function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
+function ViewArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
   const argsObj =
@@ -356,7 +357,7 @@ function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
           {extraObj && (
             <>
               <div className="label" style={{ marginTop: 4 }}>other</div>
-              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" />
+              <TextBlock searchable text={prettyJson(extraObj)} preClassName="json" externalQuery={externalQuery} />
             </>
           )}
         </div>
@@ -368,17 +369,17 @@ function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
             lns != null ? (
               <div className="lineno-block edit-diff">
                 <pre className="lns">{lns}</pre>
-                <TextBlock searchable>
+                <TextBlock searchable externalQuery={externalQuery}>
                   <CodeBlock language={lang} text={body} />
                 </TextBlock>
               </div>
             ) : (
-              <TextBlock searchable>
+              <TextBlock searchable externalQuery={externalQuery}>
                 <CodeBlock language={lang} text={body} className="edit-diff" />
               </TextBlock>
             )
           ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -390,7 +391,7 @@ function ViewArgs({ attributes }: { attributes: Record<string, unknown> }) {
 // argument is markdown (model instructions), so render it via
 // react-markdown; render the remaining scalar args as a plain kv list,
 // and pass the result through as markdown when it's a string.
-function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
+function TaskArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
   const argsObj =
@@ -428,7 +429,7 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
               {prompt != null && (
                 <>
                   <div className="label" style={{ marginTop: 6 }}>prompt</div>
-                  <TextBlock searchable>
+                  <TextBlock searchable externalQuery={externalQuery}>
                     <div className="markdown-body">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{prompt}</ReactMarkdown>
                     </div>
@@ -437,7 +438,7 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
               )}
             </>
           ) : (
-            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -445,13 +446,13 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <TextBlock searchable>
+            <TextBlock searchable externalQuery={externalQuery}>
               <div className="markdown-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
               </div>
             </TextBlock>
           ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -463,7 +464,7 @@ function TaskArgs({ attributes }: { attributes: Record<string, unknown> }) {
 //   - args           plain kv (agent_id, wait, timeout, since_turn)
 //   - result         react-markdown (GFM) when the result is a string;
 //                    falls back to JSON otherwise
-function ReadAgentArgs({ attributes }: { attributes: Record<string, unknown> }) {
+function ReadAgentArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
   const argsObj =
@@ -488,7 +489,7 @@ function ReadAgentArgs({ attributes }: { attributes: Record<string, unknown> }) 
               ))}
             </div>
           ) : (
-            <TextBlock searchable text={prettyJson(args)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(args)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}
@@ -496,13 +497,13 @@ function ReadAgentArgs({ attributes }: { attributes: Record<string, unknown> }) 
         <div className="shell">
           <div className="label">result</div>
           {typeof result === "string" ? (
-            <TextBlock searchable>
+            <TextBlock searchable externalQuery={externalQuery}>
               <div className="markdown-body">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{result}</ReactMarkdown>
               </div>
             </TextBlock>
           ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" />
+            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
           )}
         </div>
       )}

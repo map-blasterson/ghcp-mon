@@ -26,3 +26,4 @@ The dashboard renders the trace/span hierarchy for a selected session as an expa
 - [[Hash color stable hue via FNV-1a]]
 - [[Spans searchbox queries server on input]]
 - [[Spans search results highlight matching nodes]]
+- [[Spans search propagates query to detail columns]]

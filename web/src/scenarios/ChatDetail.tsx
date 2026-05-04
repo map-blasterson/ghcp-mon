@@ -707,6 +707,67 @@ export function ChatDetailScenario({ column }: { column: Column }) {
     });
   }, [targetMessageNodeId]);
 
+  // ---- Span search: auto-expand ancestors of matching nodes ----
+  const searchQuery = (column.config.search_query as string | undefined) ?? "";
+  // Track which node IDs were expanded by search (not by user) so we
+  // can remove them when the query is cleared.
+  const searchExpandedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!searchQuery || !tree) {
+      // Remove search-expanded nodes, keeping user-expanded ones.
+      if (searchExpandedRef.current.size > 0) {
+        const toRemove = searchExpandedRef.current;
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          for (const id of toRemove) next.delete(id);
+          return next;
+        });
+        searchExpandedRef.current = new Set();
+      }
+      return;
+    }
+
+    const q = searchQuery.toLowerCase();
+
+    // Collect text from a node's primitive values and diff segments.
+    const nodeHasMatch = (n: Node): boolean => {
+      if (n.primitive) {
+        for (const p of n.primitive) {
+          if (p.value.toLowerCase().includes(q)) return true;
+        }
+      }
+      if (n.diffSegments) {
+        for (const seg of n.diffSegments) {
+          if (seg.value.toLowerCase().includes(q)) return true;
+        }
+      }
+      return false;
+    };
+
+    // Walk tree collecting matching node IDs and their ancestor paths.
+    const toExpand = new Set<string>();
+    const walk = (node: Node, ancestors: string[]) => {
+      if (nodeHasMatch(node)) {
+        for (const a of ancestors) toExpand.add(a);
+        // Also expand the matching node itself so its content is visible.
+        toExpand.add(node.id);
+      }
+      const nextAncestors = [...ancestors, node.id];
+      for (const child of node.children) walk(child, nextAncestors);
+    };
+    walk(tree, []);
+
+    searchExpandedRef.current = toExpand;
+    if (toExpand.size > 0) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const id of toExpand) next.add(id);
+        return next;
+      });
+    }
+  }, [searchQuery, tree]);
+
   const treeWrapRef = useRef<HTMLDivElement | null>(null);
   const [arrowTop, setArrowTop] = useState<number | null>(null);
 
@@ -828,6 +889,7 @@ export function ChatDetailScenario({ column }: { column: Column }) {
               toggle={toggle}
               hoveredNodeId={hoveredNodeId}
               setHoveredNodeId={setHoveredNodeId}
+              externalQuery={searchQuery || undefined}
             />
           )}
           {arrowTop != null && (
@@ -904,10 +966,11 @@ function KeyCursorIcon({ open }: { open: boolean }) {
 }
 
 function NodeView({
-  node, depth, expanded, toggle, hoveredNodeId, setHoveredNodeId,
+  node, depth, expanded, toggle, hoveredNodeId, setHoveredNodeId, externalQuery,
 }: {
   node: Node; depth: number; expanded: Set<string>; toggle: (id: string) => void;
   hoveredNodeId: string | null; setHoveredNodeId: (s: string | null) => void;
+  externalQuery?: string;
 }) {
   const isOpen = expanded.has(node.id);
   const hasChildren = node.children.length > 0;
@@ -951,7 +1014,7 @@ function NodeView({
       {isOpen && (
         <div className="ib-children">
           {hasDiff && (
-            <TextBlock searchable className="ib-diff-tb">
+            <TextBlock searchable className="ib-diff-tb" externalQuery={externalQuery}>
               <div className="ib-diff" onClick={(e) => e.stopPropagation()}>
                 {node.diffSegments!.map((seg, i) => {
                   const cls = seg.added
@@ -1004,6 +1067,7 @@ function NodeView({
                       text={p.value}
                       preClassName="ib-prim-v"
                       open={primOpen}
+                      externalQuery={externalQuery}
                     />
                     {truncatable && isHover && <KeyCursorIcon open={primOpen} />}
                   </div>
@@ -1020,6 +1084,7 @@ function NodeView({
               toggle={toggle}
               hoveredNodeId={hoveredNodeId}
               setHoveredNodeId={setHoveredNodeId}
+              externalQuery={externalQuery}
             />
           ))}
         </div>

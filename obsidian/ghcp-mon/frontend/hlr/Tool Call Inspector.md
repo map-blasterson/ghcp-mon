@@ -17,3 +17,4 @@ When the user selects an `execute_tool` or `external_tool` span, the dashboard r
 - [[Tool detail body blocks wrap in TextBlock for search]]
 - [[Code block highlights via Prism with extension map]]
 - [[JsonView pretty prints with optional collapse]]
+- [[Detail columns pass span search query to TextBlocks]]

@@ -11,3 +11,4 @@ Adds a search text input to the `SpansScenario` column config bar with 300ms deb
 ## Satisfies
 - [[Spans searchbox queries server on input]]
 - [[Spans search results highlight matching nodes]]
+- [[Spans search propagates query to detail columns]]

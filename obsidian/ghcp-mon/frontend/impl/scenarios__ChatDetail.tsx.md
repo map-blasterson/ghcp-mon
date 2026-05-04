@@ -20,3 +20,5 @@ Original source file for reverse-engineered requirements.
 - [[Chat detail tool defs name-diff in DELTA]]
 - [[Chat detail tool-call hint auto-expand and arrow]]
 - [[Chat detail key cursor icon follows pointer]]
+- [[ChatDetail auto-expands tree to span search matches]]
+- [[Detail columns pass span search query to TextBlocks]]

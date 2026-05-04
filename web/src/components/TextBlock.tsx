@@ -19,6 +19,10 @@ export interface TextBlockProps {
   // toggles via clicks on the .ib-prim-k key span). When `open` is omitted
   // the block stays collapsed.
   open?: boolean;
+  // When provided (non-empty string), auto-activates the search phase with
+  // the given query pre-populated, driving highlights without user
+  // interaction. When cleared (empty or undefined), exits the active phase.
+  externalQuery?: string;
 }
 
 type SearchPhase = "idle" | "icon" | "active";
@@ -110,6 +114,7 @@ export function TextBlock({
   truncatable = false,
   searchable = true,
   open,
+  externalQuery,
 }: TextBlockProps) {
   // Search state machine.
   const [phase, setPhase] = useState<SearchPhase>("idle");
@@ -309,6 +314,27 @@ export function TextBlock({
       inputRef.current?.focus();
     }
   }, [phase]);
+
+  // ---- external query prop -------------------------------------------------
+  // When an externalQuery is provided, enter (or stay in) active phase with
+  // the query pre-populated. When it transitions to empty, exit back to idle.
+  const prevExternalRef = useRef(externalQuery);
+  useEffect(() => {
+    if (!searchable) return;
+    const prev = prevExternalRef.current;
+    prevExternalRef.current = externalQuery;
+    if (externalQuery) {
+      setPhase("active");
+      setQuery(externalQuery);
+      setMatchIndex(0);
+    } else if (prev && !externalQuery) {
+      // External query was cleared — exit the externally-driven search.
+      setPhase("idle");
+      setQuery("");
+      setMatchIndex(0);
+      setMatchCount(0);
+    }
+  }, [externalQuery, searchable]);
 
   const showHover = searchable && (phase === "icon" || phase === "active");
 

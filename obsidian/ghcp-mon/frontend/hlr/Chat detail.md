@@ -27,3 +27,5 @@ For a selected `chat` span, the dashboard renders the GenAI content attributes â
 - [[Content fmtClock and fmtRelative]]
 - [[Content prettyJson safe fallback]]
 - [[Message view renders parts by type]]
+- [[ChatDetail auto-expands tree to span search matches]]
+- [[Detail columns pass span search query to TextBlocks]]

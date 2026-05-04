@@ -18,3 +18,4 @@ Original source file for reverse-engineered requirements.
 - [[TextBlock current match scrolls into view]]
 - [[TextBlock truncatable controlled by open prop]]
 - [[TextBlock search header shows match counter]]
+- [[TextBlock accepts external search query prop]]

@@ -12,3 +12,4 @@ Original source file for reverse-engineered requirements.
 - [[Workspace persists columns to localStorage]]
 - [[Workspace migration drops obsolete scenario types]]
 - [[Default workspace seeds four columns]]
+- [[Spans search propagates query to detail columns]]
