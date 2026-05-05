@@ -184,6 +184,19 @@ export function SpansScenario({ column }: { column: Column }) {
   const traces = tracesQ.data?.traces ?? [];
   const tree = sessionTreeQ.data?.tree ?? [];
 
+  // O(1) span lookup by ID — single walk shared by follow-mode, search, etc.
+  const nodeMap = useMemo(() => {
+    const m = new Map<string, SpanNode>();
+    const walk = (nodes: SpanNode[]) => {
+      for (const n of nodes) {
+        m.set(n.span_id, n);
+        walk(n.children ?? []);
+      }
+    };
+    walk(tree);
+    return m;
+  }, [tree]);
+
   // --- search state ---
   const [searchText, setSearchText] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -322,21 +335,9 @@ export function SpansScenario({ column }: { column: Column }) {
     const latestKey = sortKey(latestToolSpan);
     const prevKey = prevLatestKeyRef.current;
 
-    // Look up the selected span's sortKey in the current tree.
-    let selectedKey = -1;
-    if (selected_span_id) {
-      const find = (nodes: SpanNode[]): boolean => {
-        for (const n of nodes) {
-          if (n.span_id === selected_span_id) {
-            selectedKey = sortKey(n);
-            return true;
-          }
-          if (find(n.children ?? [])) return true;
-        }
-        return false;
-      };
-      find(tree);
-    }
+    // Look up the selected span's sortKey via nodeMap (O(1)).
+    const selectedNode = selected_span_id ? nodeMap.get(selected_span_id) : undefined;
+    const selectedKey = selectedNode ? sortKey(selectedNode) : -1;
 
     // Follow engaged: selected span's sortKey matches the previous max
     // (selected span WAS the latest before this tree update).
@@ -353,7 +354,7 @@ export function SpansScenario({ column }: { column: Column }) {
     // and recreates each render; we only care about advances driven by
     // tree updates and selection changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestToolSpan, selected_span_id, tree]);
+  }, [latestToolSpan, selected_span_id, nodeMap]);
 
   // Consume click-from-widget signal: when the context growth chart bar
   // is clicked, select the corresponding chat span in the tree.
