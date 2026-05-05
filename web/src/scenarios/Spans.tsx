@@ -71,6 +71,24 @@ function findNextChatSiblingId(tree: SpanNode[], span_id: string): string | unde
   return undefined;
 }
 
+// Find the most recent (by sortKey) chat span that is a descendant of
+// the given node. Used to route invoke_agent selections to ChatDetail.
+function findLatestChatDescendant(node: SpanNode): SpanNode | undefined {
+  let best: SpanNode | undefined;
+  let bestKey = -1;
+  const walk = (nodes: SpanNode[]) => {
+    for (const n of nodes) {
+      if (n.kind_class === "chat") {
+        const k = sortKey(n);
+        if (k > bestKey) { bestKey = k; best = n; }
+      }
+      walk(n.children ?? []);
+    }
+  };
+  walk(node.children ?? []);
+  return best;
+}
+
 function flattenSpanTree(tree: SpanNode[], collapsed?: Set<string>): SpanNode[] {
   const rows: SpanNode[] = [];
   const walk = (nodes: SpanNode[]) => {
@@ -264,6 +282,18 @@ export function SpansScenario({ column }: { column: Column }) {
       nextChatSpanId = findNextChatSiblingId(tree, span_id);
     }
 
+    // For invoke_agent selections, advance chat_detail to the most
+    // recent chat span under the agent so the user immediately sees
+    // the sub-agent's conversation.
+    let agentChatSpanId: string | undefined;
+    if (kind_class === "invoke_agent") {
+      const agentNode = nodeMap.get(span_id);
+      if (agentNode) {
+        const latestChat = findLatestChatDescendant(agentNode);
+        if (latestChat) agentChatSpanId = latestChat.span_id;
+      }
+    }
+
     columns.forEach((c) => {
       const allowed = SCENARIO_KINDS[c.scenarioType];
       if (!allowed) return;
@@ -282,15 +312,18 @@ export function SpansScenario({ column }: { column: Column }) {
         updateColumn(c.id, { config: patch });
         return;
       }
-      if (c.scenarioType === "chat_detail" && nextChatSpanId) {
-        updateColumn(c.id, {
-          config: {
-            ...c.config,
-            selected_trace_id: trace_id,
-            selected_span_id: nextChatSpanId,
-            selected_tool_call_id: toolCallId,
-          },
-        });
+      if (c.scenarioType === "chat_detail") {
+        const chatTarget = nextChatSpanId ?? agentChatSpanId;
+        if (chatTarget) {
+          updateColumn(c.id, {
+            config: {
+              ...c.config,
+              selected_trace_id: trace_id,
+              selected_span_id: chatTarget,
+              selected_tool_call_id: toolCallId,
+            },
+          });
+        }
       }
     });
   };
