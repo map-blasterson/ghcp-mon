@@ -292,15 +292,19 @@ export function SpansScenario({ column }: { column: Column }) {
   // selection forward as new tool spans arrive. Once the user picks
   // anything other than the latest, this disengages until they
   // re-select the latest manually.
+  //
+  // The condition is end-time based (via sortKey) so it matches the
+  // visual tree ordering and correctly handles sub-agent tool spans
+  // that may arrive as placeholders before timestamps are filled in.
   const TOOL_KINDS: KindClass[] = ["execute_tool", "external_tool"];
   const latestToolSpan = useMemo(() => {
     let best: SpanNode | null = null;
+    let bestKey = -1;
     const walk = (nodes: SpanNode[]) => {
       for (const n of nodes) {
         if (TOOL_KINDS.includes(n.kind_class)) {
-          const bk = best ? (best.start_unix_ns ?? best.span_pk ?? 0) : -1;
-          const nk = n.start_unix_ns ?? n.span_pk ?? 0;
-          if (!best || nk > bk) best = n;
+          const k = sortKey(n);
+          if (k > bestKey) { bestKey = k; best = n; }
         }
         walk(n.children ?? []);
       }
@@ -309,25 +313,47 @@ export function SpansScenario({ column }: { column: Column }) {
     return best as SpanNode | null;
   }, [tree]);
 
-  const prevLatestToolIdRef = useRef<string | undefined>(undefined);
+  const prevLatestKeyRef = useRef<number>(-1);
   useEffect(() => {
-    const latestId = latestToolSpan?.span_id;
-    const prev = prevLatestToolIdRef.current;
-    if (
-      latestToolSpan &&
-      latestId &&
-      prev &&
-      latestId !== prev &&
-      selected_span_id === prev
-    ) {
-      onPickSpan(latestToolSpan.trace_id, latestId, latestToolSpan.kind_class);
+    if (!latestToolSpan) {
+      prevLatestKeyRef.current = -1;
+      return;
     }
-    prevLatestToolIdRef.current = latestId;
+    const latestKey = sortKey(latestToolSpan);
+    const prevKey = prevLatestKeyRef.current;
+
+    // Look up the selected span's sortKey in the current tree.
+    let selectedKey = -1;
+    if (selected_span_id) {
+      const find = (nodes: SpanNode[]): boolean => {
+        for (const n of nodes) {
+          if (n.span_id === selected_span_id) {
+            selectedKey = sortKey(n);
+            return true;
+          }
+          if (find(n.children ?? [])) return true;
+        }
+        return false;
+      };
+      find(tree);
+    }
+
+    // Follow engaged: selected span's sortKey matches the previous max
+    // (selected span WAS the latest before this tree update).
+    if (
+      prevKey > 0 &&
+      selectedKey === prevKey &&
+      latestKey > prevKey
+    ) {
+      onPickSpan(latestToolSpan.trace_id, latestToolSpan.span_id, latestToolSpan.kind_class);
+    }
+
+    prevLatestKeyRef.current = latestKey;
     // onPickSpan is intentionally omitted — it closes over `columns`
     // and recreates each render; we only care about advances driven by
     // tree updates and selection changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestToolSpan, selected_span_id]);
+  }, [latestToolSpan, selected_span_id, tree]);
 
   // Consume click-from-widget signal: when the context growth chart bar
   // is clicked, select the corresponding chat span in the tree.
