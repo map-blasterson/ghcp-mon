@@ -25,6 +25,7 @@ This CSS file defines the visual rules referenced by class names from the React 
 - [[Skill name chip shows skill argument]]
 - [[TextBlock search header shows match counter]]
 - [[Spans search results highlight matching nodes]]
+- [[Span tree kind-filter dims non-matching rows]]
 - [[Workspace minimum column width 280 px]]
 - [[Context widget chart visual styling]]
 - [[File touches sort directories first then alphabetical]]

@@ -27,3 +27,8 @@ Original source file for reverse-engineered requirements.
 - [[Spans search results highlight matching nodes]]
 - [[Spans search propagates query to detail columns]]
 - [[Placeholder ingestion state shown with rolling dots]]
+- [[Spans nodeMap provides O1 span lookup]]
+- [[Spans invoke_agent selection routes to latest chat descendant]]
+- [[Span tree kind-filter dims non-matching rows]]
+- [[Spans header collapse and expand all buttons]]
+- [[Spans two-row header grid layout]]

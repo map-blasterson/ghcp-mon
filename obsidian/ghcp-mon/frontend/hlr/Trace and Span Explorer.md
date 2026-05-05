@@ -27,3 +27,8 @@ The dashboard renders the trace/span hierarchy for a selected session as an expa
 - [[Spans searchbox queries server on input]]
 - [[Spans search results highlight matching nodes]]
 - [[Spans search propagates query to detail columns]]
+- [[Spans nodeMap provides O1 span lookup]]
+- [[Spans invoke_agent selection routes to latest chat descendant]]
+- [[Span tree kind-filter dims non-matching rows]]
+- [[Spans header collapse and expand all buttons]]
+- [[Spans two-row header grid layout]]
