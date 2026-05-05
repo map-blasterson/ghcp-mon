@@ -844,7 +844,7 @@ function SpanTreeNode({
     <div>
       <div
         ref={rowRef}
-        className={`row${sel ? " sel" : ""}${isSearchHit ? " search-hit" : ""}${searchMiss ? " search-miss" : ""}${dim ? " dim" : ""}`}
+        className={`row${sel ? " sel" : ""}${isSearchHit ? " search-hit" : ""}${searchMiss ? " search-miss" : ""}${dim ? " kind-dim" : ""}`}
         style={{ paddingLeft: depth * 12 + 6 }}
         onClick={() => onSelect(node.trace_id, node.span_id, node.kind_class)}
         onMouseEnter={() => setHoveredChatPk(hoverChatPk ?? null)}

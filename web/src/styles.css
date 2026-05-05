@@ -261,6 +261,10 @@ a:hover { text-decoration: underline; }
   filter: saturate(0);
   opacity: 0.35;
 }
+/* Kind-filter dim: fade non-matching rows. */
+.list .row.kind-dim {
+  opacity: 0.4;
+}
 /* Search hit: subtle highlight so matches pop against dimmed siblings. */
 .list .row.search-hit {
   background: rgba(106, 160, 255, 0.08);
