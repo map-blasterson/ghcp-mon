@@ -400,15 +400,33 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk, onBarClick }: ChartProps) 
                 left: 0,
                 right: 0,
                 top: `${limitTopPct}%`,
-                height: 1,
-                backgroundImage:
-                  "linear-gradient(to right, rgba(250, 204, 21, 0.6) 0, rgba(250, 204, 21, 0.6) 4px, transparent 4px, transparent 8px)",
-                backgroundSize: "8px 1px",
-                backgroundRepeat: "repeat-x",
+                height: 0,
                 pointerEvents: "none",
               }}
               title={`token_limit = ${maxLimit}`}
-            />
+            >
+              <div style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: 0,
+                height: "1.5px",
+                backgroundImage:
+                  "linear-gradient(to right, rgba(250, 204, 21, 0.6) 0, rgba(250, 204, 21, 0.6) 4px, transparent 4px, transparent 8px)",
+                backgroundSize: "8px 1.5px",
+                backgroundRepeat: "repeat-x",
+              }} />
+              <span style={{
+                position: "absolute",
+                right: 26,
+                top: -5,
+                fontSize: 9,
+                color: "rgba(250, 204, 21, 0.8)",
+                background: "var(--bg)",
+                padding: "0 3px",
+                whiteSpace: "nowrap",
+              }}>context limit</span>
+            </div>
           )}
           {rows.map(({ m, info }) => {
             const isSub = info.invokeAgentDepth > 1;
