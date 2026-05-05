@@ -415,107 +415,124 @@ export function SpansScenario({ column }: { column: Column }) {
   return (
     <>
       <ColumnHeader column={column}>
-        <span className="dim">session</span>
-        <select
-          value={session ?? ""}
-          onChange={(e) => {
-            const next = e.target.value || undefined;
-            updateColumn(column.id, {
-              config: {
-                ...column.config,
-                session: next,
-                selected_trace_id: undefined,
-                selected_span_id: undefined,
-              },
-            });
-            // Mirror LiveSessions.onSelect: propagate the session change
-            // to sibling columns whose scenarios are session-scoped, so
-            // FileTouches / ChatDetail / other Spans columns stay in sync.
-            columns.forEach((c) => {
-              if (c.id === column.id) return;
-              if (
-                ["spans", "chat_detail", "file_touches"].includes(c.scenarioType)
-              ) {
-                updateColumn(c.id, { config: { ...c.config, session: next } });
-              }
-            });
-          }}
-        >
-          <option value="">all</option>
-          {sessionsQ.data?.sessions.map((s) => {
-            const shortId = s.conversation_id.slice(0, 8);
-            const name =
-              s.local_name && s.local_name.trim().length > 0 ? s.local_name : null;
-            return (
-              <option key={s.conversation_id} value={s.conversation_id}>
-                {name ? `${name} · ${shortId}` : shortId}
-              </option>
-            );
-          })}
-        </select>
-        {/* --- row 2: kind, search, follow/collapse/expand --- */}
-        <div style={{ flexBasis: "100%", height: 0 }} />
-        <span className="dim">kind</span>
-        <select
-          value={kind_filter ?? ""}
-          onChange={(e) =>
-            updateColumn(column.id, {
-              config: {
-                ...column.config,
-                kind_filter: (e.target.value || undefined) as KindClass | undefined,
-              },
-            })
-          }
-        >
-          {KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k ? kindLabel(k as KindClass) : "any"}
-            </option>
-          ))}
-        </select>
-        {session && (
-          <input
-            type="text"
-            placeholder="search…"
-            value={searchText}
-            onChange={(e) => onSearchChange(e.target.value)}
-            style={{ minWidth: 80, flex: "1 1 auto" }}
-          />
-        )}
-        <label
-          title="Auto-follow the latest tool span"
-          style={{ display: "inline-flex", alignItems: "center", gap: 2, cursor: "pointer", whiteSpace: "nowrap" }}
-        >
-          follow
-          <input
-            type="checkbox"
-            checked={followMode}
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px", width: "100%", alignItems: "center" }}>
+          <span className="dim">session</span>
+          <select
+            value={session ?? ""}
             onChange={(e) => {
-              const on = e.target.checked;
-              setFollowMode(on);
-              if (on && latestToolSpan && latestToolSpan.span_id !== selected_span_id) {
-                isAutoAdvancing.current = true;
-                onPickSpan(latestToolSpan.trace_id, latestToolSpan.span_id, latestToolSpan.kind_class);
-              }
+              const next = e.target.value || undefined;
+              updateColumn(column.id, {
+                config: {
+                  ...column.config,
+                  session: next,
+                  selected_trace_id: undefined,
+                  selected_span_id: undefined,
+                },
+              });
+              columns.forEach((c) => {
+                if (c.id === column.id) return;
+                if (
+                  ["spans", "chat_detail", "file_touches"].includes(c.scenarioType)
+                ) {
+                  updateColumn(c.id, { config: { ...c.config, session: next } });
+                }
+              });
             }}
-          />
-        </label>
-        <button
-          title="Collapse all"
-          aria-label="Collapse all"
-          onClick={collapseAll}
-          disabled={!session}
-        >
-          [-]
-        </button>
-        <button
-          title="Expand all"
-          aria-label="Expand all"
-          onClick={expandAll}
-          disabled={!session}
-        >
-          [+]
-        </button>
+          >
+            <option value="">all</option>
+            {sessionsQ.data?.sessions.map((s) => {
+              const shortId = s.conversation_id.slice(0, 8);
+              const name =
+                s.local_name && s.local_name.trim().length > 0 ? s.local_name : null;
+              return (
+                <option key={s.conversation_id} value={s.conversation_id}>
+                  {name ? `${name} · ${shortId}` : shortId}
+                </option>
+              );
+            })}
+          </select>
+          <span className="dim">kind</span>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <select
+              value={kind_filter ?? ""}
+              onChange={(e) =>
+                updateColumn(column.id, {
+                  config: {
+                    ...column.config,
+                    kind_filter: (e.target.value || undefined) as KindClass | undefined,
+                  },
+                })
+              }
+            >
+              {KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k ? kindLabel(k as KindClass) : "any"}
+                </option>
+              ))}
+            </select>
+            {session && (
+              <input
+                type="text"
+                placeholder="search…"
+                value={searchText}
+                onChange={(e) => onSearchChange(e.target.value)}
+                style={{ minWidth: 80, flex: "1 1 auto" }}
+              />
+            )}
+            <label
+              title="Auto-follow the latest tool span"
+              style={{ display: "inline-flex", alignItems: "center", gap: 2, cursor: "pointer", whiteSpace: "nowrap" }}
+            >
+              follow
+              <input
+                type="checkbox"
+                checked={followMode}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setFollowMode(on);
+                  if (on && latestToolSpan && latestToolSpan.span_id !== selected_span_id) {
+                    isAutoAdvancing.current = true;
+                    onPickSpan(latestToolSpan.trace_id, latestToolSpan.span_id, latestToolSpan.kind_class);
+                  }
+                }}
+                style={{ position: "absolute", opacity: 0, width: 0, height: 0 }}
+              />
+              <span style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: "1.8em",
+                height: "1.8em",
+                border: "1px solid var(--border)",
+                borderRadius: 2,
+                background: "var(--bg-1)",
+                color: followMode ? "#fff" : "transparent",
+                fontSize: "1.1em",
+                cursor: "pointer",
+              }}>
+                <span style={{ fontSize: "1.3em", lineHeight: 1 }}>✓</span>
+              </span>
+            </label>
+            <button
+              title="Collapse all"
+              aria-label="Collapse all"
+              onClick={collapseAll}
+              disabled={!session}
+              style={{ padding: 0, fontSize: "1.1em", borderRadius: 0, width: "1.8em", height: "1.8em" }}
+            >
+              −
+            </button>
+            <button
+              title="Expand all"
+              aria-label="Expand all"
+              onClick={expandAll}
+              disabled={!session}
+              style={{ padding: 0, fontSize: "1.1em", borderRadius: 0, width: "1.8em", height: "1.8em" }}
+            >
+              +
+            </button>
+          </div>
+        </div>
       </ColumnHeader>
       <div className="col-body list" style={{ overflow: "auto" }}>
         {session ? (
