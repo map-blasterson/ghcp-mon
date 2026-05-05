@@ -61,7 +61,7 @@ export function genId(prefix = "col"): string {
 
 const defaultColumns = (): Column[] => [
   { id: genId(), scenarioType: "live_sessions", title: "Sessions", config: {}, width: 1 },
-  { id: genId(), scenarioType: "spans", title: "Traces", config: {}, width: 1.4 },
+  { id: genId(), scenarioType: "spans", title: "Spans", config: {}, width: 1.4 },
   { id: genId(), scenarioType: "tool_detail", title: "Tool detail", config: {}, width: 1.4 },
   { id: genId(), scenarioType: "chat_detail", title: "Chat detail", config: {}, width: 1.6 },
 ];

@@ -269,6 +269,16 @@ export function SpansScenario({ column }: { column: Column }) {
   };
 
   const onPickSpan = (trace_id: string, span_id: string, kind_class: KindClass) => {
+    // Auto-sync follow mode on user-initiated selections.
+    if (isAutoAdvancing.current) {
+      isAutoAdvancing.current = false;
+    } else {
+      // User-initiated: engage follow if they picked the latest tool span.
+      setFollowMode(
+        latestToolSpan != null && span_id === latestToolSpan.span_id
+      );
+    }
+
     // For execute_tool selections, also auto-advance chat_detail
     // columns to the chat span that immediately follows the picked
     // tool span among its siblings (same parent_span_id) when one
@@ -333,16 +343,14 @@ export function SpansScenario({ column }: { column: Column }) {
     onPickSpan(trace_id, span_id, kind_class ?? "other");
   };
 
-  // "Follow latest tool call" convenience: if the user is currently
-  // sitting on what was the most-recent tool span, auto-advance the
-  // selection forward as new tool spans arrive. Once the user picks
-  // anything other than the latest, this disengages until they
-  // re-select the latest manually.
-  //
-  // The condition is end-time based (via sortKey) so it matches the
-  // visual tree ordering and correctly handles sub-agent tool spans
-  // that may arrive as placeholders before timestamps are filled in.
+  // --- follow mode (explicit state) ---
+  // When enabled, auto-advances selection to the latest tool span as
+  // new spans arrive. Enabled automatically when the user selects the
+  // latest tool span; disabled when they select something else.
   const TOOL_KINDS: KindClass[] = ["execute_tool", "external_tool"];
+  const [followMode, setFollowMode] = useState(false);
+  const isAutoAdvancing = useRef(false);
+
   const latestToolSpan = useMemo(() => {
     let best: SpanNode | null = null;
     let bestKey = -1;
@@ -359,35 +367,38 @@ export function SpansScenario({ column }: { column: Column }) {
     return best as SpanNode | null;
   }, [tree]);
 
-  const prevLatestKeyRef = useRef<number>(-1);
   useEffect(() => {
-    if (!latestToolSpan) {
-      prevLatestKeyRef.current = -1;
-      return;
-    }
-    const latestKey = sortKey(latestToolSpan);
-    const prevKey = prevLatestKeyRef.current;
-
-    // Look up the selected span's sortKey via nodeMap (O(1)).
-    const selectedNode = selected_span_id ? nodeMap.get(selected_span_id) : undefined;
-    const selectedKey = selectedNode ? sortKey(selectedNode) : -1;
-
-    // Follow engaged: selected span's sortKey matches the previous max
-    // (selected span WAS the latest before this tree update).
-    if (
-      prevKey > 0 &&
-      selectedKey === prevKey &&
-      latestKey > prevKey
-    ) {
+    if (!followMode || !latestToolSpan) return;
+    if (latestToolSpan.span_id !== selected_span_id) {
+      isAutoAdvancing.current = true;
       onPickSpan(latestToolSpan.trace_id, latestToolSpan.span_id, latestToolSpan.kind_class);
     }
-
-    prevLatestKeyRef.current = latestKey;
     // onPickSpan is intentionally omitted — it closes over `columns`
     // and recreates each render; we only care about advances driven by
     // tree updates and selection changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latestToolSpan, selected_span_id, nodeMap]);
+  }, [followMode, latestToolSpan, selected_span_id]);
+
+  // --- collapse state (lifted from SpanTreeView for header buttons) ---
+  const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
+  useEffect(() => { setUserCollapsed(new Set()); }, [session]);
+
+  const collapseAll = useCallback(() => {
+    // Collapse every span that has children.
+    const ids = new Set<string>();
+    const walk = (nodes: SpanNode[]) => {
+      for (const n of nodes) {
+        if (n.children && n.children.length > 0) ids.add(n.span_id);
+        walk(n.children ?? []);
+      }
+    };
+    walk(tree);
+    setUserCollapsed(ids);
+  }, [tree]);
+
+  const expandAll = useCallback(() => {
+    setUserCollapsed(new Set());
+  }, []);
 
   // Consume click-from-widget signal: when the context growth chart bar
   // is clicked, select the corresponding chat span in the tree.
@@ -442,6 +453,8 @@ export function SpansScenario({ column }: { column: Column }) {
             );
           })}
         </select>
+        {/* --- row 2: kind, search, follow/collapse/expand --- */}
+        <div style={{ flexBasis: "100%", height: 0 }} />
         <span className="dim">kind</span>
         <select
           value={kind_filter ?? ""}
@@ -466,9 +479,43 @@ export function SpansScenario({ column }: { column: Column }) {
             placeholder="search…"
             value={searchText}
             onChange={(e) => onSearchChange(e.target.value)}
-            style={{ marginLeft: 6, minWidth: 80, flex: "1 1 auto" }}
+            style={{ minWidth: 80, flex: "1 1 auto" }}
           />
         )}
+        <label
+          title="Auto-follow the latest tool span"
+          style={{ display: "inline-flex", alignItems: "center", gap: 2, cursor: "pointer", whiteSpace: "nowrap" }}
+        >
+          follow
+          <input
+            type="checkbox"
+            checked={followMode}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setFollowMode(on);
+              if (on && latestToolSpan && latestToolSpan.span_id !== selected_span_id) {
+                isAutoAdvancing.current = true;
+                onPickSpan(latestToolSpan.trace_id, latestToolSpan.span_id, latestToolSpan.kind_class);
+              }
+            }}
+          />
+        </label>
+        <button
+          title="Collapse all"
+          aria-label="Collapse all"
+          onClick={collapseAll}
+          disabled={!session}
+        >
+          [-]
+        </button>
+        <button
+          title="Expand all"
+          aria-label="Expand all"
+          onClick={expandAll}
+          disabled={!session}
+        >
+          [+]
+        </button>
       </ColumnHeader>
       <div className="col-body list" style={{ overflow: "auto" }}>
         {session ? (
@@ -480,6 +527,8 @@ export function SpansScenario({ column }: { column: Column }) {
             selectedSpanId={selected_span_id}
             onSelect={onPickSpan}
             searchHitSpanIds={searchHitSpanIds}
+            userCollapsed={userCollapsed}
+            setUserCollapsed={setUserCollapsed}
           />
         ) : (
           <TracesList
@@ -623,6 +672,8 @@ function SpanTreeView({
   selectedSpanId,
   onSelect,
   searchHitSpanIds,
+  userCollapsed,
+  setUserCollapsed,
 }: {
   tree: SpanNode[];
   loading: boolean;
@@ -630,8 +681,9 @@ function SpanTreeView({
   selectedSpanId: string | undefined;
   onSelect: (t: string, s: string, k: KindClass) => void;
   searchHitSpanIds: Set<string> | null;
+  userCollapsed: Set<string>;
+  setUserCollapsed: React.Dispatch<React.SetStateAction<Set<string>>>;
 }) {
-  const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
 
   const parentMap = useMemo(() => buildParentMap(tree), [tree]);
 
