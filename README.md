@@ -7,9 +7,17 @@ Local-first telemetry collector + realtime dashboard for the GitHub Copilot CLI'
 
 ## Usage
 
-### Running
+### Running the Release Build
 
-Launch Copilot CLI with the OTLP exporter pointed at ghcp-mon:
+Run `./ghcp-mon serve` and click the API+WS link to open the dashboard:
+
+```
+$ ./ghcp-mon serve
+ INFO OTLP listening on http://127.0.0.1:4318
+ INFO API+WS listening on http://127.0.0.1:4319
+```
+
+Then launch Copilot CLI with the OTLP exporter pointed at ghcp-mon:
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
@@ -18,13 +26,7 @@ OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental \
 copilot
 ```
 
-Then run `./ghcp-mon serve` and click the API+WS link to open the dashboard:
 
-```
-$ ./ghcp-mon serve
- INFO OTLP listening on http://127.0.0.1:4318
- INFO API+WS listening on http://127.0.0.1:4319
-```
 
 ### Listeners
 
