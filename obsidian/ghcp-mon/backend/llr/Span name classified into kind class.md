@@ -3,6 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
+  - github-specific
 ---
 `SpanKindClass::from_name(name)` MUST classify a span name as `InvokeAgent` if `name == "invoke_agent"` or `name` starts with `"invoke_agent "`, `Chat` if it starts with `"chat"`, `ExecuteTool` if it starts with `"execute_tool"`, `ExternalTool` if it starts with `"external_tool"`, and `Other` otherwise.
 

@@ -3,6 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
+  - github-specific
 ---
 For a span classified as `ExternalTool`, the normalizer MUST upsert one row in `external_tool_calls` keyed by `span_pk`, taking `call_id` from `github.copilot.external_tool.call_id` (falling back to `gen_ai.tool.call.id`) and `tool_name` from `github.copilot.external_tool.name` (falling back to `gen_ai.tool.name`).
 
