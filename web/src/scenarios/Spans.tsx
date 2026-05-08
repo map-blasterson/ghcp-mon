@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
 import type { Column } from "../state/workspace";
@@ -89,6 +90,12 @@ function findLatestChatDescendant(node: SpanNode): SpanNode | undefined {
   return best;
 }
 
+interface FlatRow {
+  node: SpanNode;
+  depth: number;
+  chatAncestorPk: number | null;
+}
+
 function flattenSpanTree(tree: SpanNode[], collapsed?: Set<string>): SpanNode[] {
   const rows: SpanNode[] = [];
   const walk = (nodes: SpanNode[]) => {
@@ -99,6 +106,20 @@ function flattenSpanTree(tree: SpanNode[], collapsed?: Set<string>): SpanNode[] 
     }
   };
   walk(tree);
+  return rows;
+}
+
+function flattenSpanTreeWithMeta(tree: SpanNode[], collapsed?: Set<string>): FlatRow[] {
+  const rows: FlatRow[] = [];
+  const walk = (nodes: SpanNode[], depth: number, chatAncestorPk: number | null) => {
+    for (const n of nodes) {
+      const myChat = n.kind_class === "chat" ? n.span_pk : chatAncestorPk;
+      rows.push({ node: n, depth, chatAncestorPk: myChat });
+      if (collapsed?.has(n.span_id)) continue;
+      walk(n.children ?? [], depth + 1, myChat);
+    }
+  };
+  walk(tree, 0, null);
   return rows;
 }
 
@@ -534,7 +555,7 @@ export function SpansScenario({ column }: { column: Column }) {
           </div>
         </div>
       </ColumnHeader>
-      <div className="col-body list" style={{ overflow: "auto" }}>
+      <div className="col-body list" style={{ overflow: session ? "hidden" : "auto" }}>
         {session ? (
           <SpanTreeView
             key={session}
@@ -680,7 +701,9 @@ function KindCountChips({ counts }: { counts: TraceSummary["kind_counts"] }) {
   );
 }
 
-// --- per-trace tree ---------------------------------------------------
+// --- per-trace tree (virtualized) ----------------------------------------
+
+const ROW_HEIGHT_PX = 24;
 
 function SpanTreeView({
   tree,
@@ -750,16 +773,35 @@ function SpanTreeView({
   );
 
   const rows = useMemo(
-    () => flattenSpanTree(tree, effectiveCollapsed),
+    () => flattenSpanTreeWithMeta(tree, effectiveCollapsed),
     [tree, effectiveCollapsed],
   );
+
+  // Scroll container ref for the virtualizer.
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT_PX,
+    overscan: 15,
+  });
+
+  // Scroll selected row into view when selection changes.
+  useEffect(() => {
+    if (!selectedSpanId) return;
+    const idx = rows.findIndex((r) => r.node.span_id === selectedSpanId);
+    if (idx >= 0) virtualizer.scrollToIndex(idx, { align: "auto" });
+    // virtualizer instance is stable across renders
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpanId, rows]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
     e.preventDefault();
     if (rows.length === 0) return;
 
-    const current = rows.findIndex((n) => n.span_id === selectedSpanId);
+    const current = rows.findIndex((r) => r.node.span_id === selectedSpanId);
     const nextIndex =
       e.key === "ArrowDown"
         ? current < 0
@@ -769,37 +811,54 @@ function SpanTreeView({
           ? rows.length - 1
           : Math.max(current - 1, 0);
     const next = rows[nextIndex];
-    if (!next || next.span_id === selectedSpanId) return;
-    onSelect(next.trace_id, next.span_id, next.kind_class);
+    if (!next || next.node.span_id === selectedSpanId) return;
+    onSelect(next.node.trace_id, next.node.span_id, next.node.kind_class);
   };
 
   if (loading) return <div className="empty-state">loading…</div>;
   if (tree.length === 0) return <div className="empty-state">no spans in trace</div>;
+
+  const virtualItems = virtualizer.getVirtualItems();
+
   return (
     <div
+      ref={scrollRef}
       tabIndex={0}
       onMouseDown={(e) => e.currentTarget.focus({ preventScroll: true })}
       onKeyDown={onKeyDown}
+      style={{ height: "100%", overflow: "auto" }}
     >
-      {tree.map((n) => (
-        <SpanTreeNode
-          key={n.span_pk}
-          node={n}
-          depth={0}
-          kindFilter={kindFilter}
-          selectedSpanId={selectedSpanId}
-          onSelect={onSelect}
-          chatAncestorPk={null}
-          searchHitSpanIds={searchHitSpanIds}
-          effectiveCollapsed={effectiveCollapsed}
-          toggleCollapse={toggleCollapse}
-        />
-      ))}
+      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        {virtualItems.map((vi) => {
+          const { node, depth, chatAncestorPk } = rows[vi.index];
+          return (
+            <SpanTreeRow
+              key={node.span_pk}
+              node={node}
+              depth={depth}
+              chatAncestorPk={chatAncestorPk}
+              kindFilter={kindFilter}
+              selectedSpanId={selectedSpanId}
+              onSelect={onSelect}
+              searchHitSpanIds={searchHitSpanIds}
+              effectiveCollapsed={effectiveCollapsed}
+              toggleCollapse={toggleCollapse}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${vi.start}px)`,
+              }}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function SpanTreeNode({
+function SpanTreeRow({
   node,
   depth,
   kindFilter,
@@ -809,6 +868,7 @@ function SpanTreeNode({
   searchHitSpanIds,
   effectiveCollapsed,
   toggleCollapse,
+  style,
 }: {
   node: SpanNode;
   depth: number;
@@ -819,6 +879,7 @@ function SpanTreeNode({
   searchHitSpanIds: Set<string> | null;
   effectiveCollapsed: Set<string>;
   toggleCollapse: (span_id: string) => void;
+  style?: React.CSSProperties;
 }) {
   const isSearchActive = searchHitSpanIds !== null;
   const isSearchHit = isSearchActive && searchHitSpanIds.has(node.span_id);
@@ -832,70 +893,53 @@ function SpanTreeNode({
   const setHoveredChatPk = useHoverState((s) => s.setHoveredChatPk);
   const hoverChatPk =
     node.kind_class === "chat" ? node.span_pk : chatAncestorPk;
-  const childChatAncestorPk =
-    node.kind_class === "chat" ? node.span_pk : chatAncestorPk;
-  const rowRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (sel) rowRef.current?.scrollIntoView({ block: "nearest" });
-  }, [sel]);
   const hasChildren = node.children.length > 0;
   const collapsed = effectiveCollapsed.has(node.span_id);
+
+  // Clear hover state if this row unmounts while hovered (virtualization).
+  const hoveredRef = useRef(false);
+  useEffect(() => {
+    return () => { if (hoveredRef.current) setHoveredChatPk(null); };
+  }, [setHoveredChatPk]);
+
   return (
-    <div>
-      <div
-        ref={rowRef}
-        className={`row${sel ? " sel" : ""}${isSearchHit ? " search-hit" : ""}${searchMiss ? " search-miss" : ""}${dim ? " kind-dim" : ""}`}
-        style={{ paddingLeft: depth * 12 + 6 }}
-        onClick={() => onSelect(node.trace_id, node.span_id, node.kind_class)}
-        onMouseEnter={() => setHoveredChatPk(hoverChatPk ?? null)}
-        onMouseLeave={() => setHoveredChatPk(null)}
-      >
-        <span className={kindCls(node.kind_class)}>{kindLabel(node.kind_class)}</span>
-        {node.ingestion_state === "placeholder" && (
-          <span className="tag warn"><RollingDots /></span>
-        )}
-        <ProjectionChips projection={node.projection} />
-        {(node.projection?.tool_call?.tool_name === "bash" || node.projection?.tool_call?.tool_name === "powershell") && (
-          <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />
-        )}
-        {node.projection?.tool_call?.tool_name === "skill" && (
-          <SkillNameChip trace_id={node.trace_id} span_id={node.span_id} />
-        )}
-        <TargetBadge trace_id={node.trace_id} span_id={node.span_id} />
-        <ReportIntentTitle nodes={node.children} />
-        <span className="sec">{fmtNs(dur)}</span>
-        <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
-        {hasChildren ? (
-          <button
-            className="row-action"
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleCollapse(node.span_id);
-            }}
-            aria-label={collapsed ? "expand" : "collapse"}
-            style={collapsed ? { display: "inline-block", transform: "rotate(90deg)" } : undefined}
-          >
-            ▾
-          </button>
-        ) : (
-          <span className="row-action" style={{ visibility: "hidden" }}>▾</span>
-        )}
-      </div>
-      {!collapsed &&
-        node.children.map((c) => (
-          <SpanTreeNode
-            key={c.span_pk}
-            node={c}
-            depth={depth + 1}
-            kindFilter={kindFilter}
-            selectedSpanId={selectedSpanId}
-            onSelect={onSelect}
-            chatAncestorPk={childChatAncestorPk}
-            searchHitSpanIds={searchHitSpanIds}
-            effectiveCollapsed={effectiveCollapsed}
-            toggleCollapse={toggleCollapse}
-          />
-        ))}
+    <div
+      className={`row${sel ? " sel" : ""}${isSearchHit ? " search-hit" : ""}${searchMiss ? " search-miss" : ""}${dim ? " kind-dim" : ""}`}
+      style={{ ...style, height: ROW_HEIGHT_PX, overflow: "hidden", paddingLeft: depth * 12 + 6 }}
+      onClick={() => onSelect(node.trace_id, node.span_id, node.kind_class)}
+      onMouseEnter={() => { hoveredRef.current = true; setHoveredChatPk(hoverChatPk ?? null); }}
+      onMouseLeave={() => { hoveredRef.current = false; setHoveredChatPk(null); }}
+    >
+      <span className={kindCls(node.kind_class)}>{kindLabel(node.kind_class)}</span>
+      {node.ingestion_state === "placeholder" && (
+        <span className="tag warn"><RollingDots /></span>
+      )}
+      <ProjectionChips projection={node.projection} />
+      {(node.projection?.tool_call?.tool_name === "bash" || node.projection?.tool_call?.tool_name === "powershell") && (
+        <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />
+      )}
+      {node.projection?.tool_call?.tool_name === "skill" && (
+        <SkillNameChip trace_id={node.trace_id} span_id={node.span_id} />
+      )}
+      <TargetBadge trace_id={node.trace_id} span_id={node.span_id} />
+      <ReportIntentTitle nodes={node.children} />
+      <span className="sec">{fmtNs(dur)}</span>
+      <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
+      {hasChildren ? (
+        <button
+          className="row-action"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleCollapse(node.span_id);
+          }}
+          aria-label={collapsed ? "expand" : "collapse"}
+          style={collapsed ? { display: "inline-block", transform: "rotate(90deg)" } : undefined}
+        >
+          ▾
+        </button>
+      ) : (
+        <span className="row-action" style={{ visibility: "hidden" }}>▾</span>
+      )}
     </div>
   );
 }
