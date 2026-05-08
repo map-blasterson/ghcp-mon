@@ -3,6 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
+  - github-specific
 ---
 For each span event named `github.copilot.hook.start`, the normalizer MUST upsert a `hook_invocations` row keyed by `invocation_id` (from `github.copilot.hook.invocation_id`), recording `hook_type`, `span_pk`, `conversation_id`, and `start_unix_ns` from the event's time, coalescing `conversation_id` on conflict.
 

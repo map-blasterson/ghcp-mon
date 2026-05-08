@@ -3,6 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/local-session
+  - github-specific
 ---
 `local_session::read_workspace_yaml(base, cid)` MUST return `None` without touching the filesystem when `cid` is empty or contains any of the substrings `/`, `\\`, or `..`.
 
