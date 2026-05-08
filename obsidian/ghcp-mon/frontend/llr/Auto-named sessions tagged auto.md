@@ -3,6 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/live-sessions
+  - github-specific
 ---
 A session row whose `local_name` is non-empty AND whose `user_named` is exactly `false` MUST render an `auto` badge with the title `"auto-summarized name (use /rename in copilot to set)"`.
 
