@@ -12,4 +12,5 @@ Defines the internal envelope shapes (`Envelope`, `SpanEnvelope`, `MetricEnvelop
 
 ## Source For
 - [[Span name classified into kind class]]
+- [[Span name classifies ExternalTool kind]]
 - [[Replay parser tags envelopes by type]]
