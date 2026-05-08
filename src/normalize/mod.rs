@@ -105,8 +105,11 @@ async fn normalize_span(ctx: &NormalizeCtx<'_>, s: &SpanEnvelope) -> anyhow::Res
     let model = attr_str(&s.attributes, "gen_ai.request.model")
         .or_else(|| attr_str(&s.attributes, "gen_ai.response.model"))
         .map(|s| s.to_string());
+    let service_name = s.resource.as_ref()
+        .and_then(|r| attr_str(&r.attributes, "service.name"))
+        .map(|s| s.to_string());
     if let Some(cid) = &conv_id {
-        upsert_session_for_span(ctx, cid, start_ns, end_ns, model.as_deref()).await?;
+        upsert_session_for_span(ctx, cid, start_ns, end_ns, model.as_deref(), service_name.as_deref()).await?;
     }
 
     derive_from_events(ctx, span_pk, s, conv_id.as_deref()).await?;
@@ -463,18 +466,19 @@ async fn effective_conversation_id(pool: &SqlitePool, span_pk: i64) -> sqlx::Res
 
 async fn upsert_session_for_span(
     ctx: &NormalizeCtx<'_>, conv_id: &str,
-    start_ns: i64, end_ns: Option<i64>, model: Option<&str>,
+    start_ns: i64, end_ns: Option<i64>, model: Option<&str>, service_name: Option<&str>,
 ) -> anyhow::Result<()> {
     let last_ns = end_ns.unwrap_or(start_ns);
     sqlx::query(
-        "INSERT INTO sessions(conversation_id, first_seen_ns, last_seen_ns, latest_model) \
-         VALUES(?,?,?,?) \
+        "INSERT INTO sessions(conversation_id, first_seen_ns, last_seen_ns, latest_model, service_name) \
+         VALUES(?,?,?,?,?) \
          ON CONFLICT(conversation_id) DO UPDATE SET \
             first_seen_ns = MIN(COALESCE(sessions.first_seen_ns, excluded.first_seen_ns), excluded.first_seen_ns), \
             last_seen_ns = MAX(COALESCE(sessions.last_seen_ns, excluded.last_seen_ns), excluded.last_seen_ns), \
-            latest_model = COALESCE(excluded.latest_model, sessions.latest_model)"
+            latest_model = COALESCE(excluded.latest_model, sessions.latest_model), \
+            service_name = COALESCE(sessions.service_name, excluded.service_name)"
     )
-    .bind(conv_id).bind(start_ns).bind(last_ns).bind(model)
+    .bind(conv_id).bind(start_ns).bind(last_ns).bind(model).bind(service_name)
     .execute(ctx.pool).await?;
 
     sqlx::query(
