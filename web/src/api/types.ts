@@ -16,6 +16,7 @@ export interface SessionSummary {
   chat_turn_count: number;
   tool_call_count: number;
   agent_run_count: number;
+  service_name: Nullable<string>;
   // Sidecar metadata read from
   // ~/.copilot/session-state/<cid>/workspace.yaml. Optional because
   // the dir may not exist (older sessions, different host, etc.).

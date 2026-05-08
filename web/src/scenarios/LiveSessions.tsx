@@ -72,7 +72,8 @@ export function LiveSessionsScenario({ column }: { column: Column }) {
           {q.error && <div className="empty-state">error: {String(q.error)}</div>}
           {q.data?.sessions.map((s) => {
             const shortId = s.conversation_id.slice(0, 8);
-            const name = s.local_name && s.local_name.trim().length > 0 ? s.local_name : null;
+            const isGhcp = s.service_name === "github-copilot";
+            const name = isGhcp && s.local_name && s.local_name.trim().length > 0 ? s.local_name : null;
             return (
               <div
                 key={s.conversation_id}
@@ -105,7 +106,7 @@ export function LiveSessionsScenario({ column }: { column: Column }) {
                   <span className="sec">{s.tool_call_count} tool{s.tool_call_count === 1 ? "" : "s"}</span>
                   <span className="sep">·</span>
                   <span className="sec">{s.agent_run_count} agent{s.agent_run_count === 1 ? "" : "s"}</span>
-                  {s.branch && (
+                  {isGhcp && s.branch && (
                     <>
                       <span className="sep">·</span>
                       <span className="sec mono" title={s.cwd ?? undefined}>{s.branch}</span>

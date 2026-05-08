@@ -38,14 +38,14 @@ fn classify(name: &str) -> &'static str {
 pub async fn list_sessions(State(s): State<AppState>, Query(q): Query<ListQuery>) -> AppResult<Json<Value>> {
     let lim = limit(&q, 50, 500);
     let since = q.since.unwrap_or(0);
-    let rows: Vec<(String, Option<i64>, Option<i64>, Option<String>, i64, i64, i64)> = sqlx::query_as(
+    let rows: Vec<(String, Option<i64>, Option<i64>, Option<String>, i64, i64, i64, Option<String>)> = sqlx::query_as(
         "SELECT conversation_id, first_seen_ns, last_seen_ns, latest_model, \
-                chat_turn_count, tool_call_count, agent_run_count \
+                chat_turn_count, tool_call_count, agent_run_count, service_name \
          FROM sessions \
          WHERE COALESCE(last_seen_ns, 0) >= ? ORDER BY COALESCE(last_seen_ns, 0) DESC LIMIT ?"
     ).bind(since).bind(lim).fetch_all(&s.pool).await?;
     let base = crate::local_session::resolve_session_state_dir(s.session_state_dir_override.as_deref());
-    let out: Vec<Value> = rows.into_iter().map(|(cid, f, l, m, ctc, tcc, arc)| {
+    let out: Vec<Value> = rows.into_iter().map(|(cid, f, l, m, ctc, tcc, arc, sn)| {
         let local = base
             .as_deref()
             .and_then(|b| crate::local_session::read_workspace_yaml(b, &cid));
@@ -57,6 +57,7 @@ pub async fn list_sessions(State(s): State<AppState>, Query(q): Query<ListQuery>
             "conversation_id": cid, "first_seen_ns": f, "last_seen_ns": l,
             "latest_model": m,
             "chat_turn_count": ctc, "tool_call_count": tcc, "agent_run_count": arc,
+            "service_name": sn,
             "local_name": name,
             "user_named": user_named,
             "cwd": cwd,
@@ -67,12 +68,12 @@ pub async fn list_sessions(State(s): State<AppState>, Query(q): Query<ListQuery>
 }
 
 pub async fn get_session(State(s): State<AppState>, Path(cid): Path<String>) -> AppResult<Json<Value>> {
-    let row: Option<(String, Option<i64>, Option<i64>, Option<String>, i64, i64, i64)> = sqlx::query_as(
+    let row: Option<(String, Option<i64>, Option<i64>, Option<String>, i64, i64, i64, Option<String>)> = sqlx::query_as(
         "SELECT conversation_id, first_seen_ns, last_seen_ns, latest_model, \
-                chat_turn_count, tool_call_count, agent_run_count \
+                chat_turn_count, tool_call_count, agent_run_count, service_name \
          FROM sessions WHERE conversation_id = ?"
     ).bind(&cid).fetch_optional(&s.pool).await?;
-    let (cid, f, l, m, ctc, tcc, arc) = row.ok_or(AppError::NotFound)?;
+    let (cid, f, l, m, ctc, tcc, arc, sn) = row.ok_or(AppError::NotFound)?;
     let span_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM spans WHERE json_extract(attributes_json, '$.\"gen_ai.conversation.id\"') = ?"
     ).bind(&cid).fetch_one(&s.pool).await?;
@@ -87,6 +88,7 @@ pub async fn get_session(State(s): State<AppState>, Path(cid): Path<String>) -> 
         "conversation_id": cid,
         "first_seen_ns": f, "last_seen_ns": l, "latest_model": m,
         "chat_turn_count": ctc, "tool_call_count": tcc, "agent_run_count": arc,
+        "service_name": sn,
         "span_count": span_count,
         "local_name": name,
         "user_named": user_named,
