@@ -15,6 +15,7 @@ Original source file for reverse-engineered requirements.
 - [[Placeholder upgrade preserved across reingest]]
 - [[Invoke agent span upserts agent run]]
 - [[Chat span upserts chat turn]]
+- [[Chat turn includes Copilot interaction and turn IDs]]
 - [[Execute tool span upserts tool call]]
 - [[External tool span upserts external tool call]]
 - [[External tool paired to internal tool call by call id]]
