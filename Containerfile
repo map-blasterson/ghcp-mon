@@ -1,9 +1,11 @@
 # Multi-stage build:
-#   web      -> Vite SPA bundle (web/dist)
-#   linux    -> static-ish Linux ELF                       (x86_64-unknown-linux-gnu)
-#   windows  -> Windows .exe via cargo-xwin (clang-cl)     (x86_64-pc-windows-msvc)
-#   darwin   -> macOS universal2 Mach-O via cargo-zigbuild (universal2-apple-darwin)
-#   dist     -> scratch stage that just exposes the binaries for `-o type=local`
+#   web         -> Vite SPA bundle (web/dist)
+#   linux       -> static-ish Linux ELF                       (x86_64-unknown-linux-gnu)
+#   windows     -> Windows .exe via cargo-xwin (clang-cl)     (x86_64-pc-windows-msvc)
+#   darwin      -> macOS universal2 Mach-O via cargo-zigbuild (universal2-apple-darwin)
+#   dist        -> scratch stage that just exposes the binaries for `-o type=local`
+#   deb-builder -> runs cargo-deb against the prebuilt linux ELF
+#   deb         -> scratch stage that exposes the .deb for `-o type=local`
 #
 # Build everything and extract artifacts:
 #   podman build --target dist -o type=local,dest=./dist .
@@ -87,3 +89,18 @@ FROM scratch AS dist
 COPY --from=linux   /src/target/release/ghcp-mon                              /ghcp-mon
 COPY --from=windows /src/target/x86_64-pc-windows-msvc/release/ghcp-mon.exe   /ghcp-mon.exe
 COPY --from=darwin  /src/target/universal2-apple-darwin/release/ghcp-mon      /ghcp-mon-darwin
+
+# ---- deb-builder -------------------------------------------------------------
+# Reuse the already-built linux ELF and run cargo-deb against it. `--no-build`
+# avoids a second Rust compile; `--no-strip` keeps the binary identical to the
+# one shipped in the tar.gz from the `dist` stage.
+FROM linux AS deb-builder
+RUN cargo install cargo-deb --locked --version ^2
+COPY debian/ ./debian/
+COPY LICENSE README.md ./
+RUN cargo deb --no-build --no-strip
+# -> /src/target/debian/ghcp-mon_<version>_amd64.deb
+
+# ---- deb ---------------------------------------------------------------------
+FROM scratch AS deb
+COPY --from=deb-builder /src/target/debian/ /

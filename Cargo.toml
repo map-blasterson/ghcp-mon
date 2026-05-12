@@ -2,6 +2,10 @@
 name = "ghcp-mon"
 version = "0.0.7"
 edition = "2021"
+description = "Local-first GitHub Copilot CLI telemetry collector + dashboard backend."
+license = "MIT"
+repository = "https://github.com/map-blasterson/ghcp-mon"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -36,3 +40,26 @@ futures-util = "0.3.32"
 
 [profile.release]
 lto = "thin"
+
+# ---- Debian packaging (cargo-deb) -------------------------------------------
+# Built by `scripts/deb.sh` via the `deb` stage in Containerfile. amd64 only.
+# Ships a *user* systemd unit; postinst deliberately does not enable it.
+[package.metadata.deb]
+maintainer = "Map Blasterson <mabeltma@microsoft.com>"
+copyright = "2026 Map Blasterson"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+ghcp-mon ingests OTLP telemetry from the GitHub Copilot CLI into a local
+SQLite database and serves a dashboard REST API + WebSocket. This package
+installs ghcp-mon as a per-user systemd service (not enabled by default)."""
+section = "utils"
+priority = "optional"
+depends = "$auto, systemd"
+maintainer-scripts = "debian/"
+conf-files = ["/etc/default/ghcp-mon"]
+assets = [
+    ["target/release/ghcp-mon",        "usr/bin/",                                  "755"],
+    ["debian/ghcp-mon.service",        "usr/lib/systemd/user/ghcp-mon.service",     "644"],
+    ["debian/default",                 "etc/default/ghcp-mon",                      "644"],
+    ["README.md",                      "usr/share/doc/ghcp-mon/README",             "644"],
+]

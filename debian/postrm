@@ -1,0 +1,31 @@
+#!/bin/sh
+# postrm for ghcp-mon.
+#
+# We never touch per-user state in ~/.local/state/ghcp-mon/ — removing other
+# users' data from a system maintainer script is not safe. Inform the admin
+# instead.
+
+set -e
+
+case "$1" in
+    purge)
+        cat <<'EOF'
+
+ghcp-mon purged.
+
+Per-user state was NOT removed. To wipe a user's data, run as that user:
+
+    systemctl --user disable --now ghcp-mon.service 2>/dev/null || true
+    rm -rf ~/.local/state/ghcp-mon ~/.config/ghcp-mon
+
+EOF
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
