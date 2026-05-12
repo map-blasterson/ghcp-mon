@@ -1,0 +1,37 @@
+#!/bin/sh
+# postinst for ghcp-mon.
+#
+# ghcp-mon is shipped as a *user* systemd service. We deliberately do NOT
+# enable or start anything system-wide. The user must opt in per account.
+
+set -e
+
+case "$1" in
+    configure)
+        cat <<'EOF'
+
+ghcp-mon installed.
+
+This package ships a *user* systemd unit; nothing has been enabled.
+To run ghcp-mon as your own user:
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now ghcp-mon.service
+
+Defaults live in /etc/default/ghcp-mon. To override per user, create
+~/.config/ghcp-mon/env with the same KEY=value lines.
+
+The SQLite database is created at ~/.local/state/ghcp-mon/ghcp-mon.db
+on first run.
+
+EOF
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

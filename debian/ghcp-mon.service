@@ -1,0 +1,20 @@
+[Unit]
+Description=ghcp-mon — local GitHub Copilot CLI telemetry collector + dashboard
+Documentation=https://github.com/map-blasterson/ghcp-mon
+After=network.target
+
+[Service]
+Type=simple
+# System-wide defaults shipped by the .deb (conffile).
+EnvironmentFile=-/etc/default/ghcp-mon
+# Optional per-user override; create ~/.config/ghcp-mon/env to customize.
+EnvironmentFile=-%h/.config/ghcp-mon/env
+# %S = $XDG_STATE_HOME for --user services (~/.local/state by default).
+# StateDirectory=ghcp-mon ensures %S/ghcp-mon exists with mode 0700.
+StateDirectory=ghcp-mon
+ExecStart=/usr/bin/ghcp-mon --db %S/ghcp-mon/ghcp-mon.db serve --otlp-addr ${GHCP_MON_OTLP_ADDR} --api-addr ${GHCP_MON_API_ADDR}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

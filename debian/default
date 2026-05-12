@@ -1,0 +1,11 @@
+# Defaults for the ghcp-mon user systemd service (/usr/lib/systemd/user/ghcp-mon.service).
+#
+# This file is a dpkg conffile: edits made here are preserved across upgrades.
+# To override on a per-user basis without touching the system file, create
+# ~/.config/ghcp-mon/env containing the same KEY=value lines.
+
+# Address for the OTLP/HTTP receiver (POST /v1/traces|metrics|logs).
+GHCP_MON_OTLP_ADDR=127.0.0.1:4318
+
+# Address for the dashboard REST API + WebSocket.
+GHCP_MON_API_ADDR=127.0.0.1:4319
