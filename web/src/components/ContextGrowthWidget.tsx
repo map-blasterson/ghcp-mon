@@ -314,6 +314,7 @@ function Legend() {
     >
       <span><Sw c="#60a5fa" />input</span>
       <span><Sw c="#93c5fd" />sub-agent input</span>
+      <span><Sw c="#4ade80" />cache read</span>
       <span><Sw c="#fb923c" />output</span>
       <span><Sw c="#fde047" />reasoning</span>
     </div>
@@ -431,16 +432,18 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk, onBarClick }: ChartProps) 
           {rows.map(({ m, info }) => {
             const isSub = info.invokeAgentDepth > 1;
             const rawInp = m.input_tokens ?? 0;
-            const cacheR = m.cache_read_tokens ?? 0;
-            // For sub-agents, exclude cache_read_tokens (the replayed
-            // cached prompt) so the bar reflects only fresh per-call
-            // input. For the root agent, keep input_tokens as-is.
-            const inp = isSub ? Math.max(0, rawInp - cacheR) : rawInp;
+            const cacheR = Math.min(m.cache_read_tokens ?? 0, rawInp);
+            // Split input into a cache-read portion (replayed cached
+            // prompt) and a fresh portion. Stack fresh input on top of
+            // cache read so the blue segment shows new tokens added
+            // this turn.
+            const inp = Math.max(0, rawInp - cacheR);
             const out = m.output_tokens ?? 0;
             const rea = m.reasoning_tokens ?? 0;
-            const total = inp + out + rea;
+            const total = cacheR + inp + out + rea;
             const isHovered = hoveredChatPk === info.span_pk;
             const colors = {
+              cache: "#4ade80",
               input: isSub ? "#93c5fd" : "#60a5fa",
               output: "#fb923c",
               reasoning: "#fde047",
@@ -471,7 +474,8 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk, onBarClick }: ChartProps) 
                 }}
                 title={
                   `span_pk=${info.span_pk}\n` +
-                  `input=${inp} (raw=${rawInp}, cache_read=${cacheR})\n` +
+                  `cache_read=${cacheR}\n` +
+                  `input=${inp} (raw=${rawInp})\n` +
                   `output=${out}\n` +
                   `reasoning=${rea}\n` +
                   `total=${total}\n` +
@@ -490,6 +494,12 @@ function Chart({ rows, yMax, maxLimit, hoveredChatPk, onBarClick }: ChartProps) 
                 >
                   {total > 0 && (
                     <>
+                      <div
+                        style={{
+                          height: `${(cacheR / total) * 100}%`,
+                          background: colors.cache,
+                        }}
+                      />
                       <div
                         style={{
                           height: `${(inp / total) * 100}%`,
