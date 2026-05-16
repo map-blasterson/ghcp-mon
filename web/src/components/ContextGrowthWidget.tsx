@@ -118,8 +118,7 @@ export function ContextGrowthWidget() {
     // and one `chat_span` snapshot (carrying input/output/reasoning
     // tokens). Combine them by taking the max non-null token_limit and
     // the latest non-null token-count fields per span.
-    interface Merged extends MergedRow {}
-    const byPk = new Map<number, Merged>();
+    const byPk = new Map<number, MergedRow>();
     for (const s of snapshots) {
       if (s.span_pk == null) continue;
       if (!chatByPk.has(s.span_pk)) continue;
@@ -172,7 +171,11 @@ export function ContextGrowthWidget() {
         mc = s.current_tokens;
       }
     }
-    const yMax = ml > 0 ? Math.max(ml * 1.10, mc) : mc || 1;
+    // Always give 10% headroom above whichever is larger of token_limit
+    // and observed current_tokens. Some sessions never report
+    // token_limit, in which case current_tokens alone drives the axis
+    // (and can well exceed any limit we'd otherwise assume).
+    const yMax = Math.max(ml, mc) * 1.10 || 1;
     return { maxLimit: ml, yMax };
   }, [snapshots]);
 
