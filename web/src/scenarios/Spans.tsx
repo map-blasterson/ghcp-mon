@@ -932,6 +932,9 @@ function SpanTreeRow({
         />
       )}
       <ReportIntentTitle nodes={node.children} />
+      {node.projection?.tool_call && (
+        <DescriptionLabel trace_id={node.trace_id} span_id={node.span_id} />
+      )}
       <span className="sec">{fmtNs(dur)}</span>
       <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
       {hasChildren ? (
@@ -1188,6 +1191,32 @@ function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string 
   }
 
   return null;
+}
+
+// Renders the tool call's `description` argument (when present) as an
+// unadorned white inline label appended at the end of the row's
+// variable-width content. Mirrors ReportIntentText's lightweight chrome
+// (no border/background) and shares the same `["span", trace_id,
+// span_id]` query cache as the surrounding chips.
+function DescriptionLabel({
+  trace_id,
+  span_id,
+}: {
+  trace_id: string;
+  span_id: string;
+}) {
+  const q = useQuery({
+    queryKey: ["span", trace_id, span_id],
+    queryFn: () => api.getSpan(trace_id, span_id),
+    enabled: !!trace_id && !!span_id,
+    staleTime: 30_000,
+  });
+  if (!q.data) return null;
+  const args = parseToolCallArguments(q.data.span.attributes ?? {});
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  const desc = (args as Record<string, unknown>).description;
+  if (typeof desc !== "string" || !desc) return null;
+  return <span style={{ marginLeft: 6, color: "#fff" }}>{desc}</span>;
 }
 
 // Count newline-terminated lines in a string. A trailing newline is
