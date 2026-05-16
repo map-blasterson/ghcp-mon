@@ -922,6 +922,15 @@ function SpanTreeRow({
         <SkillNameChip trace_id={node.trace_id} span_id={node.span_id} />
       )}
       <TargetBadge trace_id={node.trace_id} span_id={node.span_id} />
+      {(node.projection?.tool_call?.tool_name === "edit" ||
+        node.projection?.tool_call?.tool_name === "create" ||
+        node.projection?.tool_call?.tool_name === "apply_patch") && (
+        <DiffStatBadge
+          trace_id={node.trace_id}
+          span_id={node.span_id}
+          tool_name={node.projection.tool_call.tool_name}
+        />
+      )}
       <ReportIntentTitle nodes={node.children} />
       <span className="sec">{fmtNs(dur)}</span>
       <span className="right dim">{fmtClock(node.start_unix_ns)}</span>
@@ -1179,4 +1188,112 @@ function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string 
   }
 
   return null;
+}
+
+// Count newline-terminated lines in a string. A trailing newline is
+// treated as a line terminator (not a separator) so "foo\n" counts as 1
+// line, matching how diffs report changes.
+function countLines(s: string): number {
+  if (s.length === 0) return 0;
+  const trimmed = s.endsWith("\n") ? s.slice(0, -1) : s;
+  return trimmed.split("\n").length;
+}
+
+// Parse a unified-diff patch body and return its added/removed line
+// counts. Skips `+++`/`---` file headers; everything else starting with
+// `+` or `-` is counted.
+function countPatchLines(patchText: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of patchText.split(/\r?\n/)) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) added++;
+    else if (line.startsWith("-")) removed++;
+  }
+  return { added, removed };
+}
+
+// Renders red (-N) and green (+M) line-change badges next to the file
+// name on file-mutating tool spans (`edit`, `create`, `apply_patch`).
+// Reuses the same `["span", trace_id, span_id]` query cache as
+// TargetBadge / BashCommandChip / FileTouches / ToolDetail so it is
+// free of extra requests once any of those siblings has loaded.
+function DiffStatBadge({
+  trace_id,
+  span_id,
+  tool_name,
+}: {
+  trace_id: string;
+  span_id: string;
+  tool_name: string;
+}) {
+  const q = useQuery({
+    queryKey: ["span", trace_id, span_id],
+    queryFn: () => api.getSpan(trace_id, span_id),
+    enabled: !!trace_id && !!span_id,
+    staleTime: 30_000,
+  });
+  if (!q.data) return null;
+  const args = parseToolCallArguments(q.data.span.attributes ?? {});
+
+  let added = 0;
+  let removed = 0;
+  if (tool_name === "apply_patch") {
+    // FileTouches' extractApplyPatchPaths confirms apply_patch carries
+    // the patch body in either `patch` or `input` keys, or — rarely —
+    // as the raw string args. Handle the string form first so we don't
+    // exclude it via the object-shape guard below.
+    let patchText = "";
+    if (typeof args === "string") {
+      patchText = args;
+    } else if (args && typeof args === "object" && !Array.isArray(args)) {
+      const obj = args as Record<string, unknown>;
+      if (typeof obj.patch === "string") patchText = obj.patch;
+      else if (typeof obj.input === "string") patchText = obj.input;
+    }
+    const counts = countPatchLines(patchText);
+    added = counts.added;
+    removed = counts.removed;
+  } else {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+    const rec = args as Record<string, unknown>;
+    if (tool_name === "edit") {
+      // ToolDetail's EditArgs proves the shape: edit replaces old_str
+      // with new_str within `path`. Each is a verbatim multi-line
+      // snippet, so line counts give the natural diff stat.
+      const oldStr = typeof rec.old_str === "string" ? rec.old_str : "";
+      const newStr = typeof rec.new_str === "string" ? rec.new_str : "";
+      removed = countLines(oldStr);
+      added = countLines(newStr);
+    } else if (tool_name === "create") {
+      // The create tool writes a brand-new file from `file_text` (newer
+      // Copilot variants name it `content`). All lines are additions.
+      const text =
+        typeof rec.file_text === "string"
+          ? rec.file_text
+          : typeof rec.content === "string"
+            ? rec.content
+            : "";
+      added = countLines(text);
+    } else {
+      return null;
+    }
+  }
+
+  if (added === 0 && removed === 0) return null;
+
+  return (
+    <>
+      {removed > 0 && (
+        <span className="tag ib-badge-removed" style={{ marginRight: 4 }}>
+          -{removed}
+        </span>
+      )}
+      {added > 0 && (
+        <span className="tag ib-badge-added" style={{ marginRight: 4 }}>
+          +{added}
+        </span>
+      )}
+    </>
+  );
 }
