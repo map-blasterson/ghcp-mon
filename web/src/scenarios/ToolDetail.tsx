@@ -53,6 +53,28 @@ export function ToolDetailScenario({ column }: { column: Column }) {
   );
 }
 
+// Priority-ordered list of argument keys whose value, when present on a
+// function-typed tool call, is hoisted into a prominent "hero" panel so
+// the most-actionable parameter is visible at a glance even with the
+// collapsible metadata panel closed. Only the first matching key is
+// surfaced.
+const HERO_KEYS = ["command", "query", "description"];
+
+function pickHero(
+  argsObj: Record<string, unknown> | null,
+): { key: string; value: string } | null {
+  if (!argsObj) return null;
+  for (const k of HERO_KEYS) {
+    if (!(k in argsObj)) continue;
+    const v = argsObj[k];
+    if (v == null) continue;
+    const sv = typeof v === "string" ? v : prettyJson(v);
+    if (sv.length === 0) continue;
+    return { key: k, value: sv };
+  }
+  return null;
+}
+
 function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externalQuery?: string }) {
   const tc = detail.projection.tool_call!;
   const span = detail.span;
@@ -62,10 +84,16 @@ function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externa
       ? span.end_unix_ns - span.start_unix_ns
       : null);
   const a = span.attributes ?? {};
+  const args = parseToolCallArguments(a);
+  const argsObj =
+    args && typeof args === "object" && !Array.isArray(args)
+      ? (args as Record<string, unknown>)
+      : null;
+  const hero = tc.tool_type === "function" ? pickHero(argsObj) : null;
   return (
     <>
-      <div className="section">
-        <h4>{tc.tool_name ?? "(unknown tool)"}</h4>
+      <details className="section">
+        <summary><h4>{tc.tool_name ?? "(unknown tool)"}</h4></summary>
         <div className="kv">
           <span className="k">call_id</span>
           <span className="v mono">{tc.call_id ?? "—"}</span>
@@ -80,7 +108,13 @@ function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externa
           <span className="k">conv</span>
           <span className="v mono">{tc.conversation_id?.slice(0, 8) ?? "—"}</span>
         </div>
-      </div>
+      </details>
+      {hero && (
+        <div className="section tool-hero">
+          <div className="tool-hero-key">{hero.key}</div>
+          <pre className="tool-hero-value">{hero.value}</pre>
+        </div>
+      )}
       <div className="section">
         <h4>args / result</h4>
         {tc.tool_name === "edit" ? (
@@ -120,8 +154,8 @@ function ExternalToolDetailBody({ detail, externalQuery }: { detail: SpanDetail;
   const a = span.attributes ?? {};
   return (
     <>
-      <div className="section">
-        <h4>{ext.tool_name ?? "(unknown tool)"}</h4>
+      <details className="section">
+        <summary><h4>{ext.tool_name ?? "(unknown tool)"}</h4></summary>
         <div className="kv">
           <span className="k">call_id</span>
           <span className="v mono">{ext.call_id ?? "—"}</span>
@@ -138,7 +172,7 @@ function ExternalToolDetailBody({ detail, externalQuery }: { detail: SpanDetail;
           <span className="k">agent_run_pk</span>
           <span className="v mono">{ext.agent_run_pk ?? "—"}</span>
         </div>
-      </div>
+      </details>
       <div className="section">
         <h4>args / result</h4>
         <GenericArgs attributes={a} externalQuery={externalQuery} />
