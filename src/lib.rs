@@ -1,6 +1,7 @@
 pub mod api;
 pub mod db;
 pub mod error;
+pub mod export;
 pub mod ingest;
 pub mod local_session;
 pub mod model;
