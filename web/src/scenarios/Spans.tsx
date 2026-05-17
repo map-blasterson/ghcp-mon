@@ -223,6 +223,164 @@ export function SpansScenario({ column }: { column: Column }) {
   const traces = tracesQ.data?.traces ?? [];
   const tree = sessionTreeQ.data?.tree ?? [];
 
+  // --- batch arrival smoothing -----------------------------------------
+  // Spans arrive in batches via the live feed, often taller than the
+  // viewport. Revealing each new batch all at once makes the actual
+  // ingestion rate impossible to perceive in follow mode. Instead, scale
+  // each new span's reveal time by its `start_unix_ns` offset within the
+  // batch to a 2s window (best-effort) and clamp consecutive reveals to
+  // ≥ 1000/60 ≈ 16.67ms apart (hard 60/sec cap — large batches extend
+  // past 2s). The first batch on a fresh session reveals immediately so
+  // historical backfill isn't gated by the animation.
+  const SMOOTH_WINDOW_MS = 2000;
+  const SMOOTH_MIN_GAP_MS = 1000 / 60;
+  const revealedIdsRef = useRef<Set<string>>(new Set());
+  const queueRef = useRef<Array<{ id: string; at: number }>>([]);
+  const timerRef = useRef<number | null>(null);
+  const animationSessionRef = useRef<string | undefined>(undefined);
+  const [revealVersion, setRevealVersion] = useState(0);
+
+  const drainQueue = useCallback(() => {
+    timerRef.current = null;
+    if (queueRef.current.length === 0) return;
+    const now = Date.now();
+    let revealed = false;
+    while (queueRef.current.length > 0 && queueRef.current[0].at <= now) {
+      const item = queueRef.current.shift()!;
+      revealedIdsRef.current.add(item.id);
+      revealed = true;
+    }
+    if (revealed) setRevealVersion((v) => v + 1);
+    if (queueRef.current.length > 0) {
+      const delay = Math.max(0, queueRef.current[0].at - Date.now());
+      timerRef.current = window.setTimeout(drainQueue, delay);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Synchronously reset all smoothing state on session change so the
+    // new session's first tree update is treated as a fresh first-load.
+    if (animationSessionRef.current !== session) {
+      animationSessionRef.current = session;
+      revealedIdsRef.current = new Set();
+      queueRef.current = [];
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      setRevealVersion((v) => v + 1);
+    }
+
+    if (tree.length === 0) return;
+
+    // Find spans in the new tree that we haven't seen yet (preorder DFS
+    // so parents precede children in the queue — combined with the
+    // monotonic gap clamp this guarantees a parent reveals before its
+    // children).
+    const known = new Set<string>(revealedIdsRef.current);
+    for (const q of queueRef.current) known.add(q.id);
+    const fresh: SpanNode[] = [];
+    const walkFresh = (nodes: SpanNode[]) => {
+      for (const n of nodes) {
+        if (!known.has(n.span_id)) fresh.push(n);
+        walkFresh(n.children ?? []);
+      }
+    };
+    walkFresh(tree);
+    if (fresh.length === 0) return;
+
+    // First batch on this session: reveal everything immediately so we
+    // don't animate historical backfill.
+    if (revealedIdsRef.current.size === 0 && queueRef.current.length === 0) {
+      for (const n of fresh) revealedIdsRef.current.add(n.span_id);
+      setRevealVersion((v) => v + 1);
+      return;
+    }
+
+    // The list is rendered newest→oldest (top→bottom), so reveal the
+    // newest span in the batch first and progressively older ones
+    // beneath it: offset 0 for max(ts), SMOOTH_WINDOW_MS for min(ts).
+    // The intra-batch density still tracks the actual rate, just
+    // mirrored in time to match the list orientation.
+    const tsOf = (n: SpanNode) => n.start_unix_ns ?? n.end_unix_ns ?? 0;
+    const tsList = fresh.map(tsOf).filter((t) => t > 0);
+    const minTs = tsList.length > 0 ? Math.min(...tsList) : 0;
+    const maxTs = tsList.length > 0 ? Math.max(...tsList) : 0;
+    const range = maxTs - minTs;
+    const now = Date.now();
+    const atMap = new Map<string, number>();
+    for (const n of fresh) {
+      const t = tsOf(n);
+      const scaled =
+        range > 0 && t >= minTs ? ((maxTs - t) / range) * SMOOTH_WINDOW_MS : 0;
+      atMap.set(n.span_id, now + scaled);
+    }
+    // Hierarchy clamp: if a parent and any of its descendants are both
+    // in this batch, the parent must reveal no later than its earliest
+    // descendant. Otherwise the parent's later reveal time would keep
+    // the descendant hidden by the filter, collapsing the intended
+    // cadence into a single simultaneous appearance.
+    const freshIds = new Set(atMap.keys());
+    const postOrder = (nodes: SpanNode[]): void => {
+      for (const n of nodes) {
+        postOrder(n.children ?? []);
+        if (!freshIds.has(n.span_id)) continue;
+        let earliest = atMap.get(n.span_id)!;
+        for (const c of n.children ?? []) {
+          const ca = atMap.get(c.span_id);
+          if (ca != null && ca < earliest) earliest = ca;
+        }
+        atMap.set(n.span_id, earliest);
+      }
+    };
+    postOrder(tree);
+    for (const [id, at] of atMap) {
+      queueRef.current.push({ id, at });
+    }
+
+    // Re-normalize the merged queue: sort by `at`, then clamp each entry
+    // to be at least SMOOTH_MIN_GAP_MS after the previous one so the
+    // global reveal rate never exceeds 60/sec across overlapping
+    // batches.
+    queueRef.current.sort((a, b) => a.at - b.at);
+    for (let i = 1; i < queueRef.current.length; i++) {
+      const prev = queueRef.current[i - 1].at;
+      if (queueRef.current[i].at < prev + SMOOTH_MIN_GAP_MS) {
+        queueRef.current[i].at = prev + SMOOTH_MIN_GAP_MS;
+      }
+    }
+
+    if (timerRef.current == null) {
+      const delay = Math.max(0, queueRef.current[0].at - Date.now());
+      timerRef.current = window.setTimeout(drainQueue, delay);
+    }
+  }, [tree, session, drainQueue]);
+
+  useEffect(() => () => {
+    if (timerRef.current != null) clearTimeout(timerRef.current);
+  }, []);
+
+  // Tree with un-revealed spans pruned. Downstream consumers (nodeMap,
+  // latestToolSpan, SpanTreeView, follow-mode auto-advance, etc.) all
+  // operate on this so the visual cadence drives every behavior.
+  // `revealVersion` is the render-invalidation signal for mutations to
+  // `revealedIdsRef`.
+  const displayedTree = useMemo(() => {
+    const revealed = revealedIdsRef.current;
+    if (revealed.size === 0) return [];
+    const filter = (nodes: SpanNode[]): SpanNode[] => {
+      const out: SpanNode[] = [];
+      for (const n of nodes) {
+        if (!revealed.has(n.span_id)) continue;
+        const kids = filter(n.children ?? []);
+        out.push(kids.length === (n.children?.length ?? 0) ? n : { ...n, children: kids });
+      }
+      return out;
+    };
+    return filter(tree);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree, revealVersion]);
+
   // O(1) span lookup by ID — single walk shared by follow-mode, search, etc.
   const nodeMap = useMemo(() => {
     const m = new Map<string, SpanNode>();
@@ -232,9 +390,9 @@ export function SpansScenario({ column }: { column: Column }) {
         walk(n.children ?? []);
       }
     };
-    walk(tree);
+    walk(displayedTree);
     return m;
-  }, [tree]);
+  }, [displayedTree]);
 
   // --- search state ---
   const [searchText, setSearchText] = useState("");
@@ -307,10 +465,10 @@ export function SpansScenario({ column }: { column: Column }) {
     // otherwise leave chat_detail stuck on a stale chat span.
     let nextChatSpanId: string | undefined;
     let toolCallId: string | undefined;
-    if (kind_class === "execute_tool" && tree.length > 0) {
-      const hit = findSiblings(tree, span_id);
+    if (kind_class === "execute_tool" && displayedTree.length > 0) {
+      const hit = findSiblings(displayedTree, span_id);
       toolCallId = hit?.picked.projection.tool_call?.call_id ?? undefined;
-      nextChatSpanId = findNextChatSiblingId(tree, span_id);
+      nextChatSpanId = findNextChatSiblingId(displayedTree, span_id);
     }
 
     // For invoke_agent selections, advance chat_detail to the most
@@ -384,9 +542,9 @@ export function SpansScenario({ column }: { column: Column }) {
         walk(n.children ?? []);
       }
     };
-    walk(tree);
+    walk(displayedTree);
     return best as SpanNode | null;
-  }, [tree]);
+  }, [displayedTree]);
 
   useEffect(() => {
     if (!followMode || !latestToolSpan) return;
@@ -413,9 +571,9 @@ export function SpansScenario({ column }: { column: Column }) {
         walk(n.children ?? []);
       }
     };
-    walk(tree);
+    walk(displayedTree);
     setUserCollapsed(ids);
-  }, [tree]);
+  }, [displayedTree]);
 
   const expandAll = useCallback(() => {
     setUserCollapsed(new Set());
@@ -559,7 +717,7 @@ export function SpansScenario({ column }: { column: Column }) {
         {session ? (
           <SpanTreeView
             key={session}
-            tree={tree}
+            tree={displayedTree}
             loading={sessionTreeQ.isLoading}
             kindFilter={kind_filter}
             selectedSpanId={selected_span_id}
