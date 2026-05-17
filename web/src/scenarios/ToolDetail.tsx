@@ -111,7 +111,6 @@ function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externa
       </details>
       {hero && (
         <div className="section tool-hero">
-          <div className="tool-hero-key">{hero.key}</div>
           <pre className="tool-hero-value">{hero.value}</pre>
         </div>
       )}

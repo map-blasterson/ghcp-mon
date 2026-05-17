@@ -699,11 +699,9 @@ details.section[open] > summary { margin-bottom: 4px; }
  * Uses the darkest background so it reads as a distinct slab against
  * the lighter --bg-1/--bg-2 surfaces around it, and a value font at
  * ~50% larger than body text so the key argument actually pops. */
-.tool-hero { background: var(--bg); }
-.tool-hero-key {
-  font-size: 10px;
-  color: var(--fg-dim);
-  margin-bottom: 4px;
+.tool-hero {
+  background: var(--bg);
+  padding: 12px;
 }
 .tool-hero-value {
   margin: 0;
