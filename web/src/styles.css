@@ -706,11 +706,10 @@ details.section[open] > summary { margin-bottom: 4px; }
 .tool-hero-value {
   margin: 0;
   font-family: var(--mono);
-  font-size: 17px;
-  line-height: 1.35;
+  font-size: 11px;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--fg);
+  color: #ffeb3b;
 }
 
 /* ---- Chat detail scenario ---- */
