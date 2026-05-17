@@ -167,3 +167,105 @@ fn replay_non_inline_help_documents_server_option() {
     assert!(text.contains("127.0.0.1:4319"),
         "replay --help MUST document the default server URL; got:\n{}", text);
 }
+
+#[test]
+fn cli_help_lists_export_subcommand() {
+    let out = Command::new(BIN).arg("--help").output().expect("run help");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("export"), "help MUST mention the `export` subcommand; got:\n{}", text);
+}
+
+#[test]
+fn export_help_documents_output_flag() {
+    let out = Command::new(BIN).args(["export", "--help"]).output().expect("run");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--output") || text.contains("-o"),
+        "export --help MUST document the --output/-o flag; got:\n{}", text);
+}
+
+#[test]
+fn export_missing_session_exits_non_zero_and_writes_to_stderr() {
+    let dir = unique_dir("export-missing");
+    let db_path = dir.join("missing.db");
+    // Touch the DB by running a no-op replay first.
+    let fixture = dir.join("empty.jsonl");
+    std::fs::write(&fixture, "").unwrap();
+    let _ = Command::new(BIN)
+        .args(["--db", db_path.to_str().unwrap(), "replay", fixture.to_str().unwrap(), "--inline"])
+        .output().expect("seed db");
+    assert!(db_path.exists());
+
+    let out = Command::new(BIN)
+        .args(["--db", db_path.to_str().unwrap(), "export", "does-not-exist"])
+        .output().expect("run export");
+    assert!(!out.status.success(), "export of unknown session MUST exit non-zero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("session not found"),
+        "missing-session error MUST go to stderr; got:\n{}", stderr);
+    assert!(out.stdout.is_empty(),
+        "stdout MUST stay empty when the session is missing; got: {:?}", String::from_utf8_lossy(&out.stdout));
+}
+
+#[test]
+fn export_round_trips_through_replay() {
+    // Fixture: two traces under the same conversation. One span carries the
+    // conversation id directly; the other inherits via shared trace_id (i.e.
+    // not directly tagged, but in the same trace as a tagged span). The export
+    // path must include both — that is the membership contract.
+    let dir = unique_dir("export-roundtrip");
+    let fixture = dir.join("fix.jsonl");
+    let mut f = std::fs::File::create(&fixture).unwrap();
+    // Span A: chat span, tagged with the conversation id.
+    writeln!(f, r#"{{"type":"span","traceId":"tA","spanId":"sA1","name":"chat gpt-5","startTime":1000,"endTime":2000,"attributes":{{"gen_ai.conversation.id":"conv-x"}}}}"#).unwrap();
+    // Span B: sibling in same trace, NO conv id of its own — should still
+    // export because it shares trace_id with span A.
+    writeln!(f, r#"{{"type":"span","traceId":"tA","spanId":"sA2","parentSpanId":"sA1","name":"execute_tool bash","startTime":1100,"endTime":1900,"attributes":{{}}}}"#).unwrap();
+    // Span C: different conversation; must NOT appear in the export.
+    writeln!(f, r#"{{"type":"span","traceId":"tC","spanId":"sC1","name":"chat gpt-5","startTime":3000,"endTime":4000,"attributes":{{"gen_ai.conversation.id":"conv-other"}}}}"#).unwrap();
+    drop(f);
+    let db_path = dir.join("rt.db");
+
+    // Seed the DB by replaying the fixture inline.
+    let seed = Command::new(BIN)
+        .args(["--db", db_path.to_str().unwrap(), "replay", fixture.to_str().unwrap(), "--inline"])
+        .output().expect("seed replay");
+    assert!(seed.status.success(), "seed replay MUST succeed; stderr=\n{}", String::from_utf8_lossy(&seed.stderr));
+
+    // Export the session.
+    let exp = Command::new(BIN)
+        .args(["--db", db_path.to_str().unwrap(), "export", "conv-x"])
+        .output().expect("run export");
+    assert!(exp.status.success(), "export MUST succeed; stderr=\n{}", String::from_utf8_lossy(&exp.stderr));
+    let stdout = String::from_utf8_lossy(&exp.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "export MUST emit exactly 2 spans (sA1 + sA2); got:\n{}", stdout);
+
+    // Each line MUST parse as a span envelope and carry the right trace_id.
+    let mut ids: Vec<String> = Vec::new();
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("each line MUST be valid JSON");
+        assert_eq!(v.get("type").and_then(|x| x.as_str()), Some("span"),
+            "each exported line MUST have type=span; got: {}", line);
+        assert_eq!(v.get("traceId").and_then(|x| x.as_str()), Some("tA"),
+            "each exported span MUST belong to tA; got: {}", line);
+        ids.push(v.get("spanId").and_then(|x| x.as_str()).unwrap().to_string());
+    }
+    ids.sort();
+    assert_eq!(ids, vec!["sA1".to_string(), "sA2".to_string()]);
+
+    // Replay the export into a fresh DB. It must ingest successfully.
+    let rt_dir = unique_dir("export-rt-replay");
+    let rt_fixture = rt_dir.join("export.jsonl");
+    std::fs::write(&rt_fixture, stdout.as_bytes()).unwrap();
+    let rt_db = rt_dir.join("rt2.db");
+    let rep = Command::new(BIN)
+        .args(["--db", rt_db.to_str().unwrap(), "replay", rt_fixture.to_str().unwrap(), "--inline"])
+        .output().expect("replay export");
+    assert!(rep.status.success(),
+        "replaying the exported JSONL MUST succeed; stderr=\n{}", String::from_utf8_lossy(&rep.stderr));
+    let rep_stdout = String::from_utf8_lossy(&rep.stdout);
+    assert!(rep_stdout.contains("ingested 2 envelopes"),
+        "round-trip replay MUST ingest exactly 2 envelopes; got: {}", rep_stdout);
+}

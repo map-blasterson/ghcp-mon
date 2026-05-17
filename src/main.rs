@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use ghcp_mon::{db, server::{self, AppState}, ws::Broadcaster};
+use ghcp_mon::{db, export, server::{self, AppState}, ws::Broadcaster};
 
 #[derive(Parser, Debug)]
 #[command(name = "ghcp-mon", version, about = "Local-first GitHub Copilot CLI telemetry collector + dashboard backend")]
@@ -44,13 +44,28 @@ enum Cmd {
         #[arg(long, default_value = "http://127.0.0.1:4319")]
         server: String,
     },
+    /// Export a session's spans as replay-compatible JSON-lines.
+    ///
+    /// Emits one span envelope per line in the file-exporter format. The
+    /// output can be fed back through `ghcp-mon replay` to reconstitute the
+    /// session in a fresh database. Metrics and logs are not included.
+    Export {
+        /// `gen_ai.conversation.id` of the session to export.
+        session: String,
+        /// Optional output file. Defaults to stdout.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=warn,hyper=warn")))
-        .with(fmt::layer().with_target(false))
+        // Diagnostics MUST go to stderr so `ghcp-mon export ... | ghcp-mon
+        // replay /dev/stdin` (and any other stdout-consuming pipe) sees a
+        // clean JSON-lines stream.
+        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
         .init();
 
     let cli = Cli::parse();
@@ -79,6 +94,33 @@ async fn main() -> anyhow::Result<()> {
                 let text = resp.text().await.unwrap_or_default();
                 println!("POST {url} -> {status}: {text}");
             }
+        }
+        Cmd::Export { session, output } => {
+            let pool = db::open(&cli.db).await?;
+            // Preflight: a missing session must NOT create/truncate an
+            // output file.
+            if !export::session_exists(&pool, &session).await? {
+                eprintln!("session not found: {session}");
+                std::process::exit(1);
+            }
+            let count = match output {
+                Some(path) => {
+                    let f = tokio::fs::File::create(&path).await?;
+                    let mut w = tokio::io::BufWriter::new(f);
+                    let n = export::export_session(&pool, &session, &mut w).await?;
+                    tokio::io::AsyncWriteExt::flush(&mut w).await?;
+                    eprintln!("exported {n} spans to {}", path.display());
+                    n
+                }
+                None => {
+                    let mut w = tokio::io::BufWriter::new(tokio::io::stdout());
+                    let n = export::export_session(&pool, &session, &mut w).await?;
+                    tokio::io::AsyncWriteExt::flush(&mut w).await?;
+                    eprintln!("exported {n} spans");
+                    n
+                }
+            };
+            let _ = count;
         }
     }
     Ok(())
