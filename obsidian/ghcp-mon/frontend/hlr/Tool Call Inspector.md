@@ -18,3 +18,5 @@ When the user selects an `execute_tool` or `external_tool` span, the dashboard r
 - [[Code block highlights via Prism with extension map]]
 - [[JsonView pretty prints with optional collapse]]
 - [[Detail columns pass span search query to TextBlocks]]
+- [[Tool detail metadata panel collapsible]]
+- [[Tool detail hero panel surfaces key argument]]

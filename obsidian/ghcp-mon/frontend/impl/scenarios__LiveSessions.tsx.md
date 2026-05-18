@@ -14,3 +14,4 @@ Original source file for reverse-engineered requirements.
 - [[Delete session confirms and clears column session]]
 - [[Auto-named sessions tagged auto]]
 - [[Live sessions invalidation on session and chat turn events]]
+- [[Sessions service name gates vendor UI]]

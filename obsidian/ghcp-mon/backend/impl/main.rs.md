@@ -16,3 +16,6 @@ Original source file for reverse-engineered requirements.
 - [[Replay inline mode ingests in-process]]
 - [[Replay non-inline posts to running server]]
 - [[CLI initializes tracing subscriber]]
+- [[CLI tracing diagnostics routed to stderr]]
+- [[CLI export subcommand emits session JSON lines]]
+- [[CLI export missing session exits non-zero]]
