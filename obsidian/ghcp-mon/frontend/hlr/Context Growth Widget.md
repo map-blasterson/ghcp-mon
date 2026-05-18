@@ -17,4 +17,5 @@ A persistent widget at the bottom of the workspace charts per-turn context-token
 - [[Context widget hovered chat highlights matching column]]
 - [[Context widget live invalidation on chat turn and span events]]
 - [[Context widget merges chat span snapshots per span_pk]]
+- [[Context widget cache read green segment]]
 - [[Hover store publishes hovered chat pk]]

@@ -21,3 +21,5 @@ Original source file for reverse-engineered requirements.
 - [[Tool detail empty state when no content captured]]
 - [[Tool detail body blocks wrap in TextBlock for search]]
 - [[Detail columns pass span search query to TextBlocks]]
+- [[Tool detail metadata panel collapsible]]
+- [[Tool detail hero panel surfaces key argument]]

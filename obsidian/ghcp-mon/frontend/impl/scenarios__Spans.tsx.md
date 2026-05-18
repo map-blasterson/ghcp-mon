@@ -32,3 +32,6 @@ Original source file for reverse-engineered requirements.
 - [[Span tree kind-filter dims non-matching rows]]
 - [[Spans header collapse and expand all buttons]]
 - [[Spans two-row header grid layout]]
+- [[Spans batch arrival smoothing]]
+- [[Spans diff stat badges on file mutation tools]]
+- [[Spans tool description inline label]]

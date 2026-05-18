@@ -20,4 +20,4 @@ Original source file for reverse-engineered requirements.
 - [[Context widget bar click selects chat in Spans column]]
 - [[Context widget colors sub-agent input bar distinctly]]
 - [[Context widget chart visual styling]]
-- [[Context widget bar click selects chat in Spans column]]
+- [[Context widget cache read green segment]]

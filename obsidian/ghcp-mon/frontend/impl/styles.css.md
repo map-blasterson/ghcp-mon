@@ -29,3 +29,7 @@ This CSS file defines the visual rules referenced by class names from the React 
 - [[Workspace minimum column width 280 px]]
 - [[Context widget chart visual styling]]
 - [[File touches sort directories first then alphabetical]]
+- [[Context widget cache read green segment]]
+- [[Spans diff stat badges on file mutation tools]]
+- [[Tool detail hero panel surfaces key argument]]
+- [[Tool detail metadata panel collapsible]]
