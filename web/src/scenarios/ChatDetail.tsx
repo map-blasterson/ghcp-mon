@@ -41,6 +41,7 @@ type IBType =
   | "tool_def_unchanged"
   | "tool_def"
   | "input_messages_root"
+  | "input_messages_unchanged"
   | "output_messages_root"
   | "message_user"
   | "message_assistant"
@@ -303,7 +304,13 @@ interface BuildArgs {
   hasInputMessages: boolean;
   hasOutputMessages: boolean;
   mode: Mode;
-  prior: { systemParts: Part[]; toolDefs: unknown[] } | null;
+  // Prior chat span content used to compute DELTA-mode diffs and
+  // suffix views. `inputMessages` is the previous chat span's full
+  // input.messages array; when the current chat's input.messages
+  // starts with a strict prefix matching this array (the cumulative
+  // history pattern emitted by SDK-level producers like opencode), the
+  // input_messages subtree renders only the suffix.
+  prior: { systemParts: Part[]; toolDefs: unknown[]; inputMessages: Message[] } | null;
 }
 
 // Deep equality for the captured content payloads. JSON.stringify is good
@@ -514,6 +521,80 @@ function buildToolDefsNode(
   };
 }
 
+// Compute the length of the longest prefix of `current` whose
+// elements deeply equal the corresponding elements of `prior`. Caps at
+// prior.length: prefixes can only extend up to the full prior array.
+//
+// Used to detect cumulative-input semantics (SDK-level producers like
+// opencode emit each chat span's input.messages as the full prior
+// history followed by the new turn's messages). Agent-loop-level
+// producers (Copilot CLI) emit per-turn deltas with no overlap, so
+// this returns 0 for them and the suffix optimization no-ops.
+function commonPrefixLen(current: Message[], prior: Message[]): number {
+  const cap = Math.min(current.length, prior.length);
+  for (let i = 0; i < cap; i++) {
+    if (!deepEqualJson(current[i], prior[i])) return i;
+  }
+  return cap;
+}
+
+function buildInputMessagesNode(
+  inputMessages: Message[],
+  mode: Mode,
+  prior: BuildArgs["prior"],
+): Node {
+  const fullBytes = safeBytes(inputMessages);
+  // Try the DELTA-suffix path only when in DELTA mode with a usable
+  // prior. Require the prior to be a strict prefix of the current
+  // array AND the current to be strictly longer — otherwise fall back
+  // to the full render. The strict-prefix check is what gates this
+  // optimization to the opencode shape; Copilot's per-turn deltas
+  // share no message ids with the prior chat and produce
+  // prefixLen === 0.
+  if (mode === "DELTA" && prior && prior.inputMessages.length > 0) {
+    const prefixLen = commonPrefixLen(inputMessages, prior.inputMessages);
+    if (prefixLen === prior.inputMessages.length && inputMessages.length > prefixLen) {
+      const suffix = inputMessages.slice(prefixLen);
+      // Preserve original-array indexing in node ids so external
+      // lookups (e.g. ChatDetail's tool-call cross-link arrow) keep
+      // resolving to the same node id whether or not the suffix
+      // optimization fires.
+      const suffixChildren = suffix.map((m, j) =>
+        buildMessageNode(m, `root/input/input_messages/${prefixLen + j}`),
+      );
+      const unchangedNode: Node = {
+        id: "root/input/input_messages/unchanged",
+        type: "input_messages_unchanged",
+        label: "carried forward",
+        bytes: safeBytes(prior.inputMessages),
+        children: [],
+        meta: `unchanged · ${prefixLen} message${prefixLen === 1 ? "" : "s"} from prior turn`,
+      };
+      return {
+        id: "root/input/input_messages",
+        type: "input_messages_root",
+        label: "input messages",
+        bytes: fullBytes,
+        children: [unchangedNode, ...suffixChildren],
+        meta: `${suffix.length} new · ${prefixLen} carried forward`,
+      };
+    }
+  }
+  // FULL mode, no prior, or prior wasn't a strict prefix (Copilot
+  // per-turn-delta shape): render every message.
+  const inChildren = inputMessages.map((m, i) =>
+    buildMessageNode(m, `root/input/input_messages/${i}`),
+  );
+  return {
+    id: "root/input/input_messages",
+    type: "input_messages_root",
+    label: "input messages",
+    bytes: fullBytes,
+    children: inChildren,
+    meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"} · per-turn delta`,
+  };
+}
+
 function buildTree({
   systemParts, toolDefs, inputMessages, outputMessages,
   hasSystem, hasToolDefs, hasInputMessages, hasOutputMessages,
@@ -523,14 +604,7 @@ function buildTree({
   if (hasSystem) inputChildren.push(buildSystemNode(systemParts, mode, prior));
   if (hasToolDefs) inputChildren.push(buildToolDefsNode(toolDefs, mode, prior));
   if (hasInputMessages) {
-    const inChildren = inputMessages.map((m, i) =>
-      buildMessageNode(m, `root/input/input_messages/${i}`),
-    );
-    inputChildren.push({
-      id: "root/input/input_messages", type: "input_messages_root", label: "input messages",
-      bytes: safeBytes(inputMessages), children: inChildren,
-      meta: `${inputMessages.length} message${inputMessages.length === 1 ? "" : "s"} · per-turn delta`,
-    });
+    inputChildren.push(buildInputMessagesNode(inputMessages, mode, prior));
   }
 
   const inputBytes = inputChildren.reduce((a, c) => a + c.bytes, 0);
@@ -700,8 +774,9 @@ function useChatTree(column: Column): ChatTreeResult {
     if (!pa) return null;
     const sys = parseSystemInstructions(pa);
     const tools = parseToolDefinitions(pa);
-    if (sys.length === 0 && tools.length === 0) return null;
-    return { systemParts: sys, toolDefs: tools };
+    const inputs = parseInputMessages(pa);
+    if (sys.length === 0 && tools.length === 0 && inputs.length === 0) return null;
+    return { systemParts: sys, toolDefs: tools, inputMessages: inputs };
   }, [mode, priorSpanQ.data]);
 
   const tree = useMemo<Node | null>(() => {

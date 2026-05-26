@@ -1215,6 +1215,15 @@ mark.tb-match-current {
 .ib-diff-eq  { color: var(--fg-mute); }
 .ib-diff-add { background: rgba(46, 160, 67, 0.18); color: var(--accent-2); }
 .ib-diff-rem { background: rgba(248, 81, 73, 0.18); color: var(--err); text-decoration: line-through; }
+/* Per-line unified-diff colors. Distinct from `.ib-diff-rem` (which
+   adds a line-through for word-level diff segments) and from
+   `.edit-diff-old/.edit-diff-new` (which are block-level panels). */
+.udiff-line  { display: block; }
+.udiff-add   { background: rgba(46, 160, 67, 0.18);  color: var(--accent-2); }
+.udiff-rem   { background: rgba(248, 81, 73, 0.18);  color: var(--err); }
+.udiff-hunk  { color: var(--accent); }
+.udiff-meta  { color: var(--fg-mute); }
+
 .ib-diff-eq mark.tb-match,
 .ib-diff-rem mark.tb-match { background: transparent; outline: none; }
 .ib-diff-eq mark.tb-match-current,

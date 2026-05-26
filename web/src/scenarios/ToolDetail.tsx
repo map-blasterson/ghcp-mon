@@ -116,9 +116,9 @@ function ToolDetailBody({ detail, externalQuery }: { detail: SpanDetail; externa
       )}
       <div className="section">
         <h4>args / result</h4>
-        {tc.tool_name === "edit" ? (
+        {tc.tool_name === "edit" || tc.tool_name === "write" ? (
           <EditArgs attributes={a} externalQuery={externalQuery} />
-        ) : tc.tool_name === "view" ? (
+        ) : tc.tool_name === "view" || tc.tool_name === "read" ? (
           <ViewArgs attributes={a} externalQuery={externalQuery} />
         ) : tc.tool_name === "read_agent" ? (
           <ReadAgentArgs attributes={a} externalQuery={externalQuery} />
@@ -252,12 +252,19 @@ function GenericArgs({ attributes, externalQuery }: { attributes: Record<string,
   );
 }
 
-// Specialized view for the `edit` file-edit tool. Renders
-//   - path           plain
-//   - old_str        red, with newlines preserved verbatim
-//   - new_str        green, with newlines preserved verbatim
+// Specialized view for file-mutating tools (`edit`, `write`). Renders
+//   - path           plain (accepts `path` or `filePath`)
+//   - old_str        red, with newlines preserved verbatim (edit only;
+//                    accepts `old_str` or opencode's `oldString`)
+//   - new_str/content green, with newlines preserved verbatim
+//                    (accepts `new_str`, opencode's `newString`, or
+//                    opencode write's `content`)
 //   - any other args fall through as JSON
 //   - result         same fallback as GenericArgs
+//
+// `edit` is a diff-shaped update (old + new both present). `write` is a
+// new-file create (content only); the label switches to "content" in
+// that case so the panel matches the source tool.
 function EditArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
@@ -266,13 +273,38 @@ function EditArgs({ attributes, externalQuery }: { attributes: Record<string, un
       ? (args as Record<string, unknown>)
       : null;
   if (!argsObj && result == null) return <div className="no-content">{NO_CONTENT_LINE}</div>;
-  const path = argsObj && typeof argsObj.path === "string" ? argsObj.path : null;
-  const oldStr = argsObj && typeof argsObj.old_str === "string" ? argsObj.old_str : null;
-  const newStr = argsObj && typeof argsObj.new_str === "string" ? argsObj.new_str : null;
+  const path = argsObj && typeof argsObj.path === "string"
+    ? argsObj.path
+    : argsObj && typeof argsObj.filePath === "string"
+      ? argsObj.filePath
+      : null;
+  const oldStr = argsObj && typeof argsObj.old_str === "string"
+    ? argsObj.old_str
+    : argsObj && typeof argsObj.oldString === "string"
+      ? argsObj.oldString
+      : null;
+  const newStr = argsObj && typeof argsObj.new_str === "string"
+    ? argsObj.new_str
+    : argsObj && typeof argsObj.newString === "string"
+      ? argsObj.newString
+      : argsObj && typeof argsObj.content === "string"
+        ? argsObj.content
+        : null;
+  // When the body came from `content` (opencode `write`), label the
+  // panel accordingly; otherwise keep `new_str` for parity with `edit`.
+  const newStrLabel =
+    argsObj && typeof argsObj.new_str !== "string"
+      && typeof argsObj.newString !== "string"
+      && typeof argsObj.content === "string"
+      ? "content"
+      : "new_str";
   const lang = langFromPath(path);
   const extraEntries = argsObj
     ? Object.entries(argsObj).filter(
-        ([k]) => k !== "path" && k !== "old_str" && k !== "new_str"
+        ([k]) => k !== "path" && k !== "filePath"
+          && k !== "old_str" && k !== "oldString"
+          && k !== "new_str" && k !== "newString"
+          && k !== "content"
       )
     : [];
   const extraObj = extraEntries.length ? Object.fromEntries(extraEntries) : null;
@@ -301,7 +333,7 @@ function EditArgs({ attributes, externalQuery }: { attributes: Record<string, un
           )}
           {newStr != null && (
             <>
-              <div className="label" style={{ marginTop: 4 }}>new_str</div>
+              <div className="label" style={{ marginTop: 4 }}>{newStrLabel}</div>
               <TextBlock searchable externalQuery={externalQuery}>
                 <CodeBlock
                   language={lang}
@@ -322,21 +354,83 @@ function EditArgs({ attributes, externalQuery }: { attributes: Record<string, un
       {result != null && (
         <div className="shell">
           <div className="label">result</div>
-          {typeof result === "string" ? (
-            <TextBlock searchable text={result} externalQuery={externalQuery} />
-          ) : (
-            <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />
-          )}
+          {renderEditResult(result, externalQuery)}
         </div>
       )}
     </>
   );
 }
 
-// Specialized view for the `view` file-read tool. Renders
-//   - path           plain
-//   - any other args fall through as JSON (e.g. view_range)
+// Pick the most informative renderer for an `edit` / `write` tool
+// result. opencode's edit result is `{title, output, metadata: {diff,
+// filediff, diagnostics}}` — the unified-diff body in `metadata.diff`
+// is what the user wants to see, not the full envelope. opencode's
+// write result is `{title, output: "Wrote file successfully.",
+// metadata}` — `output` is the only useful string. Copilot's results
+// are plain strings (or already-structured JSON without these
+// envelopes) and pass through unchanged.
+function renderEditResult(result: unknown, externalQuery?: string) {
+  if (typeof result === "string") {
+    return <TextBlock searchable text={result} externalQuery={externalQuery} />;
+  }
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    const obj = result as Record<string, unknown>;
+    const meta = obj.metadata;
+    if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+      const diff = (meta as Record<string, unknown>).diff;
+      if (typeof diff === "string" && diff.length > 0) {
+        return (
+          <TextBlock searchable externalQuery={externalQuery}>
+            <UnifiedDiff text={diff} />
+          </TextBlock>
+        );
+      }
+    }
+    const output = obj.output;
+    if (typeof output === "string" && output.length > 0) {
+      return <TextBlock searchable text={output} externalQuery={externalQuery} />;
+    }
+  }
+  return <TextBlock searchable text={prettyJson(result)} preClassName="json" externalQuery={externalQuery} />;
+}
+
+// Render a unified-diff body with per-line coloring. Treats `+++`/
+// `---` file headers and `@@` hunk headers distinctly from added/
+// removed lines so the result looks like a familiar diff viewer.
+function UnifiedDiff({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <pre className="edit-diff" style={{ borderLeftColor: "var(--border)" }}>
+      {lines.map((line, i) => {
+        let cls = "udiff-line";
+        if (line.startsWith("+++") || line.startsWith("---")) cls += " udiff-meta";
+        else if (line.startsWith("@@")) cls += " udiff-hunk";
+        else if (line.startsWith("Index:") || line.startsWith("====")) cls += " udiff-meta";
+        else if (line.startsWith("+")) cls += " udiff-add";
+        else if (line.startsWith("-")) cls += " udiff-rem";
+        return (
+          <span key={i} className={cls}>
+            {line.length === 0 ? "\u00A0" : line}
+            {i < lines.length - 1 ? "\n" : ""}
+          </span>
+        );
+      })}
+    </pre>
+  );
+}
+
+// Specialized view for file-reading tools (`view`, `read`). Renders
+//   - path           plain (accepts `path` or `filePath`)
+//   - any other args fall through as JSON (e.g. view_range, limit, offset)
 //   - result         syntax-highlighted using the path's extension
+//
+// Result-shape handling:
+//   * Copilot `view` returns a raw string body with `N. ` line prefixes.
+//   * opencode `read` returns a JSON envelope `{title, output, metadata?}`
+//     whose `output` wraps the body in `<path>…</path>\n<type>file</type>\n
+//     <content>\n…\n</content>` with `N: ` line prefixes.
+// We unwrap the envelope and the XML wrapper when present, then strip
+// either prefix style into a left-gutter.
 function ViewArgs({ attributes, externalQuery }: { attributes: Record<string, unknown>; externalQuery?: string }) {
   const args = parseToolCallArguments(attributes);
   const result = parseToolCallResult(attributes);
@@ -345,24 +439,43 @@ function ViewArgs({ attributes, externalQuery }: { attributes: Record<string, un
       ? (args as Record<string, unknown>)
       : null;
   if (!argsObj && result == null) return <div className="no-content">{NO_CONTENT_LINE}</div>;
-  const path = argsObj && typeof argsObj.path === "string" ? argsObj.path : null;
+  const path = argsObj && typeof argsObj.path === "string"
+    ? argsObj.path
+    : argsObj && typeof argsObj.filePath === "string"
+      ? argsObj.filePath
+      : null;
   const lang = langFromPath(path);
   const extraEntries = argsObj
-    ? Object.entries(argsObj).filter(([k]) => k !== "path")
+    ? Object.entries(argsObj).filter(([k]) => k !== "path" && k !== "filePath")
     : [];
   const extraObj = extraEntries.length ? Object.fromEntries(extraEntries) : null;
-  // The `view` tool prepends 'N. ' line numbers to every line of the
-  // file body. We split those off before handing the content to Prism
-  // so the highlighter sees real source code, then re-render the line
-  // numbers in a dim left gutter via a 2-column grid.
+  // Resolve the file body from the result. Copilot returns a string
+  // directly; opencode returns `{output: string, …}` where `output`
+  // may further wrap the body in `<path>/<type>/<content>` XML tags.
+  let body: string | null = null;
+  if (typeof result === "string") {
+    body = result;
+  } else if (result && typeof result === "object" && !Array.isArray(result)) {
+    const out = (result as Record<string, unknown>).output;
+    if (typeof out === "string") body = out;
+  }
+  if (body != null) {
+    const wrapper = /^<path>[^<]*<\/path>\s*<type>[^<]*<\/type>\s*<content>\s*([\s\S]*?)\s*<\/content>\s*$/;
+    const m = wrapper.exec(body);
+    if (m) body = m[1];
+  }
+  // The `view`/`read` tools prepend line-number prefixes (`N. ` for
+  // Copilot, `N: ` for opencode) to every line of the file body. Split
+  // those off before handing the content to Prism so the highlighter
+  // sees real source code, then re-render the line numbers in a dim
+  // left gutter via a 2-column grid.
   let lns: string | null = null;
-  let body: string | null = typeof result === "string" ? result : null;
   if (body != null) {
     const lines = body.split("\n");
     const prefixes: string[] = [];
     const stripped: string[] = [];
     for (const line of lines) {
-      const m = /^(\d+)\.\s(.*)$/.exec(line);
+      const m = /^(\d+)[.:]\s(.*)$/.exec(line);
       if (m) {
         prefixes.push(m[1]);
         stripped.push(m[2]);

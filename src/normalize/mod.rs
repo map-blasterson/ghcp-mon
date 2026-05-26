@@ -119,9 +119,14 @@ async fn normalize_span(ctx: &NormalizeCtx<'_>, s: &SpanEnvelope) -> anyhow::Res
         let output = attr_i64(&s.attributes, "gen_ai.usage.output_tokens");
         let cache = attr_i64(&s.attributes, "gen_ai.usage.cache_read.input_tokens");
         let reasoning = attr_i64(&s.attributes, "gen_ai.usage.reasoning.output_tokens");
-        if input.is_some() || output.is_some() || cache.is_some() || reasoning.is_some() {
+        let token_limit = attr_i64(&s.attributes, "gen_ai.opencode.context.token_limit");
+        let current_tokens = attr_i64(&s.attributes, "gen_ai.opencode.context.current_tokens");
+        if input.is_some() || output.is_some() || cache.is_some() || reasoning.is_some()
+            || token_limit.is_some() || current_tokens.is_some() {
             insert_chat_context_snapshot(ctx, span_pk, conv_id.as_deref(),
-                end_ns.unwrap_or(start_ns), input, output, cache, reasoning).await?;
+                end_ns.unwrap_or(start_ns),
+                input, output, cache, reasoning,
+                token_limit, current_tokens).await?;
         }
     }
 
@@ -570,6 +575,7 @@ async fn insert_chat_context_snapshot(
     ctx: &NormalizeCtx<'_>, span_pk: i64, conv_id: Option<&str>,
     captured_ns: i64,
     input: Option<i64>, output: Option<i64>, cache: Option<i64>, reasoning: Option<i64>,
+    token_limit: Option<i64>, current_tokens: Option<i64>,
 ) -> anyhow::Result<()> {
     // chat_turn_pk is the turn associated with the chat span itself.
     // upsert_chat_turn has already run for span_pk by the time we get
@@ -579,16 +585,20 @@ async fn insert_chat_context_snapshot(
     ).bind(span_pk).fetch_optional(ctx.pool).await?;
     sqlx::query(
         "INSERT INTO context_snapshots(span_pk, conversation_id, chat_turn_pk, captured_ns, \
-         input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, source) \
-         VALUES(?,?,?,?,?,?,?,?,'chat_span') \
+         input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, \
+         token_limit, current_tokens, source) \
+         VALUES(?,?,?,?,?,?,?,?,?,?,'chat_span') \
          ON CONFLICT(span_pk, source, captured_ns) DO UPDATE SET \
             chat_turn_pk = COALESCE(context_snapshots.chat_turn_pk, excluded.chat_turn_pk), \
             input_tokens = COALESCE(excluded.input_tokens, context_snapshots.input_tokens), \
             output_tokens = COALESCE(excluded.output_tokens, context_snapshots.output_tokens), \
             cache_read_tokens = COALESCE(excluded.cache_read_tokens, context_snapshots.cache_read_tokens), \
-            reasoning_tokens = COALESCE(excluded.reasoning_tokens, context_snapshots.reasoning_tokens)"
+            reasoning_tokens = COALESCE(excluded.reasoning_tokens, context_snapshots.reasoning_tokens), \
+            token_limit = COALESCE(excluded.token_limit, context_snapshots.token_limit), \
+            current_tokens = COALESCE(excluded.current_tokens, context_snapshots.current_tokens)"
     ).bind(span_pk).bind(conv_id).bind(chat_turn_pk).bind(captured_ns)
      .bind(input).bind(output).bind(cache).bind(reasoning)
+     .bind(token_limit).bind(current_tokens)
      .execute(ctx.pool).await?;
     Ok(())
 }
