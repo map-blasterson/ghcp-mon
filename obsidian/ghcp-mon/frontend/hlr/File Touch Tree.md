@@ -4,7 +4,7 @@ tags:
   - req/hlr
   - domain/file-touches
 ---
-For a selected session, the dashboard aggregates every `view`, `edit`, and `create` tool call into a collapsible filesystem tree annotated with read/write counts, so the user can see at a glance which files Copilot has touched.
+For a selected session, the dashboard aggregates every file-touching tool call (Copilot's `view`/`edit`/`create`/`apply_patch` and opencode's `read`/`write`) into a collapsible filesystem tree annotated with read/write counts, so the user can see at a glance which files the agent has touched.
 
 ## Derived LLRs
 - [[File touches aggregates view edit create]]
@@ -13,3 +13,4 @@ For a selected session, the dashboard aggregates every `view`, `edit`, and `crea
 - [[File touches sort directories first then alphabetical]]
 - [[File touches expand and collapse all controls]]
 - [[File touches live invalidation on tool events]]
+- [[File touches extracts paths from apply_patch headers]]

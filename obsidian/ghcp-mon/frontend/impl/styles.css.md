@@ -31,5 +31,6 @@ This CSS file defines the visual rules referenced by class names from the React 
 - [[File touches sort directories first then alphabetical]]
 - [[Context widget cache read green segment]]
 - [[Spans diff stat badges on file mutation tools]]
+- [[Edit tool result renders unified diff from metadata]]
 - [[Tool detail hero panel surfaces key argument]]
 - [[Tool detail metadata panel collapsible]]

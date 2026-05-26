@@ -18,6 +18,7 @@ For a selected `chat` span, the dashboard renders the GenAI content attributes â
 - [[Chat detail tool defs name-diff in DELTA]]
 - [[Chat detail tool-call hint auto-expand and arrow]]
 - [[Chat detail key cursor icon follows pointer]]
+- [[Chat detail DELTA input messages carried-forward suffix]]
 - [[Content attrs accepts object or json string]]
 - [[Content parses input output messages]]
 - [[Content parses tool call arguments]]

@@ -9,6 +9,7 @@ When the user selects an `execute_tool` or `external_tool` span, the dashboard r
 ## Derived LLRs
 - [[Tool detail requires tool call projection]]
 - [[Edit tool renders old new with syntax highlight]]
+- [[Edit tool result renders unified diff from metadata]]
 - [[View tool splits line numbers into gutter]]
 - [[Task tool renders prompt as markdown]]
 - [[Read agent tool renders result as markdown]]
