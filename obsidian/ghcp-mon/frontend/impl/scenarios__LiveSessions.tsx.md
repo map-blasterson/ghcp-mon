@@ -12,6 +12,5 @@ Original source file for reverse-engineered requirements.
 - [[Live sessions list summary stats]]
 - [[Selecting session propagates to dependent columns]]
 - [[Delete session confirms and clears column session]]
-- [[Auto-named sessions tagged auto]]
 - [[Live sessions invalidation on session and chat turn events]]
 - [[Copilot session row workspace metadata]]

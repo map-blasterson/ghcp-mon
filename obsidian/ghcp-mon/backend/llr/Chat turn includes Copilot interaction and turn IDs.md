@@ -3,7 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
-  - github-specific
+  - vendor/copilot
 ---
 When upserting a `chat_turns` row, the normalizer MUST also populate `interaction_id` from `github.copilot.interaction_id` and `turn_id` from `github.copilot.turn_id`.
 

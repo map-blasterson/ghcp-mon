@@ -4,7 +4,7 @@ tags:
   - req/llr
   - domain/api
   - domain/local-session
-  - github-specific
+  - vendor/copilot
 ---
 The body returned by `GET /api/sessions/:cid` MUST include `local_name`, `user_named`, `cwd`, and `branch` fields populated from `workspace.yaml` read via `local_session::read_workspace_yaml(resolve_session_state_dir(state.session_state_dir_override), :cid)`; when no sidecar metadata is available, all four MUST be `null`.
 
