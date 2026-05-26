@@ -4,7 +4,10 @@ tags:
   - req/hlr
   - domain/tool-detail
 ---
-When the user selects an `execute_tool` or `external_tool` span, the dashboard renders a tool-call detail view with specialized layouts for the well-known Copilot tools (`edit`, `view`, `task`, `read_agent`) and a generic fallback for everything else.
+When the user selects an `execute_tool` or `external_tool` span, the dashboard renders a tool-call detail view with specialized layouts for well-known tool kinds (`edit`, `read`, `task`, `read_agent`) and a generic fallback for everything else.
+
+## Normalized tool-call vocabulary
+UI-rendering LLRs under this HLR are specified over a normalized tool-call shape rather than raw OTLP fields. **Normalized tool kinds** include `read`, `write`, `edit`, `patch`, and `shell`. **Normalized arguments** are referred to as: *file-path*, *old-text*, *new-text*, *body-text*, *shell-command*, *target-url*, *patch-text*. **Normalized result envelope** has four optional fields: `body_string` (verbatim string result), `output_text`, `diff_text`, `metadata`. The active **vendor adapter** is selected per-span by `service_name`; concrete mappings live in each vendor scope (e.g., [[Copilot tool-call shape]], [[opencode tool-call shape]]).
 
 ## Derived LLRs
 - [[Tool detail requires tool call projection]]

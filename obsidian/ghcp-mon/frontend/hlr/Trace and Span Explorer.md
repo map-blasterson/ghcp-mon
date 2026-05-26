@@ -6,6 +6,9 @@ tags:
 ---
 The dashboard renders the trace/span hierarchy for a selected session as an expandable tree, falls back to a recent-traces list when no session is picked, and routes the selection to linked columns based on span kind so the user can inspect a span in a sibling detail column.
 
+## Normalized tool-call vocabulary
+Span-row LLRs that branch on tool-call data are specified over a normalized tool-call shape rather than raw OTLP fields. **Normalized tool kinds** include `read`, `write`, `edit`, `patch`, and `shell`. **Normalized arguments** are referred to as: *file-path*, *old-text*, *new-text*, *body-text*, *shell-command*, *target-url*, *patch-text*. The active **vendor adapter** is selected per-span by `service_name`; concrete mappings live in each vendor scope (e.g., [[Copilot tool-call shape]], [[opencode tool-call shape]]).
+
 ## Derived LLRs
 - [[Spans scenario two modes session vs traces]]
 - [[Spans live invalidation on ingest events]]
@@ -15,7 +18,7 @@ The dashboard renders the trace/span hierarchy for a selected session as an expa
 - [[Spans direct chat selection clears tool call hint]]
 - [[Traces list dims rows below kind filter]]
 - [[Span tree row publishes hovered chat ancestor]]
-- [[Bash command chip extracts primary words]]
+- [[Shell command chip extracts primary words]]
 - [[Skill name chip shows skill argument]]
 - [[Report intent title shows on parent row]]
 - [[Span inspector fetches and renders detail]]

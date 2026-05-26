@@ -17,7 +17,7 @@ Original source file for reverse-engineered requirements.
 - [[Spans direct chat selection clears tool call hint]]
 - [[Traces list dims rows below kind filter]]
 - [[Span tree row publishes hovered chat ancestor]]
-- [[Bash command chip extracts primary words]]
+- [[Shell command chip extracts primary words]]
 - [[Skill name chip shows skill argument]]
 - [[Report intent title shows on parent row]]
 - [[Spans target badge shows file basename or URL domain]]
