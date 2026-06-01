@@ -74,6 +74,13 @@ pub struct App {
     /// because `draw` takes `&self` but the searchable body blocks mutate
     /// state (search phase, scroll, focus plan) during render.
     pub tool_detail_state: RefCell<HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>>,
+    /// Per-column chat-detail scenario state.
+    pub chat_detail_state: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>>,
+    /// Per-column chat-detail mode (DELTA / FULL). RefCell because `m` toggles
+    /// it from `draw` indirectly (through the rendered state map) but the
+    /// authoritative value lives here so `handle_key` can mutate it before
+    /// the next draw.
+    pub chat_detail_mode: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::tree::ChatMode>>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
     /// consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
@@ -113,6 +120,8 @@ impl App {
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
             tool_detail_state: RefCell::new(HashMap::new()),
+            chat_detail_state: RefCell::new(HashMap::new()),
+            chat_detail_mode: RefCell::new(HashMap::new()),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
@@ -353,6 +362,7 @@ impl App {
             ScenarioType::LiveSessions => self.live_sessions_key(col_idx, &col_id, k),
             ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
             ScenarioType::ToolDetail => self.tool_detail_key(&col_id, k),
+            ScenarioType::ChatDetail => self.chat_detail_key(&col_id, k),
             _ => false,
         }
     }
@@ -1427,6 +1437,9 @@ impl App {
                 ScenarioType::ToolDetail => {
                     self.draw_tool_detail(inner, buf, &col.id, &cfg, focused)
                 }
+                ScenarioType::ChatDetail => {
+                    self.draw_chat_detail(inner, buf, &col.id, &cfg, focused)
+                }
                 _ => render_placeholder(inner, buf, st, &cfg),
             }
         }
@@ -1502,6 +1515,157 @@ impl App {
         let mut map = self.tool_detail_state.borrow_mut();
         let state = map.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::tool_detail::handle_key(k, state)
+    }
+
+    /// Render a `ChatDetail` column. Resolves the selection, mode, search
+    /// query, tool-call hint, and the prior chat-span baseline (DELTA), then
+    /// delegates to the chat-detail scenario renderer.
+    fn draw_chat_detail(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_id: &str,
+        cfg: &crate::tui::workspace::ColumnConfig,
+        focused: bool,
+    ) {
+        use crate::tui::scenarios::chat_detail::tree::ChatMode;
+        let trace_id = cfg.get("selected_trace_id").and_then(|v| v.as_str());
+        let span_id = cfg.get("selected_span_id").and_then(|v| v.as_str());
+        let selected_tool_call_id =
+            cfg.get("selected_tool_call_id").and_then(|v| v.as_str());
+        let search_query = cfg.get("search_query").and_then(|v| v.as_str());
+        let selection = match (trace_id, span_id) {
+            (Some(t), Some(s)) => Some((t, s)),
+            _ => None,
+        };
+        let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
+
+        // Resolve mode from per-column override or from config.
+        let cfg_mode = cfg.get("chat_mode").and_then(|v| v.as_str());
+        let mut mode_map = self.chat_detail_mode.borrow_mut();
+        let mode = *mode_map
+            .entry(col_id.to_string())
+            .or_insert_with(|| ChatMode::from_config_str(cfg_mode));
+
+        // DELTA prior-chat-span lookup walks the COMPLETE cached
+        // `session-span-tree` (per the cache contract). Conversation id
+        // comes from the current span's projection.
+        let prior_attrs: Option<Value> = match (&detail, mode) {
+            (Some(d), ChatMode::Delta) => {
+                let cid = d
+                    .projection
+                    .chat_turn
+                    .as_ref()
+                    .and_then(|c| c.conversation_id.clone());
+                let cid = match cid {
+                    Some(c) => c,
+                    None => return self.finish_chat_detail_render(
+                        area, buf, col_id, selection, search_query,
+                        selected_tool_call_id, mode, detail.as_ref(), None, focused,
+                    ),
+                };
+                let tree = self.cached_session_span_tree_by_cid(&cid);
+                let prior = find_prior_chat_span(
+                    &tree,
+                    d.span.span_pk,
+                    d.span.end_unix_ns,
+                    d.span.start_unix_ns,
+                );
+                prior.and_then(|node| {
+                    self.cached_span_detail(&node.trace_id, &node.span_id)
+                        .and_then(|sd| sd.span.attributes)
+                })
+            }
+            _ => None,
+        };
+
+        self.finish_chat_detail_render(
+            area, buf, col_id, selection, search_query,
+            selected_tool_call_id, mode, detail.as_ref(), prior_attrs.as_ref(), focused,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_chat_detail_render(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_id: &str,
+        selection: Option<(&str, &str)>,
+        search_query: Option<&str>,
+        selected_tool_call_id: Option<&str>,
+        mode: crate::tui::scenarios::chat_detail::tree::ChatMode,
+        detail: Option<&crate::tui::model::SpanDetail>,
+        prior_attrs: Option<&Value>,
+        focused: bool,
+    ) {
+        let mut map = self.chat_detail_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        crate::tui::scenarios::chat_detail::render(
+            area,
+            buf,
+            state,
+            selection,
+            search_query,
+            selected_tool_call_id,
+            mode,
+            detail,
+            prior_attrs,
+            focused,
+        );
+    }
+
+    /// Dispatch a key to a `ChatDetail` column.
+    fn chat_detail_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
+        let mut map = self.chat_detail_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        let mut mode_map = self.chat_detail_mode.borrow_mut();
+        let mode_entry = mode_map.entry(col_id.to_string()).or_insert(
+            crate::tui::scenarios::chat_detail::tree::ChatMode::Delta,
+        );
+        crate::tui::scenarios::chat_detail::handle_key(k, state, mode_entry)
+    }
+
+    /// Read-or-fetch `["session-span-tree", cid]` keyed by cid directly.
+    /// Returns the complete server tree (per the cache contract — DELTA's
+    /// prior-chat-span walk MUST read this, not Spans' reveal-filtered view).
+    fn cached_session_span_tree_by_cid(
+        &self,
+        cid: &str,
+    ) -> Vec<crate::tui::model::SpanNode> {
+        let key = qkey(["session-span-tree", cid]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            let cid_s = cid.to_string();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["session-span-tree", &cid_s]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.get_session_span_tree(&cid_s).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        if let Some(v) = value {
+            match serde_json::from_value::<SessionSpanTreeResponse>(v) {
+                Ok(parsed) => return parsed.tree,
+                Err(e) => {
+                    tracing::warn!(
+                        cid = %cid,
+                        error = %e,
+                        "failed to deserialize cached session-span-tree"
+                    );
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn draw_spans(&self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {
@@ -2296,6 +2460,54 @@ pub fn spawn_event_sources(
     (tx, rx)
 }
 
+/// Locate the chat-kind span immediately preceding `current_pk` in the
+/// session-span-tree, ordered by `(end_unix_ns ?? start_unix_ns ?? 0,
+/// span_pk)` ascending. Used by Chat Detail's DELTA mode as the baseline
+/// `prior` per `Chat detail DELTA diffs against prior chat span`.
+///
+/// Walks the COMPLETE cached tree (caller passes the cached payload), not
+/// any reveal-filtered view, per the cache contract in the plan.
+pub fn find_prior_chat_span(
+    tree: &[crate::tui::model::SpanNode],
+    current_pk: i64,
+    current_end_ns: Option<crate::tui::model::UnixNs>,
+    current_start_ns: Option<crate::tui::model::UnixNs>,
+) -> Option<&crate::tui::model::SpanNode> {
+    fn flatten<'a>(
+        nodes: &'a [crate::tui::model::SpanNode],
+        out: &mut Vec<&'a crate::tui::model::SpanNode>,
+    ) {
+        for n in nodes {
+            out.push(n);
+            flatten(&n.children, out);
+        }
+    }
+    let mut all: Vec<&crate::tui::model::SpanNode> = Vec::new();
+    flatten(tree, &mut all);
+    // Filter to chat-kind only.
+    let mut chats: Vec<&crate::tui::model::SpanNode> = all
+        .into_iter()
+        .filter(|n| n.kind_class == crate::tui::model::KindClass::Chat)
+        .collect();
+    chats.sort_by_key(|n| {
+        let order_ns = n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0);
+        (order_ns, n.span_pk)
+    });
+    let cur_order = (
+        current_end_ns.or(current_start_ns).unwrap_or(0),
+        current_pk,
+    );
+    // The "prior" is the largest-ordered chat strictly less than cur_order.
+    chats
+        .iter()
+        .copied()
+        .filter(|n| {
+            let key = (n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0), n.span_pk);
+            key < cur_order
+        })
+        .next_back()
+}
+
 /// Make App::draw render into a buffer for unit-testing (no full terminal).
 #[cfg(test)]
 mod tests {
@@ -2968,5 +3180,62 @@ mod tests {
         assert!(st.clicked_chat.is_none(), "signal must be consumed");
         // Cursor moved to the flat index of span "b" (index 1).
         assert_eq!(st.cursor, 1);
+    }
+
+    #[test]
+    fn find_prior_chat_span_picks_predecessor() {
+        use crate::tui::model::{KindClass, SpanNode, SpanProjection};
+        fn n(pk: i64, end: i128, kc: KindClass) -> SpanNode {
+            SpanNode {
+                span_pk: pk,
+                trace_id: format!("t{pk}"),
+                span_id: format!("s{pk}"),
+                parent_span_id: None,
+                name: "chat".into(),
+                kind_class: kc,
+                ingestion_state: "real".into(),
+                start_unix_ns: Some(end - 1),
+                end_unix_ns: Some(end),
+                projection: SpanProjection::default(),
+                children: Vec::new(),
+            }
+        }
+        let tree = vec![
+            n(1, 100, KindClass::Chat),
+            n(2, 200, KindClass::Chat),
+            n(3, 300, KindClass::Chat),
+        ];
+        // Current is pk=3, end=300 → prior is pk=2.
+        let p = find_prior_chat_span(&tree, 3, Some(300), Some(299)).unwrap();
+        assert_eq!(p.span_pk, 2);
+        // Earliest chat has no prior.
+        assert!(find_prior_chat_span(&tree, 1, Some(100), Some(99)).is_none());
+    }
+
+    #[test]
+    fn find_prior_chat_span_ignores_non_chat_kinds() {
+        use crate::tui::model::{KindClass, SpanNode, SpanProjection};
+        fn n(pk: i64, end: i128, kc: KindClass) -> SpanNode {
+            SpanNode {
+                span_pk: pk,
+                trace_id: format!("t{pk}"),
+                span_id: format!("s{pk}"),
+                parent_span_id: None,
+                name: "x".into(),
+                kind_class: kc,
+                ingestion_state: "real".into(),
+                start_unix_ns: Some(end - 1),
+                end_unix_ns: Some(end),
+                projection: SpanProjection::default(),
+                children: Vec::new(),
+            }
+        }
+        let tree = vec![
+            n(1, 100, KindClass::Chat),
+            n(2, 200, KindClass::ExecuteTool),
+            n(3, 300, KindClass::Chat),
+        ];
+        let p = find_prior_chat_span(&tree, 3, Some(300), None).unwrap();
+        assert_eq!(p.span_pk, 1);
     }
 }

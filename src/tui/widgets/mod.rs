@@ -15,3 +15,4 @@ pub mod search_input;
 pub mod searchable_text_block;
 pub mod select;
 pub mod status_dot;
+pub mod summary_bar;

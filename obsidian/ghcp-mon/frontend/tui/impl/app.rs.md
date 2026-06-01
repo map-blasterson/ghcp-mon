@@ -67,3 +67,4 @@ Phase 1 additions: per-column `LiveSessionsState` / `SpansState`; cross-column `
 - [[TUI Context widget Alt arrow height adjustment]]
 - [[TUI Context widget collapsed single-row bar]]
 - [[TUI Context widget participates in Tab focus cycle]]
+- [[Chat detail DELTA diffs against prior chat span]]

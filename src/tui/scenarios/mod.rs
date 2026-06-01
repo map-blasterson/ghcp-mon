@@ -14,6 +14,7 @@ use crate::tui::workspace::{ColumnConfig, ScenarioType};
 pub mod live_sessions;
 pub mod spans;
 pub mod tool_detail;
+pub mod chat_detail;
 
 /// Render a Phase-0 placeholder for any scenario type still without a real
 /// renderer. The placeholder dumps the column's `config` so cross-column

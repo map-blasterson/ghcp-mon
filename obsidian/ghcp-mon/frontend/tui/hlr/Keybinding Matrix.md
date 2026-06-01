@@ -85,6 +85,23 @@ Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` cycle the column'
 | `Enter`         | widget     | block search Active               | next match (Shift+Enter previous)                   |
 | `Esc`           | widget     | block search Active               | exit search (no-op while external query drives it)  |
 
+### Phase 4 additions (Chat Detail column)
+
+Active when a `ChatDetail` column has focus.
+
+| Key                | Layer  | Mode/Scope                                | Effect                                                |
+| ------------------ | ------ | ----------------------------------------- | ----------------------------------------------------- |
+| `↑` / `↓`          | column | tree focused                              | move row cursor                                       |
+| `←`                | column | tree focused                              | collapse focused node                                 |
+| `→`                | column | tree focused                              | expand focused node                                   |
+| `Space`            | column | tree focused, primitive key row           | toggle the focused primitive's expand state           |
+| `Space`            | column | tree focused, normal row                  | toggle node expand                                    |
+| `m`                | column | always                                    | toggle `chat_mode` DELTA ↔ FULL                       |
+| `Tab` / `Shift-Tab`| column | within ChatDetail                         | cycle focus across body sub-blocks                    |
+| `Home` / `End`     | column | tree focused                              | jump to top / bottom                                  |
+
+(Widget-layer keys for SearchableTextBlock — `/`, `Enter`, `Shift+Enter`, `Esc`, printable, Backspace — remain unchanged from Phase 2.5.)
+
 ## Derived LLRs
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
@@ -110,3 +127,11 @@ Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` cycle the column'
 - [[TUI Markdown to lines via pulldown-cmark]]
 - [[TUI Udiff classify line precedence]]
 - [[TUI JsonView collapsed default closed]]
+- [[TUI Chat detail layout in cells]]
+- [[TUI Chat detail summary bar paints via Buffer cell_mut]]
+- [[TUI Chat detail key-cursor indicator on focused key row]]
+- [[TUI Chat detail tool-call arrow gutter]]
+- [[TUI Chat detail node id is slash-delimited path]]
+- [[TUI Chat detail focus precedence within column]]
+- [[TUI Chat detail mode chip in header]]
+- [[TUI Chat detail search-expanded set tracks restoration]]
