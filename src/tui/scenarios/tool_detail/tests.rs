@@ -203,6 +203,29 @@ fn edit_old_new_syntax_highlight_cell() {
     assert!(any_styled_fg(&buf, area), "expected syntect-styled cells");
 }
 
+#[test]
+fn copilot_create_renders_file_text_as_content_block() {
+    // Regression: Copilot's `create` tool uses the body-text concept
+    // mapped to `args.file_text`. Previously render_edit ignored it,
+    // so create spans rendered the file body as JSON under "other".
+    // After fix: path + a single "content"-labelled code block with the
+    // file body, syntax-highlighted by lang_from_path; "other" section
+    // MUST NOT appear (no remaining args).
+    let mut st = ToolDetailState::default();
+    let attrs = json!({"gen_ai.tool.call.arguments": {
+        "path": "main.rs",
+        "file_text": "fn brand_new() { let z = 3; }"
+    }});
+    let d = native_detail("create", "function", attrs);
+    let (buf, area) = render_to(&mut st, Some(("t1", "s1")), None, Some(&d), false);
+    let text = full_text(&buf, area);
+    assert!(text.contains("content"), "missing 'content' label in:\n{text}");
+    assert!(text.contains("brand_new"), "missing file body in:\n{text}");
+    assert!(!text.contains("\"file_text\""), "file_text leaked into 'other' JSON in:\n{text}");
+    assert!(!text.contains("other"), "spurious 'other' section in:\n{text}");
+    assert!(any_styled_fg(&buf, area), "expected syntect-styled cells for the content block");
+}
+
 // ---- view renderer ---------------------------------------------------------
 
 #[test]

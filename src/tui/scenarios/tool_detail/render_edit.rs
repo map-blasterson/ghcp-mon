@@ -100,13 +100,23 @@ pub(crate) fn render(ctx: &mut BodyCtx, attrs: &Value) {
         ctx.sublabel("arguments");
         let path = str_field(obj, &["path", "filePath"]).map(|s| s.to_string());
         let old_str = str_field(obj, &["old_str", "oldString"]).map(|s| s.to_string());
-        // `content` source labels the block "content" (opencode `write`).
-        let new_from_content = !obj.contains_key("old_str")
-            && obj.get("new_str").and_then(|v| v.as_str()).is_none()
-            && obj.get("newString").and_then(|v| v.as_str()).is_none()
-            && obj.get("content").and_then(|v| v.as_str()).is_some();
-        let new_str = str_field(obj, &["new_str", "newString", "content"]).map(|s| s.to_string());
-        let new_label = if new_from_content { "content" } else { "new_str" };
+        // Body-text sources (file_text from Copilot's `create`, content from
+        // opencode's write) label the block "content"; new-text sources
+        // (new_str, newString) keep the "new_str" label. Per the
+        // `Edit tool renders old new with syntax highlight` LLR + Copilot
+        // adapter: file-path / old-text / new-text / body-text are the
+        // four normalized argument concepts; body-text is Copilot's
+        // `file_text` and opencode's `content`.
+        let new_text = str_field(obj, &["new_str", "newString"]);
+        let body_text = str_field(obj, &["file_text", "content"]);
+        let new_str = new_text.or(body_text).map(|s| s.to_string());
+        let new_label = if new_text.is_some() {
+            "new_str"
+        } else if body_text.is_some() {
+            "content"
+        } else {
+            "new_str"
+        };
         let lang = path.as_deref().and_then(lang_from_path);
 
         if let Some(p) = &path {
@@ -126,7 +136,14 @@ pub(crate) fn render(ctx: &mut BodyCtx, attrs: &Value) {
         for (k, v) in obj {
             if matches!(
                 k.as_str(),
-                "path" | "filePath" | "old_str" | "oldString" | "new_str" | "newString" | "content"
+                "path"
+                    | "filePath"
+                    | "old_str"
+                    | "oldString"
+                    | "new_str"
+                    | "newString"
+                    | "content"
+                    | "file_text"
             ) {
                 continue;
             }
