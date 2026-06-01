@@ -1996,7 +1996,7 @@ mod tests {
             span_id: span_id.into(),
             parent_span_id: None,
             name: span_id.into(),
-            kind: "tool".into(),
+            kind: Some(1),
             kind_class: KindClass::ExecuteTool,
             start_unix_ns: Some(100),
             end_unix_ns: Some(200),

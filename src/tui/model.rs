@@ -150,7 +150,13 @@ pub struct SpanFull {
     pub span_id: String,
     pub parent_span_id: Option<String>,
     pub name: String,
-    pub kind: String,
+    // OTel `SpanKind` enum encoded as a small integer (0..=5) by the
+    // collector. The backend's `gen_ai` projection uses the string-valued
+    // `kind_class` instead, so we never read this — but the wire format
+    // is integer-or-null. Typing it as `String` (as the webui does in
+    // its untyped JS world) made every `SpanDetail` fetch fail to
+    // deserialize, silently breaking chips and the span detail pane.
+    pub kind: Option<i64>,
     pub kind_class: KindClass,
     pub start_unix_ns: Option<UnixNs>,
     pub end_unix_ns: Option<UnixNs>,
@@ -404,5 +410,60 @@ mod tests {
         let s = serde_json::to_string(&v).unwrap();
         assert_eq!(s, "\"otlp-traces\"");
         assert_eq!(v.as_str(), "otlp-traces");
+    }
+
+    /// Regression: the backend's `/api/spans/:trace/:span` response emits
+    /// `kind` as an OTel `SpanKind` integer (or null), NOT a string. A real
+    /// captured payload from `serve` is reproduced here so this can never
+    /// silently regress again — a typed-parse failure here makes every
+    /// downstream consumer of `SpanDetail` (chips, span detail pane, file
+    /// touches, tool detail, etc.) render as if the fetch never happened.
+    #[test]
+    fn span_detail_parses_integer_kind_from_wire_payload() {
+        let raw = r#"{
+            "span": {
+                "span_pk": 31000,
+                "trace_id": "324d6bbc1d81377d1e5f0e63e01e4fc7",
+                "span_id": "b84aabf9f8269309",
+                "parent_span_id": "7d713b4e913ee358",
+                "name": "execute_tool view",
+                "kind": 1,
+                "kind_class": "execute_tool",
+                "start_unix_ns": 1780345541165000000,
+                "end_unix_ns": 1780345541180069986,
+                "duration_ns": 15069986,
+                "status_message": null,
+                "ingestion_state": "real",
+                "scope_name": "github.copilot",
+                "scope_version": "1.0.57-5",
+                "attributes": {"gen_ai.tool.name": "view"},
+                "resource": null
+            },
+            "events": [],
+            "parent": null,
+            "children": [],
+            "projection": {}
+        }"#;
+        let d: SpanDetail = serde_json::from_str(raw).expect("must parse integer kind");
+        assert_eq!(d.span.kind, Some(1));
+        assert_eq!(d.span.kind_class, KindClass::ExecuteTool);
+    }
+
+    #[test]
+    fn span_detail_parses_null_kind() {
+        let raw = r#"{
+            "span": {
+                "span_pk": 1, "trace_id": "t", "span_id": "s",
+                "parent_span_id": null, "name": "n", "kind": null,
+                "kind_class": "other", "start_unix_ns": null,
+                "end_unix_ns": null, "duration_ns": null,
+                "status_message": null, "ingestion_state": "real",
+                "scope_name": null, "scope_version": null,
+                "attributes": null, "resource": null
+            },
+            "events": [], "parent": null, "children": [], "projection": {}
+        }"#;
+        let d: SpanDetail = serde_json::from_str(raw).expect("must parse null kind");
+        assert_eq!(d.span.kind, None);
     }
 }
