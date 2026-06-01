@@ -58,6 +58,9 @@ pub async fn run(server: &str, mouse: bool, log_buffer: LogBuffer) -> Result<()>
     }
 
     let mut app = app::App::new(api, ws.clone(), log_buffer, mouse);
+    if let Ok(sz) = terminal.size() {
+        app.term_size = (sz.width, sz.height);
+    }
     let (_tx, rx) = app::spawn_event_sources(&ws);
 
     let result = app::event_loop(&mut terminal, &mut app, rx).await;

@@ -3,6 +3,7 @@
 //! select popover, and the confirm modal.
 pub mod checkbox;
 pub mod confirm_modal;
+pub mod context_growth;
 pub mod kind_badge;
 pub mod log_overlay;
 pub mod rolling_dots;

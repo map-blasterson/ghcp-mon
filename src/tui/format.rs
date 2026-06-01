@@ -72,6 +72,48 @@ pub fn fmt_relative(unix_ns: Option<i128>, now_ns: Option<i128>) -> String {
     }
 }
 
+/// Group an integer with thousands separators, e.g. `1234567` → `"1,234,567"`.
+/// Negative values keep the leading sign. Used by the Context Growth Widget's
+/// y-axis tick labels.
+pub fn fmt_thousands(n: i64) -> String {
+    let neg = n < 0;
+    let digits = n.unsigned_abs().to_string();
+    let bytes = digits.as_bytes();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    let len = bytes.len();
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(*b as char);
+    }
+    if neg {
+        format!("-{grouped}")
+    } else {
+        grouped
+    }
+}
+
+/// Compact token-count label for the y-axis when full thousands-grouped form
+/// would not fit (e.g. `128000` → `"128k"`, `1_100_000` → `"1.1M"`). Falls
+/// back to [`fmt_thousands`] for small values.
+pub fn fmt_compact_count(n: i64) -> String {
+    let a = n.unsigned_abs();
+    let sign = if n < 0 { "-" } else { "" };
+    if a >= 1_000_000 {
+        let m = a as f64 / 1_000_000.0;
+        if m >= 100.0 {
+            format!("{sign}{:.0}M", m)
+        } else {
+            format!("{sign}{:.1}M", m)
+        }
+    } else if a >= 10_000 {
+        format!("{sign}{}k", a / 1000)
+    } else {
+        fmt_thousands(n)
+    }
+}
+
 /// Pretty-print a `serde_json::Value`. Falls back to `{:?}` if formatting fails
 /// for any reason (it should not for `Value`, but parity with `prettyJson`).
 pub fn pretty_json(value: &Value) -> String {
@@ -174,6 +216,24 @@ mod tests {
         let s = pretty_json(&v);
         assert!(s.contains("\"a\""));
         assert!(s.contains("\n"));
+    }
+
+    #[test]
+    fn fmt_thousands_groups() {
+        assert_eq!(fmt_thousands(0), "0");
+        assert_eq!(fmt_thousands(999), "999");
+        assert_eq!(fmt_thousands(1_000), "1,000");
+        assert_eq!(fmt_thousands(1_234_567), "1,234,567");
+        assert_eq!(fmt_thousands(-12_345), "-12,345");
+    }
+
+    #[test]
+    fn fmt_compact_count_units() {
+        assert_eq!(fmt_compact_count(999), "999");
+        assert_eq!(fmt_compact_count(1_234), "1,234");
+        assert_eq!(fmt_compact_count(128_000), "128k");
+        assert_eq!(fmt_compact_count(1_100_000), "1.1M");
+        assert_eq!(fmt_compact_count(250_000_000), "250M");
     }
 
     #[test]

@@ -37,6 +37,10 @@ use crate::tui::scenarios::spans::{
     hovered_chat_ancestor, invoke_agent, propagate_search, propagate_selection,
 };
 use crate::tui::widgets::confirm_modal::{ConfirmModalState, ConfirmModalView};
+use crate::tui::widgets::context_growth::{
+    ContextGrowthState, ContextGrowthWidget, MergedRows, chat_span_pks, max_current_tokens,
+    merge_snapshots,
+};
 use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
 use crate::tui::widgets::status_dot::StatusDot;
@@ -74,6 +78,14 @@ pub struct App {
     pub pending_delete: Option<String>,
     /// Monotonic tick counter for animations.
     pub anim_tick: u64,
+    /// Context Growth Widget keyboard-cursor state (Phase 2).
+    pub context_widget: ContextGrowthState,
+    /// True when keyboard focus is on the Context Growth Widget rather than a
+    /// column (part of the `Tab` focus cycle when the widget is visible).
+    pub widget_focused: bool,
+    /// Last known terminal size `(width, height)`. Updated on resize and at
+    /// startup; drives the widget-height `0.8 * term_h` clamp.
+    pub term_size: (u16, u16),
 }
 
 impl App {
@@ -99,6 +111,9 @@ impl App {
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
             anim_tick: 0,
+            context_widget: ContextGrowthState::default(),
+            widget_focused: false,
+            term_size: (0, 0),
         }
     }
 
@@ -119,6 +134,15 @@ impl App {
                 // follow_mode is on, recompute the latest tool span and
                 // jump the cursor + propagate selection if it differs.
                 self.tick_follow_mode_advance();
+                // Phase 2: consume any pending Context Growth Widget bar
+                // clicks (`Context widget bar click selects chat in Spans
+                // column`) and refresh the widget's row count for cursor
+                // clamping.
+                self.consume_widget_clicks();
+                self.context_widget.last_visible_rows = self
+                    .widget_merged_context()
+                    .map(|(m, _, _)| m.rows.len() as u16)
+                    .unwrap_or(0);
             }
             AppEvent::Crossterm(crossterm::event::Event::Key(k))
                 if k.kind == crossterm::event::KeyEventKind::Press =>
@@ -126,6 +150,9 @@ impl App {
                 if self.handle_key(k)? {
                     return Ok(true);
                 }
+            }
+            AppEvent::Crossterm(crossterm::event::Event::Resize(w, h)) => {
+                self.term_size = (w, h);
             }
             AppEvent::Crossterm(_) => {}
             AppEvent::WsTick {
@@ -242,6 +269,30 @@ impl App {
             }
         }
 
+        // Precedence layer 3: widget-local (Context Growth Widget focused).
+        if self.widget_focused {
+            match k.code {
+                KeyCode::Left => {
+                    self.widget_move_cursor(-1);
+                    return Ok(false);
+                }
+                KeyCode::Right => {
+                    self.widget_move_cursor(1);
+                    return Ok(false);
+                }
+                KeyCode::Enter => {
+                    self.widget_select_current();
+                    return Ok(false);
+                }
+                KeyCode::Esc => {
+                    self.widget_focused = false;
+                    return Ok(false);
+                }
+                // Any other key falls through to the global layer.
+                _ => {}
+            }
+        }
+
         // Precedence layer 4: column scenario keys.
         if let Some(i) = self.focused_column {
             if self.scenario_handle_key(i, k) {
@@ -256,6 +307,21 @@ impl App {
             }
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return Ok(true);
+            }
+            // Phase 2: `c` toggles the Context Growth Widget visibility.
+            (KeyCode::Char('c'), m)
+                if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+            {
+                self.toggle_context_widget();
+            }
+            // Phase 2: Alt+↑/↓ resize widget by 1 row; +Shift by 5 rows.
+            (KeyCode::Up, m) if m.contains(KeyModifiers::ALT) => {
+                let step = if m.contains(KeyModifiers::SHIFT) { 5 } else { 1 };
+                self.adjust_widget_height(step);
+            }
+            (KeyCode::Down, m) if m.contains(KeyModifiers::ALT) => {
+                let step = if m.contains(KeyModifiers::SHIFT) { 5 } else { 1 };
+                self.adjust_widget_height(-step);
             }
             (KeyCode::Char('?'), _) => {
                 self.log_overlay_visible = true;
@@ -758,6 +824,220 @@ impl App {
         Vec::new()
     }
 
+    /// Read-or-fetch `["session-contexts", cid]` and return the parsed
+    /// snapshot list. Stale-while-revalidate; deserialization failures are
+    /// surfaced via `tracing::warn!` (per the Phase 1 bug-fix pattern) rather
+    /// than silently swallowed.
+    fn cached_session_contexts(
+        &self,
+        cid: &str,
+    ) -> Vec<crate::tui::model::ContextSnapshot> {
+        let key = qkey(["session-contexts", cid]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            let cid = cid.to_string();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["session-contexts", &cid]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.list_session_contexts(&cid).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        if let Some(v) = value {
+            match serde_json::from_value::<crate::tui::model::ListSessionContextsResponse>(v) {
+                Ok(parsed) => return parsed.context_snapshots,
+                Err(e) => {
+                    tracing::warn!(
+                        cid = %cid,
+                        error = %e,
+                        "failed to deserialize cached session-contexts"
+                    );
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Resolve the column the Context Growth Widget binds to: the first column
+    /// (in workspace order) whose `config.session` is set. Implements
+    /// `Context widget binds to first column session`.
+    fn widget_bound_column(&self) -> Option<(usize, String)> {
+        for (i, c) in self.workspace.columns.iter().enumerate() {
+            if let Some(s) = c.config.get("session").and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    return Some((i, s.to_string()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Session id the widget is bound to, if any.
+    pub fn widget_session(&self) -> Option<String> {
+        self.widget_bound_column().map(|(_, s)| s)
+    }
+
+    /// Build the widget's merged chart data + the bound column's span tree.
+    /// Returns `None` when no column has a session.
+    fn widget_merged_context(
+        &self,
+    ) -> Option<(MergedRows, Vec<crate::tui::model::SpanNode>, usize)> {
+        let (col_idx, cid) = self.widget_bound_column()?;
+        let tree = self.cached_session_tree(col_idx);
+        let snaps = self.cached_session_contexts(&cid);
+        let pks = chat_span_pks(&tree);
+        let rows = merge_snapshots(&pks, &snaps, &tree);
+        let max_current = max_current_tokens(&snaps);
+        Some((
+            MergedRows {
+                rows,
+                max_current_tokens: max_current,
+            },
+            tree,
+            col_idx,
+        ))
+    }
+
+    /// Move the widget bar cursor and publish the new hover.
+    fn widget_move_cursor(&mut self, delta: i32) {
+        let len = self
+            .widget_merged_context()
+            .map(|(m, _, _)| m.rows.len())
+            .unwrap_or(0);
+        if len == 0 {
+            self.context_widget.bar_cursor = None;
+            return;
+        }
+        let cur = self.context_widget.bar_cursor.unwrap_or(0) as i32;
+        let next = (cur + delta).clamp(0, len as i32 - 1) as usize;
+        self.context_widget.bar_cursor = Some(next);
+        self.publish_widget_hover();
+    }
+
+    /// Publish the widget's current bar to the shared `hovered_chat_pk` store
+    /// so the matching Spans rows highlight in sync.
+    fn publish_widget_hover(&self) {
+        let pk = self.context_widget.bar_cursor.and_then(|i| {
+            self.widget_merged_context()
+                .and_then(|(m, _, _)| m.rows.get(i).map(|r| r.span_pk))
+        });
+        if let Ok(mut g) = self.hovered_chat_pk.write() {
+            *g = pk;
+        }
+    }
+
+    /// `Enter` on the focused widget bar → emit a `clicked_chat` signal into
+    /// every Spans column (`Context widget bar click selects chat in Spans
+    /// column`). The signal is consumed in the tick path via `spans_pick`.
+    fn widget_select_current(&mut self) {
+        let Some(i) = self.context_widget.bar_cursor else {
+            return;
+        };
+        let Some((merged, tree, _)) = self.widget_merged_context() else {
+            return;
+        };
+        let Some(row) = merged.rows.get(i) else {
+            return;
+        };
+        let Some(node) = find_node_by_pk(&tree, row.span_pk) else {
+            return;
+        };
+        let signal = (node.trace_id.clone(), node.span_id.clone());
+        for c in self.workspace.columns.iter() {
+            if c.scenario_type == ScenarioType::Spans {
+                let st = self.spans_state.entry(c.id.clone()).or_default();
+                st.clicked_chat = Some(signal.clone());
+            }
+        }
+        // Apply immediately as well so the routing is observable without
+        // waiting for the next tick.
+        self.consume_widget_clicks();
+    }
+
+    /// Consume any pending `clicked_chat` signals on Spans columns by routing
+    /// them through the shared `spans_pick` selection path, then clear them.
+    fn consume_widget_clicks(&mut self) {
+        let cols: Vec<(usize, String)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
+            .map(|(i, c)| (i, c.id.clone()))
+            .collect();
+        for (idx, col_id) in cols {
+            let clicked = self
+                .spans_state
+                .get(&col_id)
+                .and_then(|s| s.clicked_chat.clone());
+            let Some((_tid, sid)) = clicked else {
+                continue;
+            };
+            // Move the row cursor to the clicked chat span when it is visible.
+            let tree = self.cached_session_tree(idx);
+            let collapsed = self
+                .spans_state
+                .get(&col_id)
+                .map(|s| s.user_collapsed.clone())
+                .unwrap_or_default();
+            let flat = flatten_visible(&tree, &collapsed);
+            if let Some(pos) = flat.iter().position(|id| id == &sid) {
+                if let Some(s) = self.spans_state.get_mut(&col_id) {
+                    s.cursor = pos;
+                }
+            }
+            self.spans_pick(idx, &sid);
+            if let Some(s) = self.spans_state.get_mut(&col_id) {
+                s.clicked_chat = None;
+            }
+        }
+    }
+
+    /// Toggle the Context Growth Widget visibility (`c` global key). Drops
+    /// widget focus when hiding.
+    fn toggle_context_widget(&mut self) {
+        self.workspace.context_widget_visible = !self.workspace.context_widget_visible;
+        if !self.workspace.context_widget_visible {
+            self.widget_focused = false;
+        }
+        let _ = persist::save(&self.workspace);
+    }
+
+    /// Clamp a candidate widget height to `3 ..= floor(0.8 * term_h)`.
+    fn clamp_widget_height(&self, h: u16) -> u16 {
+        let term_h = self.term_size.1;
+        let cap = if term_h == 0 {
+            u16::MAX
+        } else {
+            ((term_h as f32) * 0.8).floor() as u16
+        };
+        let cap = cap.max(3);
+        h.clamp(3, cap)
+    }
+
+    /// Adjust widget height by `delta` rows (signed), clamped and persisted.
+    fn adjust_widget_height(&mut self, delta: i32) {
+        if !self.workspace.context_widget_visible {
+            return;
+        }
+        let cur = self.workspace.context_widget_height_rows as i32;
+        let raw = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+        let clamped = self.clamp_widget_height(raw);
+        if clamped != self.workspace.context_widget_height_rows {
+            self.workspace.context_widget_height_rows = clamped;
+            let _ = persist::save(&self.workspace);
+        }
+    }
+
     /// Read-or-fetch `["traces"]` for traces-list mode (when no session is
     /// configured). Stale-while-revalidate.
     fn cached_traces(&self) -> Vec<crate::tui::model::TraceSummary> {
@@ -933,13 +1213,30 @@ impl App {
 
     fn cycle_focus(&mut self, dir: i32) {
         let n = self.workspace.columns.len();
-        if n == 0 {
+        let widget_in_cycle = self.workspace.context_widget_visible;
+        // Focus slots: columns `0..n`, then an optional widget slot at index n.
+        let slots = n + usize::from(widget_in_cycle);
+        if slots == 0 {
             self.focused_column = None;
+            self.widget_focused = false;
             return;
         }
-        let cur = self.focused_column.unwrap_or(0) as i32;
-        let next = ((cur + dir).rem_euclid(n as i32)) as usize;
-        self.focused_column = Some(next);
+        let cur = if self.widget_focused {
+            n
+        } else {
+            self.focused_column.unwrap_or(0).min(slots - 1)
+        };
+        let next = ((cur as i32 + dir).rem_euclid(slots as i32)) as usize;
+        if widget_in_cycle && next == n {
+            self.widget_focused = true;
+            if self.context_widget.bar_cursor.is_none() {
+                self.context_widget.bar_cursor = Some(0);
+            }
+            self.publish_widget_hover();
+        } else {
+            self.widget_focused = false;
+            self.focused_column = Some(next);
+        }
     }
 
     fn append_column(&mut self) {
@@ -978,12 +1275,25 @@ impl App {
 
     pub fn draw(&self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
+        // Reserve the widget strip at the bottom: the clamped height when the
+        // widget is visible, or a single collapsed bar when hidden.
+        let widget_h: u16 = if self.workspace.context_widget_visible {
+            self.clamp_widget_height(self.workspace.context_widget_height_rows)
+                .min(area.height.saturating_sub(2))
+        } else {
+            1
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(widget_h),
+            ])
             .split(area);
         self.draw_top_bar(frame, chunks[0]);
         self.draw_workspace(frame, chunks[1]);
+        self.draw_context_widget(frame, chunks[2]);
         if self.log_overlay_visible {
             let lines = self.log_buffer.snapshot();
             frame.render_widget(LogOverlay { lines }, area);
@@ -994,6 +1304,33 @@ impl App {
             };
             frame.render_widget(view, area);
         }
+    }
+
+    /// Paint the Context Growth Widget strip (or its collapsed bar) at the
+    /// bottom of the workspace.
+    fn draw_context_widget(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        if !self.workspace.context_widget_visible {
+            ContextGrowthWidget::render_collapsed(area, frame.buffer_mut());
+            return;
+        }
+        let session = self.widget_session();
+        let merged = self
+            .widget_merged_context()
+            .map(|(m, _, _)| m)
+            .unwrap_or(MergedRows {
+                rows: Vec::new(),
+                max_current_tokens: 0,
+            });
+        let hovered = self.hovered_chat_pk.read().ok().and_then(|g| *g);
+        let widget = ContextGrowthWidget {
+            data: &merged,
+            session_id: session.as_deref(),
+            hovered_chat_pk: hovered,
+        };
+        widget.render(area, frame.buffer_mut(), &self.context_widget);
     }
 
     fn draw_top_bar(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1799,6 +2136,34 @@ fn find_node_ref<'a>(
     None
 }
 
+/// Find a span node by its integer primary key (`span_pk`). Used to map a
+/// Context Growth Widget bar back to its chat span in the bound column's tree.
+fn find_node_by_pk(
+    tree: &[crate::tui::model::SpanNode],
+    pk: i64,
+) -> Option<&crate::tui::model::SpanNode> {
+    fn walk(
+        n: &crate::tui::model::SpanNode,
+        pk: i64,
+    ) -> Option<&crate::tui::model::SpanNode> {
+        if n.span_pk == pk {
+            return Some(n);
+        }
+        for c in &n.children {
+            if let Some(x) = walk(c, pk) {
+                return Some(x);
+            }
+        }
+        None
+    }
+    for r in tree {
+        if let Some(n) = walk(r, pk) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 fn locate_for_render<'a>(
     tree: &'a [crate::tui::model::SpanNode],
     id: &str,
@@ -1881,7 +2246,12 @@ mod tests {
     fn make_app() -> App {
         let api = ApiClient::new("http://127.0.0.1:4319".into());
         let ws = WsBus::new("ws://127.0.0.1:4319/ws/events".into());
-        App::new(api, ws, LogBuffer::new(), false)
+        let mut app = App::new(api, ws, LogBuffer::new(), false);
+        // The Context Growth Widget defaults to visible in production; hide it
+        // in the shared test harness so workspace-rendering tests are not
+        // squeezed by the bottom strip. Widget tests re-enable it explicitly.
+        app.workspace.context_widget_visible = false;
+        app
     }
 
     #[test]
@@ -2377,5 +2747,167 @@ mod tests {
             .get("kind_filter")
             .is_none());
         assert!(app.spans_state.get(&col_id).unwrap().popover.is_none());
+    }
+
+    // ---- Phase 2: Context Growth Widget wiring ----
+
+    fn seed_session_contexts(
+        app: &App,
+        cid: &str,
+        snaps: Vec<crate::tui::model::ContextSnapshot>,
+    ) {
+        let resp = crate::tui::model::ListSessionContextsResponse {
+            conversation_id: cid.into(),
+            context_snapshots: snaps,
+        };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["session-contexts", cid]),
+            generation: 1,
+            value: serde_json::to_value(resp).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn mk_snapshot(
+        span_pk: i64,
+        captured: i128,
+        limit: i64,
+        current: i64,
+    ) -> crate::tui::model::ContextSnapshot {
+        crate::tui::model::ContextSnapshot {
+            ctx_pk: captured as i64,
+            span_pk: Some(span_pk),
+            captured_ns: captured,
+            token_limit: Some(limit),
+            current_tokens: Some(current),
+            messages_length: None,
+            input_tokens: Some(current / 2),
+            output_tokens: Some(current / 4),
+            cache_read_tokens: Some(current / 8),
+            reasoning_tokens: Some(current / 8),
+            source: None,
+        }
+    }
+
+    fn chat_node(id: &str, span_pk: i64, start: i128) -> SpanNode {
+        SpanNode {
+            span_pk,
+            trace_id: "trace-1".into(),
+            span_id: id.into(),
+            parent_span_id: None,
+            name: id.into(),
+            kind_class: KindClass::Chat,
+            ingestion_state: "complete".into(),
+            start_unix_ns: Some(start),
+            end_unix_ns: Some(start + 10),
+            projection: SpanProjection::default(),
+            children: vec![],
+        }
+    }
+
+    #[test]
+    fn toggle_context_widget_flips_visibility_and_drops_focus() {
+        let mut app = make_app();
+        app.workspace.context_widget_visible = true;
+        app.widget_focused = true;
+        app.toggle_context_widget();
+        assert!(!app.workspace.context_widget_visible);
+        assert!(!app.widget_focused, "hiding must drop widget focus");
+        app.toggle_context_widget();
+        assert!(app.workspace.context_widget_visible);
+    }
+
+    #[test]
+    fn widget_height_clamps_to_floor_point_eight_of_term_height() {
+        let mut app = make_app();
+        app.workspace.context_widget_visible = true;
+        app.term_size = (120, 40); // cap = floor(0.8*40) = 32
+        app.workspace.context_widget_height_rows = 10;
+        // Grow past the cap.
+        app.adjust_widget_height(100);
+        assert_eq!(app.workspace.context_widget_height_rows, 32);
+        // Shrink past the floor.
+        app.adjust_widget_height(-100);
+        assert_eq!(app.workspace.context_widget_height_rows, 3);
+    }
+
+    #[test]
+    fn cycle_focus_includes_widget_slot_when_visible() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = true;
+        app.focused_column = Some(0);
+        app.widget_focused = false;
+        // One column + widget = 2 slots. Tab forward lands on the widget.
+        app.cycle_focus(1);
+        assert!(app.widget_focused, "expected widget focus after column");
+        assert_eq!(
+            app.context_widget.bar_cursor,
+            Some(0),
+            "entering widget focus seeds bar cursor"
+        );
+        // Tab again wraps back to the column.
+        app.cycle_focus(1);
+        assert!(!app.widget_focused);
+        assert_eq!(app.focused_column, Some(0));
+    }
+
+    #[test]
+    fn cycle_focus_skips_widget_slot_when_hidden() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = false;
+        app.focused_column = Some(0);
+        app.cycle_focus(1);
+        assert!(!app.widget_focused);
+        assert_eq!(app.focused_column, Some(0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn widget_cursor_move_publishes_hover_pk() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = true;
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![chat_node("a", 10, 100), chat_node("b", 20, 200)];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_session_contexts(
+            &app,
+            "cid-1",
+            vec![mk_snapshot(10, 150, 1000, 400), mk_snapshot(20, 250, 1000, 800)],
+        );
+        app.context_widget.bar_cursor = Some(0);
+        app.widget_move_cursor(1);
+        assert_eq!(app.context_widget.bar_cursor, Some(1));
+        let pk = *app.hovered_chat_pk.read().unwrap();
+        assert_eq!(pk, Some(20), "hover pk must follow the bar cursor");
+        // Clamp at the right edge.
+        app.widget_move_cursor(1);
+        assert_eq!(app.context_widget.bar_cursor, Some(1));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn widget_enter_routes_selection_into_spans_column() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = true;
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![chat_node("a", 10, 100), chat_node("b", 20, 200)];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_session_contexts(
+            &app,
+            "cid-1",
+            vec![mk_snapshot(10, 150, 1000, 400), mk_snapshot(20, 250, 1000, 800)],
+        );
+        app.widget_focused = true;
+        app.context_widget.bar_cursor = Some(1); // chat "b"
+        app.widget_select_current();
+        // consume_widget_clicks (called inline) routes through spans_pick and
+        // clears the signal.
+        let col_id = app.workspace.columns[0].id.clone();
+        let st = app.spans_state.get(&col_id).unwrap();
+        assert!(st.clicked_chat.is_none(), "signal must be consumed");
+        // Cursor moved to the flat index of span "b" (index 1).
+        assert_eq!(st.cursor, 1);
     }
 }

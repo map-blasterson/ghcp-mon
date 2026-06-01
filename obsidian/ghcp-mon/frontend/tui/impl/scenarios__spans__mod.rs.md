@@ -17,3 +17,4 @@ Spans scenario top-level: SpansState (cursor, user_collapsed, follow_mode, searc
 - [[Spans header collapse and expand all buttons]]
 - [[Span tree row publishes hovered chat ancestor]]
 - [[TUI Spans focused row publishes hovered chat ancestor]]
+- [[Context widget bar click selects chat in Spans column]]

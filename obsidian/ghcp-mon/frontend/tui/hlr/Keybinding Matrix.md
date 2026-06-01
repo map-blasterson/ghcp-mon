@@ -45,6 +45,18 @@ The cumulative key table registered by the TUI. Each phase appends rows; this is
 | Input   | `Backspace`    | Search input: delete char left                        |
 | Input   | `Delete`       | Search input: delete char right                       |
 
+### Phase 2 additions (Context Growth Widget)
+
+| Mode    | Key                | Effect                                              |
+| ------- | ------------------ | --------------------------------------------------- |
+| Global  | `c`                | Toggle Context Growth Widget visibility             |
+| Global  | `Alt+↑` / `Alt+↓`  | Grow / shrink widget by 1 row (when visible)        |
+| Global  | `Alt+Shift+↑/↓`    | Grow / shrink widget by 5 rows (when visible)       |
+| Global  | `Tab` / `Shift-Tab`| Focus cycle includes the widget slot when visible   |
+| Widget  | `←` / `→`          | Move bar cursor (publishes cross-column hover)       |
+| Widget  | `Enter`            | Select cursor bar → routes to Spans column selection |
+| Widget  | `Esc`              | Release widget focus back to columns                 |
+
 ## Derived LLRs
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
@@ -58,3 +70,7 @@ The cumulative key table registered by the TUI. Each phase appends rows; this is
 - [[TUI Reveal schedule advances on every tick]]
 - [[TUI Spans bottom detail pane layout]]
 - [[TUI Spans traces list mode]]
+- [[TUI Context widget keyboard bar cursor navigation]]
+- [[TUI Context widget Alt arrow height adjustment]]
+- [[TUI Context widget collapsed single-row bar]]
+- [[TUI Context widget participates in Tab focus cycle]]
