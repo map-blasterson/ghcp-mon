@@ -81,6 +81,8 @@ pub struct App {
     /// authoritative value lives here so `handle_key` can mutate it before
     /// the next draw.
     pub chat_detail_mode: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::tree::ChatMode>>,
+    /// Per-column file-touches scenario state.
+    pub file_touches_state: RefCell<HashMap<String, crate::tui::scenarios::file_touches::FileTouchesState>>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
     /// consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
@@ -122,6 +124,7 @@ impl App {
             tool_detail_state: RefCell::new(HashMap::new()),
             chat_detail_state: RefCell::new(HashMap::new()),
             chat_detail_mode: RefCell::new(HashMap::new()),
+            file_touches_state: RefCell::new(HashMap::new()),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
@@ -363,6 +366,7 @@ impl App {
             ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
             ScenarioType::ToolDetail => self.tool_detail_key(&col_id, k),
             ScenarioType::ChatDetail => self.chat_detail_key(&col_id, k),
+            ScenarioType::FileTouches => self.file_touches_key(&col_id, k),
             _ => false,
         }
     }
@@ -1440,6 +1444,9 @@ impl App {
                 ScenarioType::ChatDetail => {
                     self.draw_chat_detail(inner, buf, &col.id, &cfg, focused)
                 }
+                ScenarioType::FileTouches => {
+                    self.draw_file_touches(inner, buf, &col.id, &cfg, focused)
+                }
                 _ => render_placeholder(inner, buf, st, &cfg),
             }
         }
@@ -1624,6 +1631,54 @@ impl App {
             crate::tui::scenarios::chat_detail::tree::ChatMode::Delta,
         );
         crate::tui::scenarios::chat_detail::handle_key(k, state, mode_entry)
+    }
+
+    /// Render a `FileTouches` column. Resolves the configured session, walks
+    /// the cached session span tree for file-touching tool spans (fetching each
+    /// span's detail through the shared `["span", ...]` cache), and delegates to
+    /// the file-touches scenario renderer.
+    fn draw_file_touches(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_id: &str,
+        cfg: &crate::tui::workspace::ColumnConfig,
+        focused: bool,
+    ) {
+        let session = cfg.get("session").and_then(|v| v.as_str());
+        let (cache_loaded, touches) = match session {
+            Some(s) => {
+                let tree = self.cached_session_span_tree_by_cid(s);
+                // Distinguish "loading" from "no touches": the tree fetch is
+                // complete once the cache key holds a value.
+                let loaded = self.cache.peek(&qkey(["session-span-tree", s])).value.is_some();
+                let touches = crate::tui::scenarios::file_touches::walk::extract_touches(
+                    &tree,
+                    |t, sp| self.cached_span_detail(t, sp),
+                );
+                (loaded, touches)
+            }
+            None => (false, Vec::new()),
+        };
+
+        let mut map = self.file_touches_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        crate::tui::scenarios::file_touches::render(
+            area,
+            buf,
+            state,
+            session,
+            cache_loaded,
+            &touches,
+            focused,
+        );
+    }
+
+    /// Dispatch a key to a `FileTouches` column's scenario state.
+    fn file_touches_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
+        let mut map = self.file_touches_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        crate::tui::scenarios::file_touches::handle_key(k, state)
     }
 
     /// Read-or-fetch `["session-span-tree", cid]` keyed by cid directly.

@@ -102,6 +102,20 @@ Active when a `ChatDetail` column has focus.
 
 (Widget-layer keys for SearchableTextBlock — `/`, `Enter`, `Shift+Enter`, `Esc`, printable, Backspace — remain unchanged from Phase 2.5.)
 
+### Phase 5 additions (File Touches column)
+
+Active when a `FileTouches` column has focus.
+
+| Key            | Layer  | Mode/Scope    | Effect                                            |
+| -------------- | ------ | ------------- | ------------------------------------------------- |
+| `↑` / `↓`      | column | tree focused  | move row cursor                                   |
+| `←`            | column | dir focused   | collapse focused dir                              |
+| `→`            | column | dir focused   | expand focused dir                                |
+| `Space`        | column | dir focused   | toggle expand                                     |
+| `+`            | column | always        | expand all (no-op when no dirs)                   |
+| `-`            | column | always        | collapse all (no-op when no dirs)                 |
+| `Home` / `End` | column | tree focused  | jump to top / bottom                              |
+
 ## Derived LLRs
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
@@ -135,3 +149,7 @@ Active when a `ChatDetail` column has focus.
 - [[TUI Chat detail focus precedence within column]]
 - [[TUI Chat detail mode chip in header]]
 - [[TUI Chat detail search-expanded set tracks restoration]]
+- [[TUI File touches tree row layout in cells]]
+- [[TUI File touches header and bulk controls]]
+- [[TUI File touches empty states]]
+- [[TUI File touches preserves user collapse state across live updates]]

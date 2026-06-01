@@ -1,7 +1,7 @@
 //! Scenario dispatch: Phase 1 ships real renderers for LiveSessions and
-//! Spans; ToolDetail / ChatDetail / FileTouches / RawBrowser keep their
-//! Phase-0 placeholder renderer (which dumps `column.config` so cross-column
-//! routing can be evaluated visually).
+//! Spans; later phases add ToolDetail, ChatDetail, and FileTouches. Only
+//! RawBrowser keeps the Phase-0 placeholder renderer (which dumps
+//! `column.config` so cross-column routing can be evaluated visually).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -15,6 +15,7 @@ pub mod live_sessions;
 pub mod spans;
 pub mod tool_detail;
 pub mod chat_detail;
+pub mod file_touches;
 
 /// Render a Phase-0 placeholder for any scenario type still without a real
 /// renderer. The placeholder dumps the column's `config` so cross-column
