@@ -416,6 +416,19 @@ impl<'a> SearchableTextBlock<'a> {
         }
     }
 
+    /// Public phase-reconcile hook for hosts that render a *custom* body (e.g.
+    /// a syntect [`crate::tui::widgets::code_block::CodeBlock`]) but still want
+    /// the external-query / focus lifecycle managed by this widget. After this
+    /// call `state.phase` and `state.query` are up to date, so the host can
+    /// branch on `state.phase == SearchPhase::Active`.
+    pub fn reconcile(
+        state: &mut SearchableTextBlockState,
+        external_query: Option<&str>,
+        focused: bool,
+    ) {
+        Self::reconcile_phase(state, external_query, focused);
+    }
+
     /// Called by the host when the parent column loses focus. No-op when an
     /// external query is set (the external owner controls the lifecycle);
     /// otherwise resets to Idle and clears search state.

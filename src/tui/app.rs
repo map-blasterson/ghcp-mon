@@ -3,6 +3,7 @@
 //! `try_recv` before `terminal.draw` runs once.
 
 use std::collections::HashMap;
+use std::cell::RefCell;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -69,6 +70,10 @@ pub struct App {
     /// Per-column scenario state (keyed by column id).
     pub live_sessions_state: HashMap<String, LiveSessionsState>,
     pub spans_state: HashMap<String, SpansState>,
+    /// Per-column tool-detail scenario state (keyed by column id). `RefCell`
+    /// because `draw` takes `&self` but the searchable body blocks mutate
+    /// state (search phase, scroll, focus plan) during render.
+    pub tool_detail_state: RefCell<HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
     /// consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
@@ -107,6 +112,7 @@ impl App {
             last_ws_event: None,
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
+            tool_detail_state: RefCell::new(HashMap::new()),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
@@ -346,6 +352,7 @@ impl App {
         match st {
             ScenarioType::LiveSessions => self.live_sessions_key(col_idx, &col_id, k),
             ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
+            ScenarioType::ToolDetail => self.tool_detail_key(&col_id, k),
             _ => false,
         }
     }
@@ -1417,6 +1424,9 @@ impl App {
             match st {
                 ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col.id),
                 ScenarioType::Spans => self.draw_spans(inner, buf, i, &col.id),
+                ScenarioType::ToolDetail => {
+                    self.draw_tool_detail(inner, buf, &col.id, &cfg, focused)
+                }
                 _ => render_placeholder(inner, buf, st, &cfg),
             }
         }
@@ -1451,6 +1461,47 @@ impl App {
             lines.push(Line::from(Span::styled(txt, style)));
         }
         Paragraph::new(lines).render(area, buf);
+    }
+
+    /// Render a `ToolDetail` column. Resolves the configured span selection +
+    /// search query and the cached span detail, then delegates to the
+    /// tool-detail scenario renderer (which mutates per-column state through
+    /// the `RefCell`).
+    fn draw_tool_detail(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_id: &str,
+        cfg: &crate::tui::workspace::ColumnConfig,
+        focused: bool,
+    ) {
+        let trace_id = cfg.get("selected_trace_id").and_then(|v| v.as_str());
+        let span_id = cfg.get("selected_span_id").and_then(|v| v.as_str());
+        let search_query = cfg.get("search_query").and_then(|v| v.as_str());
+        let selection = match (trace_id, span_id) {
+            (Some(t), Some(s)) => Some((t, s)),
+            _ => None,
+        };
+        let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
+
+        let mut map = self.tool_detail_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        crate::tui::scenarios::tool_detail::render(
+            area,
+            buf,
+            state,
+            selection,
+            search_query,
+            detail.as_ref(),
+            focused,
+        );
+    }
+
+    /// Dispatch a key to a `ToolDetail` column's scenario state.
+    fn tool_detail_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
+        let mut map = self.tool_detail_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_default();
+        crate::tui::scenarios::tool_detail::handle_key(k, state)
     }
 
     fn draw_spans(&self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {

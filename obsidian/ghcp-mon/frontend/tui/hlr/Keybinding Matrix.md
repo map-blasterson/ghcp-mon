@@ -70,6 +70,21 @@ Active only when a `SearchableTextBlock` has focus (the **widget** precedence la
 | printable chars | text-input | Active phase + input focused | append to query                                   |
 | `Backspace`     | text-input | Active phase + input focused | delete last query char                            |
 
+### Phase 3 additions (Tool Detail column)
+
+Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` cycle the column's focusable blocks (metadata panel, searchable bodies, JSON panels) before falling through to the global column-focus cycle.
+
+| Key             | Layer      | Mode/Scope                        | Effect                                              |
+| --------------- | ---------- | --------------------------------- | --------------------------------------------------- |
+| `Tab`           | column     | block focus < last                | focus next block (else fall through, reset to first)|
+| `Shift-Tab`     | column     | block focus > 0                   | focus previous block (else fall through)            |
+| `↑` / `↓`       | column     | any                               | scroll body up / down one line                      |
+| `Home` / `End`  | column     | any                               | scroll to top / bottom                              |
+| `Space`         | column     | focused metadata / JSON panel     | toggle panel open / closed (`▸`/`▾`)                 |
+| `/`             | widget     | focused searchable / open JSON    | activate per-block search (then text-input layer)   |
+| `Enter`         | widget     | block search Active               | next match (Shift+Enter previous)                   |
+| `Esc`           | widget     | block search Active               | exit search (no-op while external query drives it)  |
+
 ## Derived LLRs
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
@@ -87,3 +102,11 @@ Active only when a `SearchableTextBlock` has focus (the **widget** precedence la
 - [[TUI Context widget Alt arrow height adjustment]]
 - [[TUI Context widget collapsed single-row bar]]
 - [[TUI Context widget participates in Tab focus cycle]]
+- [[TUI Tool detail bottom-up layout in cells]]
+- [[TUI Tool detail key-dispatch precedence within column]]
+- [[TUI Tool detail metadata panel default closed]]
+- [[TUI Tool detail empty state verbatim copy]]
+- [[TUI CodeBlock syntect highlight rendering]]
+- [[TUI Markdown to lines via pulldown-cmark]]
+- [[TUI Udiff classify line precedence]]
+- [[TUI JsonView collapsed default closed]]
