@@ -647,6 +647,54 @@ export function SpansScenario({ column }: { column: Column }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [followMode, latestToolSpan, selected_span_id]);
 
+  // Latest chat span by sortKey across the revealed tree. Mirrors
+  // latestToolSpan; drives follow-mode advancement of ChatDetail columns.
+  const latestChatSpan = useMemo(() => {
+    let best: SpanNode | null = null;
+    let bestKey = -1;
+    const walk = (nodes: SpanNode[]) => {
+      for (const n of nodes) {
+        if (n.kind_class === "chat") {
+          const k = sortKey(n);
+          if (k > bestKey) { bestKey = k; best = n; }
+        }
+        walk(n.children ?? []);
+      }
+    };
+    walk(displayedTree);
+    return best as SpanNode | null;
+  }, [displayedTree]);
+
+  // Follow-mode chat catch-up. ChatDetail cannot be advanced at the moment
+  // follow jumps to a new tool span, because the chat span that consumes the
+  // tool's response usually hasn't arrived yet — and several batched tool
+  // calls may all land in a single chat span, so there's no reliable 1:1
+  // tool→chat target to resolve up front. Instead, while following, advance
+  // ChatDetail to the latest chat span as soon as it lands, pointing its
+  // tool-call arrow at whichever tool ToolDetail is currently showing. The
+  // converge-only guard makes this idempotent and leaves a user's manual chat
+  // pick in place until the next chat span arrives.
+  useEffect(() => {
+    if (!followMode || !latestChatSpan) return;
+    const chatSpan = latestChatSpan;
+    const toolCallId = latestToolSpan?.projection.tool_call?.call_id ?? undefined;
+    columns.forEach((c) => {
+      if (c.scenarioType !== "chat_detail") return;
+      if (
+        c.config.selected_span_id === chatSpan.span_id &&
+        c.config.selected_tool_call_id === toolCallId
+      ) return;
+      updateColumn(c.id, {
+        config: {
+          ...c.config,
+          selected_trace_id: chatSpan.trace_id,
+          selected_span_id: chatSpan.span_id,
+          selected_tool_call_id: toolCallId,
+        },
+      });
+    });
+  }, [followMode, latestChatSpan, latestToolSpan, columns, updateColumn]);
+
   // --- collapse state (lifted from SpanTreeView for header buttons) ---
   const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
   useEffect(() => { setUserCollapsed(new Set()); }, [session]);

@@ -515,6 +515,66 @@ a:hover { text-decoration: underline; }
   border-left-color: var(--accent-2);
 }
 
+/* Unified inline line-by-line diff for the `edit` tool (old_str → new_str).
+   A 4-column grid: [old line no][new line no][marker][code]. Rows use
+   `display: contents` so the columns align across every row. Row tints are
+   background-only so Prism's foreground token colors survive. */
+.inline-diff {
+  display: grid;
+  grid-template-columns: auto auto auto minmax(0, 1fr);
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  border-left: 2px solid var(--border);
+}
+.idiff-row {
+  display: contents;
+}
+.idiff-no {
+  padding: 0 4px;
+  text-align: right;
+  color: var(--fg-mute);
+  opacity: 0.6;
+  user-select: none;
+  white-space: pre;
+}
+.idiff-mark {
+  padding: 0 4px;
+  text-align: center;
+  color: var(--fg-mute);
+  user-select: none;
+}
+.idiff-code {
+  padding-right: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* Row-level add/remove tints (background only — never `color`). */
+.idiff-add .idiff-no,
+.idiff-add .idiff-mark,
+.idiff-add .idiff-code {
+  background: rgba(46, 160, 67, 0.12);
+}
+.idiff-rem .idiff-no,
+.idiff-rem .idiff-mark,
+.idiff-rem .idiff-code {
+  background: rgba(248, 81, 73, 0.12);
+}
+.idiff-add .idiff-mark {
+  color: var(--accent-2);
+}
+.idiff-rem .idiff-mark {
+  color: var(--err);
+}
+/* Intra-line word-level emphasis: a stronger background on the exact
+   characters that changed, layered over the syntax color. */
+.idiff-add .idiff-ch {
+  background: rgba(46, 160, 67, 0.32);
+}
+.idiff-rem .idiff-ch {
+  background: rgba(248, 81, 73, 0.32);
+}
+
 /* Make Prism's <pre> blocks blend with our containers — the parent
    .edit-diff (or other host) supplies the background and padding. */
 .code-block,
