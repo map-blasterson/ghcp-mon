@@ -1267,8 +1267,8 @@ impl App {
                 );
                 x += 4;
             }
-            // Build chip strings for this row (skill/desc/diff-stat/shell).
-            let chips = self.compute_row_chips(node);
+            // Build chip strings + optional description for this row.
+            let (chips, description) = self.compute_row_chips(node);
             // Approximate chip width to reserve before truncating the name.
             // Each chip costs `text.len() + 2` (padding) + 1 gap.
             let chip_reserve: usize = chips
@@ -1276,6 +1276,10 @@ impl App {
                 .map(|(s, _)| s.chars().count() + 3)
                 .sum::<usize>()
                 .min(40);
+            let desc_reserve = description
+                .as_deref()
+                .map(|s| s.chars().count() + 1)
+                .unwrap_or(0);
             // Report-intent title (white text appended at end of parent row).
             let report_title = report_titles.get(&node.span_id).cloned();
             let title_reserve = report_title
@@ -1283,10 +1287,11 @@ impl App {
                 .map(|s| s.chars().count() + 2)
                 .unwrap_or(0);
 
-            // Name (truncated to leave room for chips + report title).
+            // Name (truncated to leave room for chips + description + title).
             let total_avail =
                 (tree_area.x + tree_area.width).saturating_sub(x) as usize;
-            let name_budget = total_avail.saturating_sub(chip_reserve + title_reserve);
+            let name_budget = total_avail
+                .saturating_sub(chip_reserve + desc_reserve + title_reserve);
             let mut name = node.name.clone();
             let cc = name.chars().count();
             if cc > name_budget {
@@ -1343,6 +1348,22 @@ impl App {
                     .add_modifier(Modifier::BOLD);
                 buf.set_span(x, row_y, &Span::styled(chip_text, chip_style), chip_w);
                 x += chip_w;
+            }
+            // Tool description label (no chip styling — white text, 1-cell
+            // left padding) per `Spans tool description inline label`.
+            if let Some(desc) = description {
+                if x + 1 < tree_area.x + tree_area.width {
+                    x += 1;
+                    let w = (desc.chars().count() as u16)
+                        .min((tree_area.x + tree_area.width).saturating_sub(x));
+                    buf.set_span(
+                        x,
+                        row_y,
+                        &Span::styled(desc, Style::default().fg(Color::White)),
+                        w,
+                    );
+                    x += w;
+                }
             }
             // Report-intent title (no chip styling — white text).
             if let Some(title) = report_title {
@@ -1562,27 +1583,29 @@ impl App {
     }
 
     /// Compute per-row chips (text, bg color) using cached per-span details.
+    /// Returns chips + an optional plain-white description label that the
+    /// renderer paints separately (no chip styling, per the LLR).
     fn compute_row_chips(
         &self,
         node: &crate::tui::model::SpanNode,
-    ) -> Vec<(String, Color)> {
+    ) -> (Vec<(String, Color)>, Option<String>) {
         let mut out: Vec<(String, Color)> = Vec::new();
         // Only execute_tool spans currently get chips per the LLR family.
         if !matches!(node.kind_class, KindClass::ExecuteTool) {
-            return out;
+            return (out, None);
         }
         let Some(tool_call) = &node.projection.tool_call else {
-            return out;
+            return (out, None);
         };
         let tool_name = tool_call.tool_name.clone().unwrap_or_default();
         let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id) else {
-            return out;
+            return (out, None);
         };
         let Some(attrs_v) = &detail.span.attributes else {
-            return out;
+            return (out, None);
         };
         let Some(args) = attrs::parse_tool_call_arguments(attrs_v) else {
-            return out;
+            return (out, None);
         };
 
         // Skill chip
@@ -1590,19 +1613,6 @@ impl App {
             if let Some(s) = chips::skill_chip(&args) {
                 out.push((s, Color::Green));
             }
-        }
-        // Tool description (rendered separately at end — push a marker chip
-        // here? No — description is white plain text, not a chip. Handled
-        // below as a separate branch in the row renderer.). We DO want to
-        // include it as a "chip-like" appendage with white bg — but the
-        // LLR explicitly says no chip styling. Push as Color::Reset for
-        // recognition and special-case in the renderer? Cleaner: include
-        // description as the FIRST chip with bg matching the row to look
-        // unstyled.
-        if let Some(desc) = chips::tool_description_label(&args) {
-            // Render as plain white text: use no background — we model with
-            // Color::Black bg + White fg approximation.
-            out.push((desc, Color::Black));
         }
         // Diff-stat badges
         let kind_opt = crate::tui::vendor::copilot::tool_name_mapping(&tool_name);
@@ -1624,14 +1634,17 @@ impl App {
                     }
                     for c in shell_chips {
                         let color = crate::tui::format::hash_color(&c);
-                        // Force into a 256-color-ish palette by re-using
-                        // hash_color (already RGB).
                         out.push((c, color));
                     }
                 }
             }
         }
-        out
+        // Tool description label — per `Spans tool description inline label`,
+        // rendered as plain white text with no chip styling. Kept separate
+        // from the `chips` Vec so the renderer can paint it without forcing
+        // a (bg, black-fg) chip style that would render black-on-black.
+        let description = chips::tool_description_label(&args);
+        (out, description)
     }
 
     /// Per `Report intent title shows on parent row` — for each node, look at
