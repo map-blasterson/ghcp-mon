@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::tui::api::ApiClient;
-use crate::tui::cache::{QueryCache, cache_get, qkey};
+use crate::tui::cache::{FetchPolicy, QueryCache, cache_get, qkey, swr_read};
 use crate::tui::event::{
     AppEvent, spawn_crossterm_reader, spawn_tick, spawn_ws_coalescer,
 };
@@ -709,49 +709,47 @@ impl App {
         }
     }
 
-    /// 300 ms debounce kick. Increments the column's `search_nonce` and
-    /// spawns a task that, after the debounce, only fires `cache_get` for
-    /// `["search-spans", session, q]` if `q` still matches the column's
-    /// latest emitted text. Empty `q` clears the search state.
+    /// 300 ms debounce kick for the server-side span search. Per the
+    /// `TUI Spans search input edit semantics` LLR: rapid typing must not
+    /// fan out into N HTTP requests. The cache's in-flight dedupe coalesces
+    /// identical queries (different debounce calls with the same text) and
+    /// generation-bumped invalidation drops superseded results.
+    ///
+    /// `cache_get` is the only fetcher of `["search-spans", session, q]` —
+    /// render reads through [`Self::cached_search_hits`] with
+    /// `FetchPolicy::ReadOnly` and never kicks its own fetch.
     fn kick_search_debounce(&mut self, col_id: &str, q: String) {
-        let nonce = {
-            let s = self.spans_state.entry(col_id.to_string()).or_default();
-            s.search_nonce = s.search_nonce.wrapping_add(1);
-            s.search_nonce
-        };
-        // Resolve the session for this column.
-        let session = self
+        self.spans_state
+            .entry(col_id.to_string())
+            .or_default()
+            .search_nonce = self
+            .spans_state
+            .get(col_id)
+            .map(|s| s.search_nonce)
+            .unwrap_or(0)
+            .wrapping_add(1);
+        // Empty q clears search results without fetching.
+        if q.is_empty() {
+            if let Some(s) = self.spans_state.get_mut(col_id) {
+                s.search_hits = None;
+            }
+            return;
+        }
+        let Some(session) = self
             .workspace
             .columns
             .iter()
             .find(|c| c.id == col_id)
             .and_then(|c| c.config.get("session"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        if q.is_empty() {
-            // Clear search results immediately; no fetch.
-            if let Some(s) = self.spans_state.get_mut(col_id) {
-                s.search_hits = None;
-            }
-            return;
-        }
-        let Some(session) = session else {
+            .map(|s| s.to_string())
+        else {
             return;
         };
         let cache = self.cache.clone();
         let api = self.api.clone();
-        let col_id_s = col_id.to_string();
-        // We can't borrow `self.spans_state` from the spawned task, so the
-        // debounce only fires the fetch — the result lands in the cache and
-        // the render path picks it up via `cached_search_hits`.
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            // Best-effort: the nonce check would require shared state. We
-            // rely on `cache_get` in-flight dedupe to coalesce identical
-            // queries (different debounce calls with the same text). The
-            // generation-bumped invalidate path drops superseded results.
-            let _ = col_id_s; // (kept for future per-column gating)
-            let _ = nonce;
             let _ = cache_get(
                 &cache,
                 qkey(["search-spans", &session, &q]),
@@ -781,33 +779,19 @@ impl App {
     /// from the renderer's point of view: returns whatever is cached and
     /// triggers a refetch when stale (stale-while-revalidate).
     fn cached_sessions(&self) -> Vec<crate::tui::model::SessionSummary> {
-        let key = qkey(["sessions"]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["sessions"]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.list_sessions(Some(50), None).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        if let Some(v) = value {
-            if let Ok(parsed) =
-                serde_json::from_value::<crate::tui::model::ListSessionsResponse>(v)
-            {
-                return parsed.sessions;
-            }
-        }
-        Vec::new()
+        let api = self.api.clone();
+        swr_read::<crate::tui::model::ListSessionsResponse, _, _>(
+            &self.cache,
+            qkey(["sessions"]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::Swr,
+            move || async move {
+                let r = api.list_sessions(Some(50), None).await?;
+                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+            },
+        )
+        .map(|r| r.sessions)
+        .unwrap_or_default()
     }
 
     /// Read-or-fetch `["session-span-tree", cid]` for the given column. Returns
@@ -817,75 +801,29 @@ impl App {
         let Some(cid) = cfg.get("session").and_then(|v| v.as_str()) else {
             return Vec::new();
         };
-        let key = qkey(["session-span-tree", cid]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            let cid = cid.to_string();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["session-span-tree", &cid]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.get_session_span_tree(&cid).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        if let Some(v) = value {
-            if let Ok(parsed) = serde_json::from_value::<SessionSpanTreeResponse>(v) {
-                return parsed.tree;
-            }
-        }
-        Vec::new()
+        self.cached_session_span_tree_by_cid(cid)
     }
 
     /// Read-or-fetch `["session-contexts", cid]` and return the parsed
-    /// snapshot list. Stale-while-revalidate; deserialization failures are
-    /// surfaced via `tracing::warn!` (per the Phase 1 bug-fix pattern) rather
-    /// than silently swallowed.
+    /// snapshot list. Stale-while-revalidate.
     fn cached_session_contexts(
         &self,
         cid: &str,
     ) -> Vec<crate::tui::model::ContextSnapshot> {
-        let key = qkey(["session-contexts", cid]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            let cid = cid.to_string();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["session-contexts", &cid]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.list_session_contexts(&cid).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        if let Some(v) = value {
-            match serde_json::from_value::<crate::tui::model::ListSessionContextsResponse>(v) {
-                Ok(parsed) => return parsed.context_snapshots,
-                Err(e) => {
-                    tracing::warn!(
-                        cid = %cid,
-                        error = %e,
-                        "failed to deserialize cached session-contexts"
-                    );
-                }
-            }
-        }
-        Vec::new()
+        let api = self.api.clone();
+        let cid_s = cid.to_string();
+        swr_read::<crate::tui::model::ListSessionContextsResponse, _, _>(
+            &self.cache,
+            qkey(["session-contexts", cid]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::Swr,
+            move || async move {
+                let r = api.list_session_contexts(&cid_s).await?;
+                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+            },
+        )
+        .map(|r| r.context_snapshots)
+        .unwrap_or_default()
     }
 
     /// Resolve the column the Context Growth Widget binds to: the first column
@@ -1070,33 +1008,19 @@ impl App {
     /// Read-or-fetch `["traces"]` for traces-list mode (when no session is
     /// configured). Stale-while-revalidate.
     fn cached_traces(&self) -> Vec<crate::tui::model::TraceSummary> {
-        let key = qkey(["traces"]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["traces"]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.list_traces(Some(50), None).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        if let Some(v) = value {
-            if let Ok(parsed) =
-                serde_json::from_value::<crate::tui::model::ListTracesResponse>(v)
-            {
-                return parsed.traces;
-            }
-        }
-        Vec::new()
+        let api = self.api.clone();
+        swr_read::<crate::tui::model::ListTracesResponse, _, _>(
+            &self.cache,
+            qkey(["traces"]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::Swr,
+            move || async move {
+                let r = api.list_traces(Some(50), None).await?;
+                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+            },
+        )
+        .map(|r| r.traces)
+        .unwrap_or_default()
     }
 
     /// Read-or-fetch a single span's detail under `["span", trace_id, span_id]`
@@ -1107,32 +1031,25 @@ impl App {
         trace_id: &str,
         span_id: &str,
     ) -> Option<crate::tui::model::SpanDetail> {
-        let key = qkey(["span", trace_id, span_id]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            let tid = trace_id.to_string();
-            let sid = span_id.to_string();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["span", &tid, &sid]),
-                    std::time::Duration::from_secs(30),
-                    || async move {
-                        let r = api.get_span(&tid, &sid).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        value.and_then(|v| serde_json::from_value(v).ok())
+        let api = self.api.clone();
+        let tid = trace_id.to_string();
+        let sid = span_id.to_string();
+        swr_read::<crate::tui::model::SpanDetail, _, _>(
+            &self.cache,
+            qkey(["span", trace_id, span_id]),
+            std::time::Duration::from_secs(30),
+            FetchPolicy::Swr,
+            move || async move {
+                let r = api.get_span(&tid, &sid).await?;
+                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+            },
+        )
     }
 
-    /// Read-or-fetch `["search-spans", session, q]` for the active server
-    /// search. Stale_after = 5 s.
+    /// Read-only lookup of `["search-spans", session, q]`. The fetch
+    /// lifecycle is owned by [`Self::kick_search_debounce`] (per the
+    /// `TUI Spans search input edit semantics` LLR's 300 ms debounce
+    /// contract) — render MUST NOT kick its own fetch here.
     fn cached_search_hits(
         &self,
         session: &str,
@@ -1141,28 +1058,13 @@ impl App {
         if q.is_empty() {
             return None;
         }
-        let key = qkey(["search-spans", session, q]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            let session = session.to_string();
-            let q = q.to_string();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["search-spans", &session, &q]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.search_spans(&q, &session, Some(200)).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        value.and_then(|v| serde_json::from_value(v).ok())
+        swr_read::<crate::tui::model::SearchResponse, _, _>(
+            &self.cache,
+            qkey(["search-spans", session, q]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::ReadOnly,
+            || async move { unreachable!("ReadOnly policy never invokes the fetcher") },
+        )
     }
 
     /// Follow-mode advance hook (per `Spans follows latest tool span`).
@@ -1688,39 +1590,20 @@ impl App {
         &self,
         cid: &str,
     ) -> Vec<crate::tui::model::SpanNode> {
-        let key = qkey(["session-span-tree", cid]);
-        let g = self.cache.peek(&key);
-        let value = g.value.as_ref().map(|c| c.value.clone());
-        if g.will_refetch {
-            let cache = self.cache.clone();
-            let api = self.api.clone();
-            let cid_s = cid.to_string();
-            tokio::spawn(async move {
-                let _ = cache_get(
-                    &cache,
-                    qkey(["session-span-tree", &cid_s]),
-                    std::time::Duration::from_secs(5),
-                    || async move {
-                        let r = api.get_session_span_tree(&cid_s).await?;
-                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                    },
-                )
-                .await;
-            });
-        }
-        if let Some(v) = value {
-            match serde_json::from_value::<SessionSpanTreeResponse>(v) {
-                Ok(parsed) => return parsed.tree,
-                Err(e) => {
-                    tracing::warn!(
-                        cid = %cid,
-                        error = %e,
-                        "failed to deserialize cached session-span-tree"
-                    );
-                }
-            }
-        }
-        Vec::new()
+        let api = self.api.clone();
+        let cid_s = cid.to_string();
+        swr_read::<SessionSpanTreeResponse, _, _>(
+            &self.cache,
+            qkey(["session-span-tree", cid]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::Swr,
+            move || async move {
+                let r = api.get_session_span_tree(&cid_s).await?;
+                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+            },
+        )
+        .map(|r| r.tree)
+        .unwrap_or_default()
     }
 
     fn draw_spans(&self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {

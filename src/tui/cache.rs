@@ -301,6 +301,63 @@ pub struct FetchTicket {
     pub wait: Option<broadcast::Receiver<Value>>,
 }
 
+/// Fetch policy for [`swr_read`]: whether to dispatch a background refetch
+/// when the cached value is missing or stale.
+///
+/// * `Swr` — stale-while-revalidate: return cached value (if any) and spawn
+///   a background fetch when `peek` reports `will_refetch`.
+/// * `ReadOnly` — return only what's already in the cache. Used by render
+///   paths whose fetch lifecycle is owned elsewhere (e.g. debounced search
+///   per `TUI Spans search input edit semantics`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FetchPolicy {
+    Swr,
+    ReadOnly,
+}
+
+/// Read the typed value at `key` from `cache`, deserializing into `T`. If
+/// `policy` is [`FetchPolicy::Swr`] and the cache reports `will_refetch`,
+/// spawn `fetch` in the background under [`cache_get`] so the next render
+/// can pick up the fresh value. Deserialization failures are logged at
+/// `warn` (with the key) and treated as a cache miss — never silently
+/// swallowed.
+///
+/// Replaces the seven copy-pasted `cached_*` peek+spawn+parse blocks in
+/// `app.rs` (per Phase 1 of the rectification plan).
+pub fn swr_read<T, F, Fut>(
+    cache: &std::sync::Arc<QueryCache>,
+    key: QueryKey,
+    stale_after: Duration,
+    policy: FetchPolicy,
+    fetch: F,
+) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<Value>> + Send + 'static,
+{
+    let g = cache.peek(&key);
+    if g.will_refetch && matches!(policy, FetchPolicy::Swr) {
+        let cache_c = cache.clone();
+        let key_c = key.clone();
+        tokio::spawn(async move {
+            let _ = cache_get(&cache_c, key_c, stale_after, fetch).await;
+        });
+    }
+    let cached = g.value?;
+    match serde_json::from_value::<T>(cached.value) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                key = ?key,
+                error = %e,
+                "swr_read: cached value failed to deserialize"
+            );
+            None
+        }
+    }
+}
+
 fn key_has_prefix(key: &QueryKey, prefix: &[&str]) -> bool {
     if prefix.len() > key.len() {
         return false;
@@ -575,5 +632,115 @@ mod tests {
         let _ = c.await.unwrap().unwrap();
         // Only one underlying fetcher invocation.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swr_read_returns_typed_cached_value_without_fetching_under_readonly() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Sample {
+            n: i32,
+        }
+        let cache = Arc::new(QueryCache::new());
+        cache.put(FetchedRecord {
+            key: k(&["sessions"]),
+            generation: 1,
+            value: serde_json::to_value(Sample { n: 7 }).unwrap(),
+            stale_after: Duration::from_secs(60),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let v: Option<Sample> = swr_read(
+            &cache,
+            k(&["sessions"]),
+            Duration::from_secs(60),
+            FetchPolicy::ReadOnly,
+            move || async move {
+                c2.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"n": 99}))
+            },
+        );
+        assert_eq!(v, Some(Sample { n: 7 }));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swr_read_returns_none_without_fetch_when_missing_under_readonly() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(QueryCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let v: Option<serde_json::Value> = swr_read(
+            &cache,
+            k(&["missing"]),
+            Duration::from_secs(60),
+            FetchPolicy::ReadOnly,
+            move || async move {
+                c2.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!(null))
+            },
+        );
+        assert!(v.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swr_read_spawns_background_fetch_on_miss_under_swr() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(QueryCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let v: Option<serde_json::Value> = swr_read(
+            &cache,
+            k(&["sessions"]),
+            Duration::from_secs(60),
+            FetchPolicy::Swr,
+            move || async move {
+                c2.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"hit": true}))
+            },
+        );
+        // First call returns None (cache miss) and dispatches the fetch.
+        assert!(v.is_none());
+        // Yield so the spawned task can finish on the current-thread runtime.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "fetcher must have run");
+        let v2: Option<serde_json::Value> = swr_read(
+            &cache,
+            k(&["sessions"]),
+            Duration::from_secs(60),
+            FetchPolicy::ReadOnly,
+            || async move { unreachable!() },
+        );
+        assert_eq!(v2, Some(serde_json::json!({"hit": true})));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn swr_read_returns_none_on_deserialize_mismatch() {
+        use std::sync::Arc;
+        #[derive(serde::Deserialize)]
+        struct Sample {
+            #[allow(dead_code)]
+            n: i32,
+        }
+        let cache = Arc::new(QueryCache::new());
+        cache.put(FetchedRecord {
+            key: k(&["sessions"]),
+            generation: 1,
+            value: serde_json::json!({"wrong": "shape"}),
+            stale_after: Duration::from_secs(60),
+        });
+        let v: Option<Sample> = swr_read(
+            &cache,
+            k(&["sessions"]),
+            Duration::from_secs(60),
+            FetchPolicy::ReadOnly,
+            || async move { unreachable!() },
+        );
+        assert!(v.is_none(), "shape mismatch must yield None");
     }
 }
