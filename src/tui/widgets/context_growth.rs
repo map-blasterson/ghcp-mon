@@ -168,17 +168,24 @@ impl<'a> ContextGrowthWidget<'a> {
         // overlap (the line is context, the bars are the data).
         self.render_limit_line(buf, &geom, &cells);
 
-        // One stacked bar per merged row, head-truncated to what fits.
-        let n = self.data.rows.len().min(geom.max_bars);
-        for (i, row) in self.data.rows.iter().take(n).enumerate() {
-            let x = geom.plot_x0 + (i as u16) * BAR_STRIDE;
+        // One stacked bar per merged row, tail-truncated to what fits so the
+        // most-recent turns stay visible when the chart overflows. `start` is
+        // the absolute index of the leftmost visible row; `bar_cursor` is
+        // expressed in absolute (`merged.rows`) coordinates, so cursor and
+        // hover comparisons must add `start` to the visible index.
+        let total = self.data.rows.len();
+        let visible = total.min(geom.max_bars);
+        let start = total - visible;
+        for (visible_i, row) in self.data.rows.iter().skip(start).take(visible).enumerate() {
+            let absolute_i = start + visible_i;
+            let x = geom.plot_x0 + (visible_i as u16) * BAR_STRIDE;
             if x >= geom.plot_x0 + geom.plot_width {
                 break;
             }
             self.render_bar(buf, &geom, x, row, &cells);
 
             // Underbar: keyboard cursor OR cross-column hover.
-            let cursor_hit = state.bar_cursor == Some(i);
+            let cursor_hit = state.bar_cursor == Some(absolute_i);
             let hover_hit = self.hovered_chat_pk == Some(row.span_pk);
             if cursor_hit || hover_hit {
                 if let Some(cell) = buf.cell_mut((x, geom.underbar_row)) {
@@ -502,5 +509,57 @@ mod tests {
         let geom = plot_geometry(Rect::new(0, 0, 80, 14)).unwrap();
         // baseline column at the first bar must not be a bar cell.
         assert_ne!(buf[(geom.plot_x0, geom.baseline_row)].symbol(), "█");
+    }
+
+    /// When the merged-row count exceeds `max_bars`, the chart MUST tail-
+    /// truncate (drop the OLDEST turns), keeping the newest visible at the
+    /// right. The cursor at the absolute index of the rightmost visible row
+    /// must paint its underbar under the rightmost bar column.
+    #[test]
+    fn tail_truncates_when_rows_exceed_max_bars() {
+        // max_bars = (width - Y_AXIS_W + 1) / BAR_STRIDE = (14 - 9 + 1) / 2 = 3.
+        // Six rows ⇒ tail-truncates to the last 3.
+        let w: u16 = 14;
+        let h: u16 = 14;
+        let data = MergedRows {
+            rows: (1..=6)
+                .map(|i| row(i, 1000, 200, 50, 10, false, Some(8000)))
+                .collect(),
+            max_current_tokens: 5000,
+        };
+        let state = ContextGrowthState::default();
+        let (_t, _buf) = render_to_string(&data, &state, None, Some("abc"), w, h);
+        let geom = plot_geometry(Rect::new(0, 0, w, h)).unwrap();
+        let total = data.rows.len();
+        let visible = total.min(geom.max_bars);
+        assert!(
+            visible < total,
+            "test setup expected tail-truncation; got geom.max_bars={} for {total} rows",
+            geom.max_bars
+        );
+        let last_visible_col_x = geom.plot_x0 + ((visible as u16 - 1) * BAR_STRIDE);
+        let cursor_state = ContextGrowthState {
+            bar_cursor: Some(total - 1),
+            last_visible_rows: visible as u16,
+        };
+        let (_t2, buf2) =
+            render_to_string(&data, &cursor_state, None, Some("abc"), w, h);
+        assert_eq!(
+            buf2[(last_visible_col_x, geom.underbar_row)].symbol(),
+            "▔",
+            "cursor on newest absolute row should highlight rightmost visible bar"
+        );
+        let off_screen_state = ContextGrowthState {
+            bar_cursor: Some(0),
+            last_visible_rows: visible as u16,
+        };
+        let (_t3, buf3) =
+            render_to_string(&data, &off_screen_state, None, Some("abc"), w, h);
+        let any_underbar = (geom.plot_x0..(geom.plot_x0 + geom.plot_width))
+            .any(|x| buf3[(x, geom.underbar_row)].symbol() == "▔");
+        assert!(
+            !any_underbar,
+            "cursor on oldest absolute row (off-chart) must not paint an underbar"
+        );
     }
 }

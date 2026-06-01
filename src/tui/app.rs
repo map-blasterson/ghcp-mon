@@ -907,7 +907,10 @@ impl App {
         ))
     }
 
-    /// Move the widget bar cursor and publish the new hover.
+    /// Move the widget bar cursor and publish the new hover. With no prior
+    /// cursor set, lands on the **last** (newest) bar so the user's first
+    /// keypress doesn't jump to a turn that's been scrolled off the chart's
+    /// left edge by tail-truncation.
     fn widget_move_cursor(&mut self, delta: i32) {
         let len = self
             .widget_merged_context()
@@ -917,7 +920,12 @@ impl App {
             self.context_widget.bar_cursor = None;
             return;
         }
-        let cur = self.context_widget.bar_cursor.unwrap_or(0) as i32;
+        let default = (len as i32) - 1;
+        let cur = self
+            .context_widget
+            .bar_cursor
+            .map(|i| i as i32)
+            .unwrap_or(default);
         let next = (cur + delta).clamp(0, len as i32 - 1) as usize;
         self.context_widget.bar_cursor = Some(next);
         self.publish_widget_hover();

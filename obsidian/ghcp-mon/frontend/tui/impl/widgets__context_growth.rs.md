@@ -16,5 +16,5 @@ Context Growth Widget renderer: stacked per-turn bars (cache-read green / input 
 - [[Context widget hovered chat highlights matching column]]
 - [[Context widget hide and show toggle]]
 - [[Context widget binds to first column session]]
-- [[TUI Context widget bar cell layout and head truncation]]
+- [[TUI Context widget bar cell layout and tail truncation]]
 - [[TUI Context widget collapsed single-row bar]]
