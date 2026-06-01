@@ -229,6 +229,72 @@ impl QueryCache {
     }
 }
 
+/// Convenience wrapper composing `peek` + `begin_fetch` + `put` +
+/// `finish_fetch` + in-flight dedupe. Returns a JSON value:
+///
+/// 1. If the cache holds a fresh value, returns it without dispatching.
+/// 2. If a duplicate fetch is already in flight, awaits it.
+/// 3. Otherwise, runs `fetcher`, inserts the result with the generation
+///    assigned by `begin_fetch`, and returns the result.
+///
+/// Stale-while-revalidate is **not** applied here — callers that want SWR
+/// should `peek` first and pass cached values to the renderer while
+/// `cache_get` runs in a spawned task. This function blocks until a value
+/// is available.
+pub async fn cache_get<F, Fut>(
+    cache: &std::sync::Arc<QueryCache>,
+    key: QueryKey,
+    stale_after: Duration,
+    fetcher: F,
+) -> anyhow::Result<Value>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = anyhow::Result<Value>>,
+{
+    // Fast path: fresh cached value.
+    {
+        let g = cache.peek(&key);
+        if let Some(c) = g.value {
+            if !c.is_stale() {
+                return Ok(c.value);
+            }
+        }
+    }
+    // Begin (or join) an in-flight fetch.
+    let ticket = cache.begin_fetch(&key);
+    if ticket.already_in_flight {
+        if let Some(mut rx) = ticket.wait {
+            if let Ok(v) = rx.recv().await {
+                return Ok(v);
+            }
+        }
+        // Fallback: peek what's in cache.
+        let g = cache.peek(&key);
+        if let Some(c) = g.value {
+            return Ok(c.value);
+        }
+        return Err(anyhow::anyhow!("in-flight fetch dropped without result"));
+    }
+    let generation = ticket.generation;
+    drop(ticket.wait); // we don't read our own broadcast
+    match fetcher().await {
+        Ok(value) => {
+            cache.put(FetchedRecord {
+                key: key.clone(),
+                generation,
+                value: value.clone(),
+                stale_after,
+            });
+            cache.finish_fetch(&key, &value);
+            Ok(value)
+        }
+        Err(e) => {
+            cache.finish_fetch(&key, &Value::Null);
+            Err(e)
+        }
+    }
+}
+
 pub struct FetchTicket {
     pub generation: u64,
     pub already_in_flight: bool,
@@ -434,5 +500,80 @@ mod tests {
         assert!(strs.contains(&vec!["traces"]));
         assert!(strs.contains(&vec!["session-span-tree"]));
         assert!(!strs.contains(&vec!["sessions"]));
+    }
+
+    #[tokio::test]
+    async fn cache_get_returns_fresh_without_calling_fetcher() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(QueryCache::new());
+        cache.put(FetchedRecord {
+            key: k(&["sessions"]),
+            generation: 1,
+            value: serde_json::json!({"hit": true}),
+            stale_after: Duration::from_secs(60),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let v = cache_get(&cache, k(&["sessions"]), Duration::from_secs(60), || async move {
+            c2.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"missed": true}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"hit": true}));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_get_refetches_when_stale() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(QueryCache::new());
+        cache.put(FetchedRecord {
+            key: k(&["sessions"]),
+            generation: 1,
+            value: serde_json::json!({"old": true}),
+            stale_after: Duration::from_millis(0),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let v = cache_get(&cache, k(&["sessions"]), Duration::from_secs(60), || async move {
+            c2.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({"new": true}))
+        })
+        .await
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"new": true}));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_get_dedupes_concurrent_fetches() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(QueryCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mk = || {
+            let c2 = calls.clone();
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                cache_get(&cache, k(&["sessions"]), Duration::from_secs(60), || async move {
+                    // Simulate slow fetch so concurrent calls coalesce.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    c2.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({"v": 1}))
+                })
+                .await
+            })
+        };
+        let a = mk();
+        let b = mk();
+        let c = mk();
+        let _ = a.await.unwrap().unwrap();
+        let _ = b.await.unwrap().unwrap();
+        let _ = c.await.unwrap().unwrap();
+        // Only one underlying fetcher invocation.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

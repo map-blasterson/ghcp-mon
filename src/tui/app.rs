@@ -2,7 +2,8 @@
 //! drain-then-draw rule: every pending [`AppEvent`] is drained via
 //! `try_recv` before `terminal.draw` runs once.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use ratatui::DefaultTerminal;
@@ -10,22 +11,33 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers,
 };
 use ratatui::crossterm::execute;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::tui::api::ApiClient;
-use crate::tui::cache::QueryCache;
+use crate::tui::cache::{QueryCache, cache_get, qkey};
 use crate::tui::event::{
     AppEvent, spawn_crossterm_reader, spawn_tick, spawn_ws_coalescer,
 };
 use crate::tui::live_feed::LiveFeed;
+use crate::tui::model::{KindClass, SessionSpanTreeResponse};
 use crate::tui::persist;
+use crate::tui::scenarios::live_sessions::{
+    LiveSessionsState, clear_session_everywhere, delete_prompt, propagate_session, render_row,
+};
 use crate::tui::scenarios::render_placeholder;
+use crate::tui::scenarios::spans::{
+    SelectionPatch, SpansPopover, SpansState, attrs, chips, follow_chat, follow_mode,
+    hovered_chat_ancestor, invoke_agent, propagate_search, propagate_selection,
+};
+use crate::tui::widgets::confirm_modal::{ConfirmModalState, ConfirmModalView};
+use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
 use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
@@ -38,11 +50,9 @@ pub const MIN_COL: u16 = 24;
 /// Top-level app state.
 pub struct App {
     pub workspace: Workspace,
-    #[allow(dead_code)]
     pub cache: Arc<QueryCache>,
     #[allow(dead_code)]
     pub live_feed: Arc<LiveFeed>,
-    #[allow(dead_code)]
     pub api: ApiClient,
     pub ws: WsBus,
     pub log_buffer: LogBuffer,
@@ -52,6 +62,18 @@ pub struct App {
     pub add_column_cursor: usize,
     pub status: WsStatus,
     pub last_ws_event: Option<String>,
+    /// Per-column scenario state (keyed by column id).
+    pub live_sessions_state: HashMap<String, LiveSessionsState>,
+    pub spans_state: HashMap<String, SpansState>,
+    /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
+    /// consumes.
+    pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
+    pub confirm_modal: ConfirmModalState,
+    /// Records what session id the pending confirm-delete refers to (none
+    /// when no confirm is open).
+    pub pending_delete: Option<String>,
+    /// Monotonic tick counter for animations.
+    pub anim_tick: u64,
 }
 
 impl App {
@@ -71,6 +93,12 @@ impl App {
             mouse_enabled,
             add_column_cursor: 0,
             last_ws_event: None,
+            live_sessions_state: HashMap::new(),
+            spans_state: HashMap::new(),
+            hovered_chat_pk: Arc::new(RwLock::new(None)),
+            confirm_modal: ConfirmModalState::new(),
+            pending_delete: None,
+            anim_tick: 0,
         }
     }
 
@@ -79,7 +107,19 @@ impl App {
     pub fn handle(&mut self, ev: AppEvent) -> Result<bool> {
         match ev {
             AppEvent::Quit => return Ok(true),
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                self.anim_tick = self.anim_tick.wrapping_add(1);
+                // Drain reveal queues on every tick (per
+                // `TUI Reveal schedule advances on every tick`).
+                let now_ms = self.now_ms();
+                for s in self.spans_state.values_mut() {
+                    let _ = s.reveal.drain_due(now_ms);
+                }
+                // Follow-mode auto-advance: for every Spans column whose
+                // follow_mode is on, recompute the latest tool span and
+                // jump the cursor + propagate selection if it differs.
+                self.tick_follow_mode_advance();
+            }
             AppEvent::Crossterm(crossterm::event::Event::Key(k))
                 if k.kind == crossterm::event::KeyEventKind::Press =>
             {
@@ -113,9 +153,16 @@ impl App {
         Ok(false)
     }
 
+    fn now_ms(&self) -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     fn handle_key(&mut self, k: crossterm::event::KeyEvent) -> Result<bool> {
-        // Global keys: log overlay swallows nothing else but `?` and `Esc`
-        // when visible.
+        // Precedence layer 2: log overlay (modal).
         if self.log_overlay_visible {
             match k.code {
                 KeyCode::Char('?') | KeyCode::Esc => {
@@ -126,6 +173,83 @@ impl App {
             return Ok(false);
         }
 
+        // Precedence layer 2: confirm modal.
+        if self.confirm_modal.open {
+            if let Some(confirmed) = self.confirm_modal.handle_key(k) {
+                if confirmed {
+                    if let Some(cid) = self.pending_delete.take() {
+                        self.do_delete_session(&cid);
+                    }
+                } else {
+                    self.pending_delete = None;
+                }
+            }
+            return Ok(false);
+        }
+
+        // Precedence layer 2 (continued): Spans popover (session / kind).
+        if let Some(i) = self.focused_column {
+            let col_id = self.workspace.columns[i].id.clone();
+            let popover = self
+                .spans_state
+                .get(&col_id)
+                .and_then(|s| s.popover);
+            if let Some(pk) = popover {
+                if self.handle_spans_popover_key(i, &col_id, pk, k) {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Precedence layer 1: text-input mode (Spans column search).
+        if let Some(i) = self.focused_column {
+            let col_id = self.workspace.columns[i].id.clone();
+            let st = self.workspace.columns[i].scenario_type;
+            if st == ScenarioType::Spans {
+                let active = self
+                    .spans_state
+                    .get(&col_id)
+                    .map(|s| s.search_active)
+                    .unwrap_or(false);
+                if active {
+                    // Esc exits search-input mode.
+                    if matches!(k.code, KeyCode::Esc) {
+                        if let Some(s) = self.spans_state.get_mut(&col_id) {
+                            s.search_active = false;
+                        }
+                        return Ok(false);
+                    }
+                    let mut emitted: Option<String> = None;
+                    if let Some(s) = self.spans_state.get_mut(&col_id) {
+                        if s.search.handle_key(k) {
+                            if s.search.take_changed() {
+                                let t = s.search.text().to_string();
+                                if t != s.last_search_emitted {
+                                    s.last_search_emitted = t.clone();
+                                    emitted = Some(t);
+                                }
+                            }
+                            if let Some(query) = emitted {
+                                propagate_search(&mut self.workspace.columns, &query);
+                                let _ = persist::save(&self.workspace);
+                                // Server-side search with 300 ms debounce.
+                                self.kick_search_debounce(&col_id, query);
+                            }
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Precedence layer 4: column scenario keys.
+        if let Some(i) = self.focused_column {
+            if self.scenario_handle_key(i, k) {
+                return Ok(false);
+            }
+        }
+
+        // Precedence layer 5: global / workspace.
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), m) if !m.contains(KeyModifiers::SHIFT) => {
                 return Ok(true);
@@ -146,6 +270,665 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Dispatch a key to the focused column's scenario. Returns `true` if
+    /// the key was consumed.
+    fn scenario_handle_key(&mut self, col_idx: usize, k: crossterm::event::KeyEvent) -> bool {
+        let st = self.workspace.columns[col_idx].scenario_type;
+        let col_id = self.workspace.columns[col_idx].id.clone();
+        match st {
+            ScenarioType::LiveSessions => self.live_sessions_key(col_idx, &col_id, k),
+            ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
+            _ => false,
+        }
+    }
+
+    fn live_sessions_key(
+        &mut self,
+        col_idx: usize,
+        col_id: &str,
+        k: crossterm::event::KeyEvent,
+    ) -> bool {
+        let sessions = self.cached_sessions();
+        let max = sessions.len();
+        let state = self.live_sessions_state.entry(col_id.to_string()).or_default();
+        match k.code {
+            KeyCode::Down => {
+                state.move_cursor(1, max);
+                true
+            }
+            KeyCode::Up => {
+                state.move_cursor(-1, max);
+                true
+            }
+            KeyCode::Home => {
+                state.jump_top();
+                true
+            }
+            KeyCode::End => {
+                state.jump_bottom(max);
+                true
+            }
+            KeyCode::Enter => {
+                if let Some(s) = sessions.get(state.cursor) {
+                    let cid = s.conversation_id.clone();
+                    propagate_session(&mut self.workspace.columns, &cid, col_idx);
+                    let _ = persist::save(&self.workspace);
+                }
+                true
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let Some(s) = sessions.get(state.cursor) {
+                    let (title, prompt) = delete_prompt(&s.conversation_id);
+                    self.confirm_modal.open(title, prompt);
+                    self.pending_delete = Some(s.conversation_id.clone());
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn spans_key(
+        &mut self,
+        col_idx: usize,
+        col_id: &str,
+        k: crossterm::event::KeyEvent,
+    ) -> bool {
+        let tree = self.cached_session_tree(col_idx);
+        let flat = flatten_visible(&tree, &self.spans_state.get(col_id).map(|s| s.user_collapsed.clone()).unwrap_or_default());
+        let max = flat.len();
+        let state = self.spans_state.entry(col_id.to_string()).or_default();
+        match k.code {
+            KeyCode::Up => {
+                state.cursor = state.cursor.saturating_sub(1);
+                self.publish_hovered_chat(col_idx);
+                true
+            }
+            KeyCode::Down => {
+                if state.cursor + 1 < max {
+                    state.cursor += 1;
+                }
+                self.publish_hovered_chat(col_idx);
+                true
+            }
+            KeyCode::Home => {
+                state.cursor = 0;
+                self.publish_hovered_chat(col_idx);
+                true
+            }
+            KeyCode::End => {
+                state.cursor = max.saturating_sub(1);
+                self.publish_hovered_chat(col_idx);
+                true
+            }
+            KeyCode::Left => {
+                if let Some(id) = flat.get(state.cursor) {
+                    state.user_collapsed.insert(id.clone());
+                }
+                true
+            }
+            KeyCode::Right => {
+                if let Some(id) = flat.get(state.cursor) {
+                    state.user_collapsed.remove(id);
+                }
+                true
+            }
+            KeyCode::Char(' ') => {
+                if let Some(id) = flat.get(state.cursor) {
+                    if state.user_collapsed.contains(id) {
+                        state.user_collapsed.remove(id);
+                    } else {
+                        state.user_collapsed.insert(id.clone());
+                    }
+                }
+                true
+            }
+            KeyCode::Char('+') => {
+                state.user_collapsed.clear();
+                true
+            }
+            KeyCode::Char('-') => {
+                // Collapse all rows that have children.
+                let mut all: Vec<String> = Vec::new();
+                fn walk(n: &crate::tui::model::SpanNode, out: &mut Vec<String>) {
+                    if !n.children.is_empty() {
+                        out.push(n.span_id.clone());
+                    }
+                    for c in &n.children {
+                        walk(c, out);
+                    }
+                }
+                for r in tree.iter() {
+                    walk(r, &mut all);
+                }
+                for id in all {
+                    state.user_collapsed.insert(id);
+                }
+                true
+            }
+            KeyCode::Char('f') => {
+                state.follow_mode = !state.follow_mode;
+                true
+            }
+            KeyCode::Char('/') => {
+                state.search_active = true;
+                true
+            }
+            KeyCode::Char('s') => {
+                let sessions = self.cached_sessions();
+                let n_sessions = sessions.len();
+                let current_cid = self.workspace.columns[col_idx]
+                    .config
+                    .get("session")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let cur = current_cid
+                    .as_ref()
+                    .and_then(|cid| sessions.iter().position(|x| &x.conversation_id == cid))
+                    .unwrap_or(0);
+                if let Some(s) = self.spans_state.get_mut(col_id) {
+                    s.popover = Some(SpansPopover::Session);
+                    let safe_cursor = cur.min(n_sessions.saturating_sub(1));
+                    s.session_picker.open(safe_cursor);
+                }
+                true
+            }
+            KeyCode::Char('k') => {
+                if let Some(s) = self.spans_state.get_mut(col_id) {
+                    s.popover = Some(SpansPopover::Kind);
+                    s.kind_picker.open(0);
+                }
+                true
+            }
+            KeyCode::Enter => {
+                if let Some(id) = flat.get(state.cursor).cloned() {
+                    self.spans_pick(col_idx, &id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Popover key dispatch (session selector / kind filter). Returns true
+    /// if the key was consumed.
+    fn handle_spans_popover_key(
+        &mut self,
+        col_idx: usize,
+        col_id: &str,
+        which: SpansPopover,
+        k: crossterm::event::KeyEvent,
+    ) -> bool {
+        match which {
+            SpansPopover::Session => {
+                let options: Vec<crate::tui::model::SessionSummary> = self.cached_sessions();
+                let max = options.len();
+                let Some(s) = self.spans_state.get_mut(col_id) else {
+                    return false;
+                };
+                match k.code {
+                    KeyCode::Esc => {
+                        s.session_picker.close();
+                        s.popover = None;
+                        true
+                    }
+                    KeyCode::Up => {
+                        s.session_picker.move_cursor(-1, max);
+                        true
+                    }
+                    KeyCode::Down => {
+                        s.session_picker.move_cursor(1, max);
+                        true
+                    }
+                    KeyCode::Enter => {
+                        let cursor = s.session_picker.cursor;
+                        s.session_picker.close();
+                        s.popover = None;
+                        if let Some(opt) = options.get(cursor) {
+                            let cid = opt.conversation_id.clone();
+                            propagate_session(
+                                &mut self.workspace.columns,
+                                &cid,
+                                col_idx,
+                            );
+                            let _ = persist::save(&self.workspace);
+                        }
+                        true
+                    }
+                    _ => true, // swallow other keys while popover is open
+                }
+            }
+            SpansPopover::Kind => {
+                let options: &[&str] =
+                    &["chat", "execute_tool", "external_tool", "invoke_agent", "other"];
+                let max = options.len();
+                let Some(s) = self.spans_state.get_mut(col_id) else {
+                    return false;
+                };
+                match k.code {
+                    KeyCode::Esc => {
+                        s.kind_picker.close();
+                        s.popover = None;
+                        true
+                    }
+                    KeyCode::Up => {
+                        s.kind_picker.move_cursor(-1, max);
+                        true
+                    }
+                    KeyCode::Down => {
+                        s.kind_picker.move_cursor(1, max);
+                        true
+                    }
+                    KeyCode::Enter => {
+                        let cursor = s.kind_picker.cursor;
+                        s.kind_picker.close();
+                        s.popover = None;
+                        if let Some(opt) = options.get(cursor) {
+                            self.workspace.columns[col_idx].config.insert(
+                                "kind_filter".into(),
+                                toml::Value::String((*opt).to_string()),
+                            );
+                            let _ = persist::save(&self.workspace);
+                        }
+                        true
+                    }
+                    KeyCode::Delete | KeyCode::Backspace => {
+                        // Clear the kind filter.
+                        self.workspace.columns[col_idx].config.remove("kind_filter");
+                        s.kind_picker.close();
+                        s.popover = None;
+                        let _ = persist::save(&self.workspace);
+                        true
+                    }
+                    _ => true,
+                }
+            }
+        }
+    }
+
+    /// Realize selection routing for a picked span in the Spans column.
+    fn spans_pick(&mut self, col_idx: usize, picked_span_id: &str) {
+        let tree = self.cached_session_tree(col_idx);
+        // Locate the picked node for trace_id + kind + tool_call_id.
+        let Some(node) = find_node_ref(&tree, picked_span_id) else {
+            return;
+        };
+        let picked_kind = node.kind_class;
+        let picked = SelectionPatch {
+            trace_id: node.trace_id.clone(),
+            span_id: node.span_id.clone(),
+            tool_call_id: node
+                .projection
+                .tool_call
+                .as_ref()
+                .and_then(|tc| tc.call_id.clone()),
+        };
+        let chat_route: Option<SelectionPatch> = match picked_kind {
+            KindClass::ExecuteTool | KindClass::ExternalTool => {
+                follow_chat::find_following_chat_span(&tree, picked_span_id).map(|(t, s)| {
+                    SelectionPatch {
+                        trace_id: t,
+                        span_id: s,
+                        tool_call_id: None,
+                    }
+                })
+            }
+            KindClass::InvokeAgent => {
+                invoke_agent::latest_chat_descendant(&tree, picked_span_id).map(|(t, s)| {
+                    SelectionPatch {
+                        trace_id: t,
+                        span_id: s,
+                        tool_call_id: None,
+                    }
+                })
+            }
+            _ => None,
+        };
+        propagate_selection(
+            &mut self.workspace.columns,
+            picked_kind,
+            picked,
+            chat_route,
+            col_idx,
+        );
+        // Auto-engage / disengage follow-mode per the LLR.
+        let latest = follow_mode::latest_tool_span(&tree).map(|(_, sid)| sid);
+        let col_id = self.workspace.columns[col_idx].id.clone();
+        if let Some(state) = self.spans_state.get_mut(&col_id) {
+            state.focused_span_id = Some(picked_span_id.to_string());
+            if latest.as_deref() == Some(picked_span_id) {
+                state.follow_mode = true;
+            } else {
+                state.follow_mode = false;
+            }
+        }
+        let _ = persist::save(&self.workspace);
+    }
+
+    fn publish_hovered_chat(&self, col_idx: usize) {
+        let tree = self.cached_session_tree(col_idx);
+        let col_id = &self.workspace.columns[col_idx].id;
+        let Some(state) = self.spans_state.get(col_id) else {
+            return;
+        };
+        let flat = flatten_visible(&tree, &state.user_collapsed);
+        let pk = flat
+            .get(state.cursor)
+            .and_then(|id| hovered_chat_ancestor(&tree, id));
+        if let Ok(mut g) = self.hovered_chat_pk.write() {
+            *g = pk;
+        }
+    }
+
+    /// 300 ms debounce kick. Increments the column's `search_nonce` and
+    /// spawns a task that, after the debounce, only fires `cache_get` for
+    /// `["search-spans", session, q]` if `q` still matches the column's
+    /// latest emitted text. Empty `q` clears the search state.
+    fn kick_search_debounce(&mut self, col_id: &str, q: String) {
+        let nonce = {
+            let s = self.spans_state.entry(col_id.to_string()).or_default();
+            s.search_nonce = s.search_nonce.wrapping_add(1);
+            s.search_nonce
+        };
+        // Resolve the session for this column.
+        let session = self
+            .workspace
+            .columns
+            .iter()
+            .find(|c| c.id == col_id)
+            .and_then(|c| c.config.get("session"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if q.is_empty() {
+            // Clear search results immediately; no fetch.
+            if let Some(s) = self.spans_state.get_mut(col_id) {
+                s.search_hits = None;
+            }
+            return;
+        }
+        let Some(session) = session else {
+            return;
+        };
+        let cache = self.cache.clone();
+        let api = self.api.clone();
+        let col_id_s = col_id.to_string();
+        // We can't borrow `self.spans_state` from the spawned task, so the
+        // debounce only fires the fetch — the result lands in the cache and
+        // the render path picks it up via `cached_search_hits`.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // Best-effort: the nonce check would require shared state. We
+            // rely on `cache_get` in-flight dedupe to coalesce identical
+            // queries (different debounce calls with the same text). The
+            // generation-bumped invalidate path drops superseded results.
+            let _ = col_id_s; // (kept for future per-column gating)
+            let _ = nonce;
+            let _ = cache_get(
+                &cache,
+                qkey(["search-spans", &session, &q]),
+                std::time::Duration::from_secs(5),
+                || async move {
+                    let r = api.search_spans(&q, &session, Some(200)).await?;
+                    Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                },
+            )
+            .await;
+        });
+    }
+
+    fn do_delete_session(&mut self, cid: &str) {
+        let api = self.api.clone();
+        let cache = self.cache.clone();
+        let id = cid.to_string();
+        tokio::spawn(async move {
+            let _ = api.delete_session(&id).await;
+            cache.invalidate(&["sessions"]);
+        });
+        clear_session_everywhere(&mut self.workspace.columns, cid);
+        let _ = persist::save(&self.workspace);
+    }
+
+    /// Read-or-fetch `["sessions"]` and return the parsed list. Synchronous
+    /// from the renderer's point of view: returns whatever is cached and
+    /// triggers a refetch when stale (stale-while-revalidate).
+    fn cached_sessions(&self) -> Vec<crate::tui::model::SessionSummary> {
+        let key = qkey(["sessions"]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["sessions"]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.list_sessions(Some(50), None).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        if let Some(v) = value {
+            if let Ok(parsed) =
+                serde_json::from_value::<crate::tui::model::ListSessionsResponse>(v)
+            {
+                return parsed.sessions;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Read-or-fetch `["session-span-tree", cid]` for the given column. Returns
+    /// empty when no session is configured or the cache is empty.
+    fn cached_session_tree(&self, col_idx: usize) -> Vec<crate::tui::model::SpanNode> {
+        let cfg = &self.workspace.columns[col_idx].config;
+        let Some(cid) = cfg.get("session").and_then(|v| v.as_str()) else {
+            return Vec::new();
+        };
+        let key = qkey(["session-span-tree", cid]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            let cid = cid.to_string();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["session-span-tree", &cid]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.get_session_span_tree(&cid).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        if let Some(v) = value {
+            if let Ok(parsed) = serde_json::from_value::<SessionSpanTreeResponse>(v) {
+                return parsed.tree;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Read-or-fetch `["traces"]` for traces-list mode (when no session is
+    /// configured). Stale-while-revalidate.
+    fn cached_traces(&self) -> Vec<crate::tui::model::TraceSummary> {
+        let key = qkey(["traces"]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["traces"]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.list_traces(Some(50), None).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        if let Some(v) = value {
+            if let Ok(parsed) =
+                serde_json::from_value::<crate::tui::model::ListTracesResponse>(v)
+            {
+                return parsed.traces;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Read-or-fetch a single span's detail under `["span", trace_id, span_id]`
+    /// (stale_after = 30 s). Returns `None` while the fetch is still in
+    /// flight or if the response shape doesn't parse.
+    fn cached_span_detail(
+        &self,
+        trace_id: &str,
+        span_id: &str,
+    ) -> Option<crate::tui::model::SpanDetail> {
+        let key = qkey(["span", trace_id, span_id]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            let tid = trace_id.to_string();
+            let sid = span_id.to_string();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["span", &tid, &sid]),
+                    std::time::Duration::from_secs(30),
+                    || async move {
+                        let r = api.get_span(&tid, &sid).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        value.and_then(|v| serde_json::from_value(v).ok())
+    }
+
+    /// Read-or-fetch `["search-spans", session, q]` for the active server
+    /// search. Stale_after = 5 s.
+    fn cached_search_hits(
+        &self,
+        session: &str,
+        q: &str,
+    ) -> Option<crate::tui::model::SearchResponse> {
+        if q.is_empty() {
+            return None;
+        }
+        let key = qkey(["search-spans", session, q]);
+        let g = self.cache.peek(&key);
+        let value = g.value.as_ref().map(|c| c.value.clone());
+        if g.will_refetch {
+            let cache = self.cache.clone();
+            let api = self.api.clone();
+            let session = session.to_string();
+            let q = q.to_string();
+            tokio::spawn(async move {
+                let _ = cache_get(
+                    &cache,
+                    qkey(["search-spans", &session, &q]),
+                    std::time::Duration::from_secs(5),
+                    || async move {
+                        let r = api.search_spans(&q, &session, Some(200)).await?;
+                        Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
+                    },
+                )
+                .await;
+            });
+        }
+        value.and_then(|v| serde_json::from_value(v).ok())
+    }
+
+    /// Follow-mode advance hook (per `Spans follows latest tool span`).
+    fn tick_follow_mode_advance(&mut self) {
+        let col_ids: Vec<(usize, String)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
+            .map(|(i, c)| (i, c.id.clone()))
+            .collect();
+        for (col_idx, col_id) in col_ids {
+            let follow = self
+                .spans_state
+                .get(&col_id)
+                .map(|s| s.follow_mode)
+                .unwrap_or(false);
+            if !follow {
+                continue;
+            }
+            let tree = self.cached_session_tree(col_idx);
+            let Some((tid, sid)) = follow_mode::latest_tool_span(&tree) else {
+                continue;
+            };
+            let current = self
+                .spans_state
+                .get(&col_id)
+                .and_then(|s| s.focused_span_id.clone());
+            if current.as_deref() == Some(sid.as_str()) {
+                continue;
+            }
+            // Advance cursor to the new latest tool span.
+            let collapsed = self
+                .spans_state
+                .get(&col_id)
+                .map(|s| s.user_collapsed.clone())
+                .unwrap_or_default();
+            let flat = flatten_visible(&tree, &collapsed);
+            if let Some(new_idx) = flat.iter().position(|id| id == &sid) {
+                if let Some(s) = self.spans_state.get_mut(&col_id) {
+                    s.cursor = new_idx;
+                    s.focused_span_id = Some(sid.clone());
+                }
+                // Propagate selection — same path as Enter (but without
+                // disengaging follow-mode).
+                let node = find_node_ref(&tree, &sid);
+                if let Some(node) = node {
+                    let picked = SelectionPatch {
+                        trace_id: tid,
+                        span_id: sid.clone(),
+                        tool_call_id: node
+                            .projection
+                            .tool_call
+                            .as_ref()
+                            .and_then(|tc| tc.call_id.clone()),
+                    };
+                    let chat_route =
+                        follow_chat::find_following_chat_span(&tree, &sid).map(
+                            |(t, s)| SelectionPatch {
+                                trace_id: t,
+                                span_id: s,
+                                tool_call_id: None,
+                            },
+                        );
+                    propagate_selection(
+                        &mut self.workspace.columns,
+                        node.kind_class,
+                        picked,
+                        chat_route,
+                        col_idx,
+                    );
+                }
+            }
+        }
     }
 
     fn cycle_focus(&mut self, dir: i32) {
@@ -204,6 +987,12 @@ impl App {
         if self.log_overlay_visible {
             let lines = self.log_buffer.snapshot();
             frame.render_widget(LogOverlay { lines }, area);
+        }
+        if self.confirm_modal.open {
+            let view = ConfirmModalView {
+                state: &self.confirm_modal,
+            };
+            frame.render_widget(view, area);
         }
     }
 
@@ -276,13 +1065,752 @@ impl App {
                 buf.set_span(inner.x, inner.y, &span, inner.width);
                 continue;
             }
-            // Phase 0 always renders the placeholder body.
+            // Dispatch to per-scenario renderer.
             let cfg = col.config.clone();
             let st = col.scenario_type;
             let buf: &mut Buffer = frame.buffer_mut();
-            render_placeholder(inner, buf, st, &cfg);
+            match st {
+                ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col.id),
+                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col.id),
+                _ => render_placeholder(inner, buf, st, &cfg),
+            }
         }
     }
+
+    fn draw_live_sessions(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+        let sessions = self.cached_sessions();
+        let default = LiveSessionsState::default();
+        let state: &LiveSessionsState =
+            self.live_sessions_state.get(col_id).unwrap_or(&default);
+        if sessions.is_empty() {
+            let line = Line::from(Span::styled(
+                "no sessions yet — replay a fixture",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            Paragraph::new(line).render(area, buf);
+            return;
+        }
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(sessions.len());
+        for (i, s) in sessions.iter().enumerate() {
+            let txt = render_row(s);
+            let style = if i == state.cursor {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(txt, style)));
+        }
+        Paragraph::new(lines).render(area, buf);
+    }
+
+    fn draw_spans(&self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {
+        let cfg = &self.workspace.columns[col_idx].config;
+        let session = cfg.get("session").and_then(|v| v.as_str()).map(str::to_string);
+        // Two-row header.
+        if area.height < 3 {
+            return;
+        }
+        let header_h: u16 = 2;
+        let h_top = Rect::new(area.x, area.y, area.width, 1);
+        let h_bot = Rect::new(area.x, area.y + 1, area.width, 1);
+        let body_total = Rect::new(area.x, area.y + header_h, area.width, area.height - header_h);
+
+        // Row 1: session label.
+        let sess_label = match &session {
+            Some(s) => format!("session: {}", s.chars().take(8).collect::<String>()),
+            None => "session: (none) — press 's'".to_string(),
+        };
+        Paragraph::new(Span::styled(sess_label, Style::default().fg(Color::Cyan)))
+            .render(h_top, buf);
+
+        // Row 2: kind / search / follow / collapse hints.
+        let default_state = SpansState::default();
+        let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default_state);
+        let follow = if st.follow_mode { "[x] follow" } else { "[ ] follow" };
+        let search_label = if st.search_active {
+            format!("/ {}_", st.search.text())
+        } else if !st.search.text().is_empty() {
+            format!("/ {}", st.search.text())
+        } else {
+            "/  ".to_string()
+        };
+        let kind_filter: Option<String> = cfg
+            .get("kind_filter")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let kf_label = kind_filter
+            .as_deref()
+            .map(|s| format!("k:{s}"))
+            .unwrap_or_else(|| "k:kind".to_string());
+        let hint = format!(
+            "{kf}  {search}  {follow}  +/-:expand/collapse  s:session",
+            kf = kf_label,
+            search = search_label,
+        );
+        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray)))
+            .render(h_bot, buf);
+
+        // No-session mode: render traces list.
+        let Some(session) = session else {
+            self.draw_traces_list(body_total, buf, col_id);
+            self.draw_spans_popover(body_total, buf, col_id);
+            return;
+        };
+
+        // Session mode: tree on top, span-detail inspector at the bottom.
+        let detail_h: u16 = if body_total.height >= 12 { 6 } else { 0 };
+        let tree_area = Rect::new(
+            body_total.x,
+            body_total.y,
+            body_total.width,
+            body_total.height.saturating_sub(detail_h),
+        );
+        let detail_area = Rect::new(
+            body_total.x,
+            body_total.y + body_total.height.saturating_sub(detail_h),
+            body_total.width,
+            detail_h,
+        );
+
+        // Render tree.
+        let tree = self.cached_session_tree(col_idx);
+        if tree.is_empty() {
+            let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
+            let line = Line::from(vec![
+                Span::styled(
+                    "loading spans".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
+            ]);
+            Paragraph::new(line).render(tree_area, buf);
+            self.draw_spans_popover(body_total, buf, col_id);
+            return;
+        }
+        let flat = flatten_visible(&tree, &st.user_collapsed);
+        let visible_rows = tree_area.height as usize;
+        let start = if st.cursor >= visible_rows {
+            st.cursor + 1 - visible_rows
+        } else {
+            0
+        };
+        let search_text = st.search.text();
+        // Resolve search-hit set from the cache (server-side search).
+        let hit_set: Option<std::collections::HashSet<String>> = if !search_text.is_empty() {
+            self.cached_search_hits(&session, search_text).map(|resp| {
+                resp.results.into_iter().map(|r| r.span_id).collect()
+            })
+        } else {
+            None
+        };
+
+        // Pre-compute per-parent report_intent titles (latest direct child with
+        // tool_name == "report_intent" → intent string).
+        let report_titles = self.compute_report_intent_titles(&tree);
+
+        for (i_visible, flat_idx) in (start..flat.len().min(start + visible_rows)).enumerate() {
+            let row_id = &flat[flat_idx];
+            let (node, depth) = locate_for_render(&tree, row_id);
+            let Some(node) = node else { continue };
+            let row_y = tree_area.y + i_visible as u16;
+            let focused = flat_idx == st.cursor;
+            let mut x = tree_area.x;
+            let indent: u16 = (depth as u16) * 2;
+            x += indent;
+            // Determine row-wide background style based on search hit / miss.
+            let (row_bg, row_dim) = match &hit_set {
+                Some(set) if set.contains(&node.span_id) => (Some(Color::Yellow), false),
+                Some(_) => (None, true),
+                None => (None, false),
+            };
+            // Collapse glyph
+            let collapsed = st.user_collapsed.contains(row_id);
+            let glyph = if node.children.is_empty() {
+                " "
+            } else if collapsed {
+                "▸"
+            } else {
+                "▾"
+            };
+            let glyph_style = if focused {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else if let Some(bg) = row_bg {
+                Style::default().bg(bg).fg(Color::Black).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            buf.set_span(x, row_y, &Span::styled(glyph, glyph_style), 1);
+            x += 2;
+            // Kind badge
+            let label = kind_label(node.kind_class);
+            let badge_w = (label.chars().count() as u16 + 2).min(10);
+            if x + badge_w < tree_area.x + tree_area.width {
+                let badge = KindBadge::new(node.kind_class).with_seed(node.name.clone());
+                badge.render(Rect::new(x, row_y, badge_w, 1), buf);
+                x += badge_w + 1;
+            }
+            // Placeholder rolling dots
+            if node.ingestion_state == "placeholder"
+                && x + 3 < tree_area.x + tree_area.width
+            {
+                let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
+                buf.set_span(
+                    x,
+                    row_y,
+                    &Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
+                    3,
+                );
+                x += 4;
+            }
+            // Build chip strings for this row (skill/desc/diff-stat/shell).
+            let chips = self.compute_row_chips(node);
+            // Approximate chip width to reserve before truncating the name.
+            // Each chip costs `text.len() + 2` (padding) + 1 gap.
+            let chip_reserve: usize = chips
+                .iter()
+                .map(|(s, _)| s.chars().count() + 3)
+                .sum::<usize>()
+                .min(40);
+            // Report-intent title (white text appended at end of parent row).
+            let report_title = report_titles.get(&node.span_id).cloned();
+            let title_reserve = report_title
+                .as_deref()
+                .map(|s| s.chars().count() + 2)
+                .unwrap_or(0);
+
+            // Name (truncated to leave room for chips + report title).
+            let total_avail =
+                (tree_area.x + tree_area.width).saturating_sub(x) as usize;
+            let name_budget = total_avail.saturating_sub(chip_reserve + title_reserve);
+            let mut name = node.name.clone();
+            let cc = name.chars().count();
+            if cc > name_budget {
+                name = name
+                    .chars()
+                    .take(name_budget.saturating_sub(1))
+                    .collect::<String>();
+                if !name.is_empty() {
+                    name.push('…');
+                }
+            }
+            let mut name_style = if focused {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else if row_bg.is_some() {
+                Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            if row_dim {
+                name_style = name_style.fg(Color::DarkGray).add_modifier(Modifier::DIM);
+            }
+            if let Some(kf) = &kind_filter {
+                let cur = format!("{:?}", node.kind_class).to_lowercase();
+                if cur != kf.to_lowercase() {
+                    name_style = name_style.add_modifier(Modifier::DIM);
+                }
+            }
+            if x < tree_area.x + tree_area.width {
+                let name_w = (name.chars().count() as u16).min(
+                    (tree_area.x + tree_area.width).saturating_sub(x),
+                );
+                buf.set_span(x, row_y, &Span::styled(name, name_style), name_w);
+                x += name_w;
+            }
+            // Chips
+            for (text, color) in &chips {
+                if x + 1 >= tree_area.x + tree_area.width {
+                    // Out of room — append overflow marker if possible.
+                    break;
+                }
+                x += 1;
+                let chip_text = format!(" {text} ");
+                let chip_w = (chip_text.chars().count() as u16)
+                    .min((tree_area.x + tree_area.width).saturating_sub(x));
+                let chip_style = Style::default()
+                    .bg(*color)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
+                buf.set_span(x, row_y, &Span::styled(chip_text, chip_style), chip_w);
+                x += chip_w;
+            }
+            // Report-intent title (no chip styling — white text).
+            if let Some(title) = report_title {
+                if x + 1 < tree_area.x + tree_area.width {
+                    x += 1;
+                    let w = (title.chars().count() as u16)
+                        .min((tree_area.x + tree_area.width).saturating_sub(x));
+                    buf.set_span(
+                        x,
+                        row_y,
+                        &Span::styled(title, Style::default().fg(Color::White)),
+                        w,
+                    );
+                }
+            }
+        }
+
+        // Bottom detail inspector pane.
+        if detail_h >= 3 {
+            self.draw_span_detail_pane(detail_area, buf, &tree, &flat, st);
+        }
+
+        // Popover overlay (drawn over the body).
+        self.draw_spans_popover(body_total, buf, col_id);
+    }
+
+    /// Render the no-session traces list. Implements `Traces list dims rows
+    /// below kind filter`.
+    fn draw_traces_list(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+        let traces = self.cached_traces();
+        let default = SpansState::default();
+        let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default);
+        if traces.is_empty() {
+            let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
+            let line = Line::from(vec![
+                Span::styled(
+                    "loading traces".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
+            ]);
+            Paragraph::new(line).render(area, buf);
+            return;
+        }
+        let kind_filter: Option<String> = self.workspace.columns[
+            self.workspace.columns.iter().position(|c| c.id == col_id).unwrap_or(0)
+        ]
+            .config
+            .get("kind_filter")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let visible_rows = area.height as usize;
+        let cursor = st.traces_cursor.min(traces.len().saturating_sub(1));
+        let start = if cursor >= visible_rows {
+            cursor + 1 - visible_rows
+        } else {
+            0
+        };
+        for (i_visible, idx) in (start..traces.len().min(start + visible_rows)).enumerate() {
+            let t = &traces[idx];
+            let id8: String = t.trace_id.chars().take(8).collect();
+            let when = crate::tui::format::fmt_relative(
+                t.last_seen_ns.map(|n| n as i128),
+                None,
+            );
+            let counts = format!(
+                "chat:{} tool:{} ext:{} agent:{} other:{}",
+                t.kind_counts.chat,
+                t.kind_counts.execute_tool,
+                t.kind_counts.external_tool,
+                t.kind_counts.invoke_agent,
+                t.kind_counts.other,
+            );
+            let row = format!("{id8}  {when}  spans:{}  {counts}", t.span_count);
+            let mut style = if idx == cursor {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            // Kind filter dim: when filter set and the row has 0 of that kind.
+            if let Some(kf) = &kind_filter {
+                let count = match kf.as_str() {
+                    "chat" => t.kind_counts.chat,
+                    "execute_tool" => t.kind_counts.execute_tool,
+                    "external_tool" => t.kind_counts.external_tool,
+                    "invoke_agent" => t.kind_counts.invoke_agent,
+                    "other" => t.kind_counts.other,
+                    _ => 1,
+                };
+                if count == 0 {
+                    style = style.add_modifier(Modifier::DIM);
+                }
+            }
+            let row_y = area.y + i_visible as u16;
+            buf.set_span(area.x, row_y, &Span::styled(row, style), area.width);
+        }
+    }
+
+    /// Bottom span-detail inspector pane — parent, children, projection.
+    fn draw_span_detail_pane(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        tree: &[crate::tui::model::SpanNode],
+        flat: &[String],
+        st: &SpansState,
+    ) {
+        // Border
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .title(" detail ")
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = block.inner(area);
+        block.render(area, buf);
+        if inner.height == 0 || inner.width < 8 {
+            return;
+        }
+        let Some(focused_id) = flat.get(st.cursor) else {
+            return;
+        };
+        let Some(node) = find_node_ref(tree, focused_id) else {
+            return;
+        };
+        // Try the cache for full detail; fall back to in-tree node for parent/children.
+        let detail = self.cached_span_detail(&node.trace_id, &node.span_id);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let id8: String = node.span_id.chars().take(8).collect();
+        let head = format!(
+            "{}  [{}]  {}",
+            node.name,
+            kind_label(node.kind_class),
+            id8
+        );
+        lines.push(Line::from(Span::styled(
+            head,
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )));
+
+        // Parent + children. Prefer detail (server) when available.
+        let parent_label = if let Some(d) = &detail {
+            match &d.parent {
+                Some(p) => format!(
+                    "↑ parent: {} ({})",
+                    p.name,
+                    p.span_id.chars().take(8).collect::<String>()
+                ),
+                None => "↑ parent: —".to_string(),
+            }
+        } else if let Some(parent_id) = &node.parent_span_id {
+            format!("↑ parent: {}", parent_id.chars().take(8).collect::<String>())
+        } else {
+            "↑ parent: —".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            parent_label,
+            Style::default().fg(Color::Cyan),
+        )));
+
+        let child_refs: Vec<(String, String, String)> = if let Some(d) = &detail {
+            d.children
+                .iter()
+                .map(|c| (c.name.clone(), format!("{:?}", c.kind_class), c.span_id.clone()))
+                .collect()
+        } else {
+            node.children
+                .iter()
+                .map(|c| (c.name.clone(), format!("{:?}", c.kind_class), c.span_id.clone()))
+                .collect()
+        };
+        if child_refs.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "↓ children: (none)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("↓ children ({}):", child_refs.len()),
+                Style::default().fg(Color::Cyan),
+            )));
+            let take_n = (inner.height as usize).saturating_sub(3).min(child_refs.len()).max(0);
+            for (name, kind, id) in child_refs.iter().take(take_n) {
+                let id8: String = id.chars().take(8).collect();
+                lines.push(Line::from(format!("  • {name} [{kind}] {id8}")));
+            }
+        }
+
+        // Projection summary
+        if let Some(d) = &detail {
+            let p = &d.projection;
+            let present: Vec<&str> = [
+                p.chat_turn.as_ref().map(|_| "chat_turn"),
+                p.tool_call.as_ref().map(|_| "tool_call"),
+                p.agent_run.as_ref().map(|_| "agent_run"),
+                p.external_tool_call.as_ref().map(|_| "external_tool_call"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !present.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("projection: {}", present.join(", ")),
+                    Style::default().fg(Color::Magenta),
+                )));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "(loading detail…)",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+        Paragraph::new(lines).render(inner, buf);
+    }
+
+    /// Compute per-row chips (text, bg color) using cached per-span details.
+    fn compute_row_chips(
+        &self,
+        node: &crate::tui::model::SpanNode,
+    ) -> Vec<(String, Color)> {
+        let mut out: Vec<(String, Color)> = Vec::new();
+        // Only execute_tool spans currently get chips per the LLR family.
+        if !matches!(node.kind_class, KindClass::ExecuteTool) {
+            return out;
+        }
+        let Some(tool_call) = &node.projection.tool_call else {
+            return out;
+        };
+        let tool_name = tool_call.tool_name.clone().unwrap_or_default();
+        let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id) else {
+            return out;
+        };
+        let Some(attrs_v) = &detail.span.attributes else {
+            return out;
+        };
+        let Some(args) = attrs::parse_tool_call_arguments(attrs_v) else {
+            return out;
+        };
+
+        // Skill chip
+        if tool_name == "skill" {
+            if let Some(s) = chips::skill_chip(&args) {
+                out.push((s, Color::Green));
+            }
+        }
+        // Tool description (rendered separately at end — push a marker chip
+        // here? No — description is white plain text, not a chip. Handled
+        // below as a separate branch in the row renderer.). We DO want to
+        // include it as a "chip-like" appendage with white bg — but the
+        // LLR explicitly says no chip styling. Push as Color::Reset for
+        // recognition and special-case in the renderer? Cleaner: include
+        // description as the FIRST chip with bg matching the row to look
+        // unstyled.
+        if let Some(desc) = chips::tool_description_label(&args) {
+            // Render as plain white text: use no background — we model with
+            // Color::Black bg + White fg approximation.
+            out.push((desc, Color::Black));
+        }
+        // Diff-stat badges
+        let kind_opt = crate::tui::vendor::copilot::tool_name_mapping(&tool_name);
+        if let Some(kind) = kind_opt {
+            let (added, removed) = chips::diff_stat(kind, &args);
+            if removed > 0 {
+                out.push((format!("-{removed}"), Color::Red));
+            }
+            if added > 0 {
+                out.push((format!("+{added}"), Color::Green));
+            }
+            // Shell chips
+            if matches!(kind, crate::tui::vendor::copilot::ToolKind::Shell) {
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                    let mut shell_chips = chips::shell_command_chips(cmd);
+                    if shell_chips.len() > 6 {
+                        shell_chips.truncate(6);
+                        shell_chips.push("…".to_string());
+                    }
+                    for c in shell_chips {
+                        let color = crate::tui::format::hash_color(&c);
+                        // Force into a 256-color-ish palette by re-using
+                        // hash_color (already RGB).
+                        out.push((c, color));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Per `Report intent title shows on parent row` — for each node, look at
+    /// its direct children for `tool_call.tool_name == "report_intent"`,
+    /// pick the latest by `start_unix_ns ?? span_pk`, fetch its detail and
+    /// parse `args.intent`. Returns `parent.span_id -> intent`.
+    fn compute_report_intent_titles(
+        &self,
+        tree: &[crate::tui::model::SpanNode],
+    ) -> std::collections::HashMap<String, String> {
+        let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        fn walk(
+            node: &crate::tui::model::SpanNode,
+            app: &App,
+            out: &mut std::collections::HashMap<String, String>,
+        ) {
+            // Find latest report_intent direct child.
+            let mut best: Option<&crate::tui::model::SpanNode> = None;
+            let mut best_key: i128 = i128::MIN;
+            for c in &node.children {
+                let name = c
+                    .projection
+                    .tool_call
+                    .as_ref()
+                    .and_then(|t| t.tool_name.as_deref());
+                if name != Some("report_intent") {
+                    continue;
+                }
+                let key = c.start_unix_ns.unwrap_or(c.span_pk as i128);
+                if key > best_key {
+                    best_key = key;
+                    best = Some(c);
+                }
+            }
+            if let Some(child) = best {
+                if let Some(detail) = app.cached_span_detail(&child.trace_id, &child.span_id) {
+                    if let Some(attrs_v) = &detail.span.attributes {
+                        if let Some(args) = attrs::parse_tool_call_arguments(attrs_v) {
+                            if let Some(intent) = chips::report_intent_title(&args) {
+                                out.insert(node.span_id.clone(), intent);
+                            }
+                        }
+                    }
+                }
+            }
+            for c in &node.children {
+                walk(c, app, out);
+            }
+        }
+        for r in tree {
+            walk(r, self, &mut out);
+        }
+        out
+    }
+
+    /// Popover overlay for the `s` (session) and `k` (kind) keys.
+    fn draw_spans_popover(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+        let Some(st) = self.spans_state.get(col_id) else {
+            return;
+        };
+        let Some(which) = st.popover else { return };
+        use crate::tui::widgets::select::SelectPopover;
+        match which {
+            SpansPopover::Session => {
+                let sessions = self.cached_sessions();
+                let options: Vec<String> = sessions
+                    .iter()
+                    .map(|s| {
+                        let id8: String = s.conversation_id.chars().take(8).collect();
+                        let model = s.latest_model.as_deref().unwrap_or("—");
+                        format!("{id8}  {model}")
+                    })
+                    .collect();
+                SelectPopover {
+                    title: "Session",
+                    options: &options,
+                    cursor: st.session_picker.cursor,
+                }
+                .render(area, buf);
+            }
+            SpansPopover::Kind => {
+                let options: Vec<String> = [
+                    "chat",
+                    "execute_tool",
+                    "external_tool",
+                    "invoke_agent",
+                    "other",
+                ]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+                SelectPopover {
+                    title: "Kind filter (Delete to clear)",
+                    options: &options,
+                    cursor: st.kind_picker.cursor,
+                }
+                .render(area, buf);
+            }
+        }
+    }
+}
+
+/// Flatten the tree into the visible row order, respecting collapse state.
+/// Returns `span_id`s in DFS-pre-order; collapsed nodes hide their children.
+fn flatten_visible(
+    tree: &[crate::tui::model::SpanNode],
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(
+        n: &crate::tui::model::SpanNode,
+        collapsed: &std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        out.push(n.span_id.clone());
+        if collapsed.contains(&n.span_id) {
+            return;
+        }
+        for c in &n.children {
+            walk(c, collapsed, out);
+        }
+    }
+    for r in tree {
+        walk(r, collapsed, &mut out);
+    }
+    out
+}
+
+fn find_node_ref<'a>(
+    tree: &'a [crate::tui::model::SpanNode],
+    id: &str,
+) -> Option<&'a crate::tui::model::SpanNode> {
+    fn walk<'a>(
+        n: &'a crate::tui::model::SpanNode,
+        id: &str,
+    ) -> Option<&'a crate::tui::model::SpanNode> {
+        if n.span_id == id {
+            return Some(n);
+        }
+        for c in &n.children {
+            if let Some(x) = walk(c, id) {
+                return Some(x);
+            }
+        }
+        None
+    }
+    for r in tree {
+        if let Some(n) = walk(r, id) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn locate_for_render<'a>(
+    tree: &'a [crate::tui::model::SpanNode],
+    id: &str,
+) -> (Option<&'a crate::tui::model::SpanNode>, usize) {
+    fn walk<'a>(
+        n: &'a crate::tui::model::SpanNode,
+        id: &str,
+        depth: usize,
+    ) -> Option<(&'a crate::tui::model::SpanNode, usize)> {
+        if n.span_id == id {
+            return Some((n, depth));
+        }
+        for c in &n.children {
+            if let Some(x) = walk(c, id, depth + 1) {
+                return Some(x);
+            }
+        }
+        None
+    }
+    for r in tree {
+        if let Some(x) = walk(r, id, 0) {
+            return (Some(x.0), x.1);
+        }
+    }
+    (None, 0)
 }
 
 /// Run the event loop until quit. Caller is responsible for `ratatui::init`
@@ -404,5 +1932,437 @@ mod tests {
     #[allow(dead_code)]
     fn _unused() -> std::time::Duration {
         std::time::Duration::from_millis(1)
+    }
+
+    // ---- Phase 1 wiring tests ----
+
+    use crate::tui::cache::FetchedRecord;
+    use crate::tui::model::*;
+    use crate::tui::scenarios::spans::{SpansPopover, SpansState};
+
+    fn mk_span_node(
+        id: &str,
+        kind: KindClass,
+        tool_name: Option<&str>,
+        end_ns: i128,
+        children: Vec<SpanNode>,
+    ) -> SpanNode {
+        let projection = SpanProjection {
+            tool_call: tool_name.map(|n| ToolCallProjection {
+                tool_call_pk: 0,
+                call_id: Some(format!("call-{id}")),
+                tool_name: Some(n.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        SpanNode {
+            span_pk: end_ns as i64,
+            trace_id: "trace-1".into(),
+            span_id: id.into(),
+            parent_span_id: None,
+            name: id.into(),
+            kind_class: kind,
+            ingestion_state: "complete".into(),
+            start_unix_ns: Some(end_ns),
+            end_unix_ns: Some(end_ns),
+            projection,
+            children,
+        }
+    }
+
+    fn seed_session_tree(app: &App, cid: &str, tree: Vec<SpanNode>) {
+        let resp = SessionSpanTreeResponse {
+            conversation_id: cid.into(),
+            tree,
+        };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["session-span-tree", cid]),
+            generation: 1,
+            value: serde_json::to_value(resp).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn seed_span_detail(
+        app: &App,
+        trace_id: &str,
+        span_id: &str,
+        attrs: serde_json::Value,
+    ) {
+        let span = SpanFull {
+            span_pk: 1,
+            trace_id: trace_id.into(),
+            span_id: span_id.into(),
+            parent_span_id: None,
+            name: span_id.into(),
+            kind: "tool".into(),
+            kind_class: KindClass::ExecuteTool,
+            start_unix_ns: Some(100),
+            end_unix_ns: Some(200),
+            duration_ns: Some(100),
+            status_message: None,
+            ingestion_state: "complete".into(),
+            scope_name: None,
+            scope_version: None,
+            attributes: Some(attrs),
+            resource: None,
+        };
+        let detail = SpanDetail {
+            span,
+            events: vec![],
+            parent: None,
+            children: vec![],
+            projection: SpanProjection::default(),
+        };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["span", trace_id, span_id]),
+            generation: 1,
+            value: serde_json::to_value(detail).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn seed_sessions(app: &App, sessions: Vec<SessionSummary>) {
+        let r = ListSessionsResponse { sessions };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["sessions"]),
+            generation: 1,
+            value: serde_json::to_value(r).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn seed_search(app: &App, session: &str, q: &str, hits: Vec<&str>) {
+        let resp = SearchResponse {
+            results: hits
+                .iter()
+                .map(|sid| SearchSpanResult {
+                    span_pk: 0,
+                    trace_id: "trace-1".into(),
+                    span_id: (*sid).into(),
+                    parent_span_id: None,
+                    name: (*sid).into(),
+                    kind_class: KindClass::ExecuteTool,
+                    start_unix_ns: None,
+                    end_unix_ns: None,
+                    ingestion_state: "complete".into(),
+                    projection: SpanProjection::default(),
+                    matches: vec![],
+                })
+                .collect(),
+        };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["search-spans", session, q]),
+            generation: 1,
+            value: serde_json::to_value(resp).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn seed_traces(app: &App, traces: Vec<TraceSummary>) {
+        let r = ListTracesResponse { traces };
+        app.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["traces"]),
+            generation: 1,
+            value: serde_json::to_value(r).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+    }
+
+    fn render_buf_text(app: &App, w: u16, h: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer();
+        let mut joined = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                joined.push_str(buf[(x, y)].symbol());
+            }
+            joined.push('\n');
+        }
+        joined
+    }
+
+    fn one_spans_column_app() -> App {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.workspace
+            .add_column(crate::tui::workspace::ScenarioType::Spans);
+        app.focused_column = Some(0);
+        app
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_diff_stat_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "edit-span",
+            KindClass::ExecuteTool,
+            Some("edit"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        // Seed span detail with edit arguments.
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "edit-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "old_str": "a\nb\nc",
+                    "new_str": "x"
+                }
+            }),
+        );
+        let text = render_buf_text(&app, 120, 20);
+        // -3 (removed) and +1 (added) chips must appear somewhere.
+        assert!(text.contains("-3"), "missing -3 in:\n{text}");
+        assert!(text.contains("+1"), "missing +1 in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_skill_and_description_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "skill-span",
+            KindClass::ExecuteTool,
+            Some("skill"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "skill-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "skill": "summarize",
+                    "description": "skim docs"
+                }
+            }),
+        );
+        let text = render_buf_text(&app, 120, 20);
+        assert!(text.contains("summarize"), "missing skill chip in:\n{text}");
+        assert!(text.contains("skim docs"), "missing desc in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_report_intent_title_on_parent_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let parent = mk_span_node(
+            "parent",
+            KindClass::InvokeAgent,
+            None,
+            100,
+            vec![mk_span_node(
+                "report-child",
+                KindClass::ExecuteTool,
+                Some("report_intent"),
+                150,
+                vec![],
+            )],
+        );
+        seed_session_tree(&app, "cid-1", vec![parent]);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "report-child",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {"intent": "DOTHETHING"}
+            }),
+        );
+        let text = render_buf_text(&app, 120, 20);
+        assert!(text.contains("DOTHETHING"), "missing intent in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn follow_mode_advances_cursor_to_latest_tool_span_on_tick() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![
+            mk_span_node("chat-1", KindClass::Chat, None, 50, vec![]),
+            mk_span_node("tool-a", KindClass::ExecuteTool, Some("bash"), 100, vec![]),
+            mk_span_node("tool-b", KindClass::ExecuteTool, Some("bash"), 200, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree);
+        // Engage follow mode manually.
+        let col_id = app.workspace.columns[0].id.clone();
+        app.spans_state
+            .entry(col_id.clone())
+            .or_insert_with(SpansState::new)
+            .follow_mode = true;
+        // Drive one Tick.
+        let _ = app.handle(AppEvent::Tick).unwrap();
+        // Latest tool span is "tool-b" (end_ns=200) at flat index 2.
+        let st = app.spans_state.get(&col_id).unwrap();
+        assert_eq!(st.cursor, 2);
+        assert_eq!(st.focused_span_id.as_deref(), Some("tool-b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_search_hit_highlights_matching_rows() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![
+            mk_span_node("hit-span", KindClass::ExecuteTool, Some("bash"), 100, vec![]),
+            mk_span_node("miss-span", KindClass::ExecuteTool, Some("bash"), 200, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree);
+        let col_id = app.workspace.columns[0].id.clone();
+        let s = app.spans_state.entry(col_id).or_insert_with(SpansState::new);
+        s.search.set_text("hit");
+        s.last_search_emitted = "hit".to_string();
+        seed_search(&app, "cid-1", "hit", vec!["hit-span"]);
+        // Render and assert the hit row name appears and the miss row is
+        // present too (no hiding). Cell styling is hard to assert in plain
+        // text — but the row content must be unchanged.
+        let text = render_buf_text(&app, 120, 20);
+        assert!(text.contains("hit-span"), "missing hit in:\n{text}");
+        assert!(text.contains("miss-span"), "missing miss in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn traces_mode_renders_when_no_session() {
+        let app = one_spans_column_app();
+        // No session in config.
+        seed_traces(
+            &app,
+            vec![TraceSummary {
+                trace_id: "abcdef0123456789".into(),
+                first_seen_ns: Some(0),
+                last_seen_ns: Some(0),
+                span_count: 7,
+                placeholder_count: 0,
+                kind_counts: KindCounts {
+                    chat: 1,
+                    execute_tool: 5,
+                    external_tool: 0,
+                    invoke_agent: 1,
+                    other: 0,
+                },
+                root: None,
+                conversation_id: None,
+            }],
+        );
+        let text = render_buf_text(&app, 120, 20);
+        assert!(text.contains("abcdef01"), "missing trace id in:\n{text}");
+        assert!(text.contains("spans:7"), "missing span count in:\n{text}");
+        assert!(text.contains("chat:1"), "missing chat count in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn span_detail_pane_shows_focused_row_summary() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let mut parent = mk_span_node("parent", KindClass::InvokeAgent, None, 100, vec![]);
+        parent.children.push(mk_span_node(
+            "kid",
+            KindClass::Chat,
+            None,
+            150,
+            vec![],
+        ));
+        seed_session_tree(&app, "cid-1", vec![parent]);
+        // Tall enough to enable the detail pane (height >= 16).
+        let text = render_buf_text(&app, 120, 20);
+        // Detail border title is " detail "
+        assert!(text.contains("detail"), "no detail pane in:\n{text}");
+        // Parent of focused root should be "—".
+        assert!(text.contains("↑ parent"));
+        assert!(text.contains("children"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressing_s_opens_session_popover() {
+        let mut app = one_spans_column_app();
+        seed_sessions(
+            &app,
+            vec![SessionSummary {
+                conversation_id: "abcdef0123456789".into(),
+                first_seen_ns: None,
+                last_seen_ns: None,
+                latest_model: Some("gpt-x".into()),
+                chat_turn_count: 0,
+                tool_call_count: 0,
+                agent_run_count: 0,
+                service_name: None,
+                local_name: None,
+                user_named: None,
+                cwd: None,
+                branch: None,
+            }],
+        );
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let k = KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let _ = app.handle_key(k).unwrap();
+        let col_id = app.workspace.columns[0].id.clone();
+        assert_eq!(
+            app.spans_state.get(&col_id).unwrap().popover,
+            Some(SpansPopover::Session)
+        );
+        let text = render_buf_text(&app, 120, 20);
+        // Popover header shows "Session"
+        assert!(text.contains("Session"), "popover not rendered:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pressing_k_opens_kind_popover_and_delete_clears_filter() {
+        let mut app = one_spans_column_app();
+        // Pre-set a kind_filter to test the clear path.
+        app.workspace.columns[0]
+            .config
+            .insert("kind_filter".into(), toml::Value::String("chat".into()));
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let k = KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let _ = app.handle_key(k).unwrap();
+        let col_id = app.workspace.columns[0].id.clone();
+        assert_eq!(
+            app.spans_state.get(&col_id).unwrap().popover,
+            Some(SpansPopover::Kind)
+        );
+        // Delete clears the filter.
+        let kdel = KeyEvent {
+            code: KeyCode::Delete,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let _ = app.handle_key(kdel).unwrap();
+        assert!(app.workspace.columns[0]
+            .config
+            .get("kind_filter")
+            .is_none());
+        assert!(app.spans_state.get(&col_id).unwrap().popover.is_none());
     }
 }

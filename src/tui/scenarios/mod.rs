@@ -1,6 +1,7 @@
-//! Scenario placeholders. Phase 0 ships **no** real scenario rendering — but
-//! the unimplemented ones each render a placeholder that shows their
-//! `column.config` so Phase 1 cross-column routing can be evaluated.
+//! Scenario dispatch: Phase 1 ships real renderers for LiveSessions and
+//! Spans; ToolDetail / ChatDetail / FileTouches / RawBrowser keep their
+//! Phase-0 placeholder renderer (which dumps `column.config` so cross-column
+//! routing can be evaluated visually).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -10,15 +11,12 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use crate::tui::workspace::{ColumnConfig, ScenarioType};
 
-/// Render a Phase-0 placeholder for any scenario type. Body is:
-///
-/// ```text
-/// <scenario> — not yet implemented in this phase
-///
-/// config:
-///   key = value
-///   key = value
-/// ```
+pub mod live_sessions;
+pub mod spans;
+
+/// Render a Phase-0 placeholder for any scenario type still without a real
+/// renderer. The placeholder dumps the column's `config` so cross-column
+/// routing can be inspected without rendering the real column.
 pub fn render_placeholder(
     area: Rect,
     buf: &mut Buffer,
