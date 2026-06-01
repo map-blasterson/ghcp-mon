@@ -3267,6 +3267,107 @@ mod tests {
         assert!(find_prior_chat_span(&tree, 1, Some(100), Some(99)).is_none());
     }
 
+    // ---- Phase 0 (refactor): key-dispatch precedence golden masters ----
+    //
+    // Only invariants traceable to an LLR. The current handle_key impl has
+    // janky behavior beyond what the LLRs specify (e.g. modal swallowing
+    // every non-matching key); those are intentionally NOT pinned here so
+    // the refactor is free to fix them.
+
+    fn press(code: KeyCode) -> crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// LLR: `TUI Spans search input edit semantics` — "Printable characters
+    /// are inserted at the cursor verbatim." Combined with the
+    /// `TUI key-dispatch precedence text-input > modal > widget > column > global`
+    /// LLR (text-input layer 1 consumes printable), a `q` typed into the
+    /// active search input MUST land in the buffer and MUST NOT reach the
+    /// global-layer quit handler.
+    #[test]
+    fn precedence_q_during_active_spans_search_does_not_quit() {
+        let mut app = one_spans_column_app();
+        let col_id = app.workspace.columns[0].id.clone();
+        app.spans_state
+            .entry(col_id.clone())
+            .or_insert_with(SpansState::new)
+            .search_active = true;
+        let quit = app.handle_key(press(KeyCode::Char('q'))).unwrap();
+        assert!(!quit, "q must not quit while search input has focus");
+        let s = app.spans_state.get(&col_id).unwrap();
+        assert!(s.search.text().contains('q'), "q must reach search input");
+    }
+
+    /// LLRs: `TUI Context widget keyboard bar cursor navigation` ("When the
+    /// Context Growth Widget holds focus, `←`/`→` MUST move a keyboard bar
+    /// cursor") + `TUI Context widget participates in Tab focus cycle`
+    /// ("Widget-local keys (`←`/`→`/`Enter`/`Esc`) are dispatched in the
+    /// precedence layer between modals and the focused column") +
+    /// `TUI key-dispatch precedence text-input > modal > widget > column > global`.
+    /// With the widget focused, `Right` MUST advance the widget's bar cursor
+    /// and MUST NOT reach the focused column's scenario.
+    #[test]
+    fn precedence_widget_focus_consumes_arrow_keys_before_column() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = true;
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![chat_node("a", 10, 100), chat_node("b", 20, 200)];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_session_contexts(
+            &app,
+            "cid-1",
+            vec![mk_snapshot(10, 150, 1000, 400), mk_snapshot(20, 250, 1000, 800)],
+        );
+        app.widget_focused = true;
+        app.context_widget.bar_cursor = Some(0);
+        let col_id = app.workspace.columns[0].id.clone();
+        let col_cursor_before = app
+            .spans_state
+            .get(&col_id)
+            .map(|s| s.cursor)
+            .unwrap_or(0);
+        let _ = app.handle_key(press(KeyCode::Right)).unwrap();
+        assert_eq!(
+            app.context_widget.bar_cursor,
+            Some(1),
+            "widget layer must consume Right before column"
+        );
+        let col_cursor_after = app
+            .spans_state
+            .get(&col_id)
+            .map(|s| s.cursor)
+            .unwrap_or(0);
+        assert_eq!(
+            col_cursor_before, col_cursor_after,
+            "column row cursor must not have moved"
+        );
+    }
+
+    /// LLR: `Keybinding Matrix` — Global row "`Ctrl-C` | Quit". No HLR
+    /// scopes this conditionally; Ctrl-C MUST quit unconditionally at the
+    /// global layer.
+    #[test]
+    fn precedence_ctrl_c_quits_even_with_focused_column() {
+        let mut app = one_spans_column_app();
+        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let k = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let quit = app.handle_key(k).unwrap();
+        assert!(quit, "Ctrl-C must quit at the global layer");
+    }
+
     #[test]
     fn find_prior_chat_span_ignores_non_chat_kinds() {
         use crate::tui::model::{KindClass, SpanNode, SpanProjection};
