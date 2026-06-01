@@ -9,3 +9,4 @@ pub mod normalize;
 pub mod server;
 pub mod static_assets;
 pub mod ws;
+pub mod tui;
