@@ -8,5 +8,6 @@ pub mod kind_badge;
 pub mod log_overlay;
 pub mod rolling_dots;
 pub mod search_input;
+pub mod searchable_text_block;
 pub mod select;
 pub mod status_dot;

@@ -57,6 +57,19 @@ The cumulative key table registered by the TUI. Each phase appends rows; this is
 | Widget  | `Enter`            | Select cursor bar → routes to Spans column selection |
 | Widget  | `Esc`              | Release widget focus back to columns                 |
 
+### Phase 2.5 additions (SearchableTextBlock widget)
+
+Active only when a `SearchableTextBlock` has focus (the **widget** precedence layer; its `Active`-phase editing is the **text-input** layer).
+
+| Key             | Layer      | Mode/Scope                   | Effect                                            |
+| --------------- | ---------- | ---------------------------- | ------------------------------------------------- |
+| `/`             | widget     | Icon phase                   | activate search input (Idle/Icon → Active)        |
+| `Enter`         | widget     | Active phase                 | next match (wraps)                                |
+| `Shift+Enter`   | widget     | Active phase                 | previous match (wraps)                            |
+| `Esc`           | widget     | Active phase                 | exit search (no-op when `external_query` is set)  |
+| printable chars | text-input | Active phase + input focused | append to query                                   |
+| `Backspace`     | text-input | Active phase + input focused | delete last query char                            |
+
 ## Derived LLRs
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
