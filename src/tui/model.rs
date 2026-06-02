@@ -193,6 +193,26 @@ pub struct SpanNode {
     pub children: Vec<SpanNode>,
 }
 
+impl SpanNode {
+    pub fn projected_tool_name(&self) -> Option<&str> {
+        self.projection
+            .tool_call
+            .as_ref()
+            .and_then(|t| t.tool_name.as_deref())
+            .or_else(|| {
+                self.projection
+                    .external_tool_call
+                    .as_ref()
+                    .and_then(|t| t.tool_name.as_deref())
+            })
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn is_tool_row(&self) -> bool {
+        matches!(self.kind_class, KindClass::ExecuteTool | KindClass::ExternalTool)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SessionSpanTreeResponse {
     pub conversation_id: String,
