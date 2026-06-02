@@ -8,8 +8,11 @@
 //!  * row 2: hover indicator — yellow `▲` characters spanning the cell range
 //!    of the segment (or ancestor's contiguous descendants) matching the
 //!    focused tree row; blank when no segment matches.
-//!  * rows 3..: tree with two prefix cells — arrow gutter (1 cell, `▶` only
-//!    at the tool-call target row) + focus glyph (1 cell, `▸`/`▾`/space).
+//!  * rows 3..: tree with one prefix cell — the unified focus marker (yellow
+//!    `▶` at `state.focus_row`, blank elsewhere). External
+//!    `selected_tool_call_id` drives this same cursor by snapping
+//!    `state.focus_row` to the matching tool-call message row on selection
+//!    change (one-shot — user arrow keys retain control after the snap).
 //!
 //! Source for (shared `frontend/llr/`):
 //! - `Chat detail only renders for chat span`
@@ -113,6 +116,13 @@ pub struct ChatDetailState {
     /// Entries for primitive synthetic ids (`{node}__p{i}`) are present too;
     /// `handle_key` decodes them.
     pub last_focus_map: Vec<Option<NodeId>>,
+    /// Composite (`trace_id|span_id|tool_call_id`) of the last
+    /// `selected_tool_call_id` we successfully "followed" — i.e., snapped
+    /// `focus_row` onto its message row. Only updated AFTER a successful
+    /// snap, so transient render frames where the target hasn't yet
+    /// materialised do not burn the change. Reset when the external tool
+    /// selection clears so re-selecting the same tool re-snaps.
+    pub last_follow_key: Option<String>,
 }
 
 impl ChatDetailState {
@@ -130,8 +140,11 @@ impl ChatDetailState {
 ///  * `selection` — `(trace_id, span_id)` from the column config.
 ///  * `search_query` — column-level external search (yellow overlay + auto-
 ///    expand source).
-///  * `selected_tool_call_id` — drives the arrow gutter + non-destructive
-///    auto-expand.
+///  * `selected_tool_call_id` — when changed (keyed by trace+span+tcid),
+///    one-shot snaps `state.focus_row` to the matching tool-call message row
+///    and auto-expands ancestors so the row is visible. The unified focus
+///    marker (yellow `▶`) makes the snap visible; the bar hover indicator
+///    automatically follows because it keys off `focus_row` too.
 ///  * `mode` — DELTA / FULL.
 ///  * `detail` — the cached `SpanDetail` for the selection (caller resolves).
 ///  * `prior_chat_attrs` — the captured attrs of the prior chat span (DELTA
@@ -157,7 +170,7 @@ pub fn render(
     let lines = match (selection, detail) {
         (None, _) => empty_lines(NO_SELECTION_LINE),
         (Some(_), None) => empty_lines("loading…"),
-        (Some(_), Some(d)) => {
+        (Some(sel), Some(d)) => {
             if d.span.kind_class != KindClass::Chat {
                 empty_lines(NOT_A_CHAT_LINE)
             } else {
@@ -165,6 +178,7 @@ pub fn render(
                     area,
                     buf,
                     state,
+                    sel,
                     search_query,
                     selected_tool_call_id,
                     d,
@@ -187,10 +201,12 @@ fn empty_lines(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Full render path for a chat-kind span.
+#[allow(clippy::too_many_arguments)]
 fn render_full(
     area: Rect,
     buf: &mut Buffer,
     state: &mut ChatDetailState,
+    selection: (&str, &str),
     search_query: Option<&str>,
     selected_tool_call_id: Option<&str>,
     detail: &SpanDetail,
@@ -250,18 +266,34 @@ fn render_full(
         }
     }
 
-    // Tool-call hint: non-destructive auto-expand.
-    let (arrow_target, _tc_added) = if let Some(tcid) = selected_tool_call_id {
-        if let Some((set, target)) = tool_call_hint::auto_expand_for_tool_call(&tree, tcid) {
-            for id in &set {
-                state.expanded.insert(id.clone());
+    // Tool-call follow: one-shot on (trace, span, tcid) change. We auto-
+    // expand ancestors AND snap focus_row to the target message row only
+    // when the composite key actually changes — so once the snap has
+    // happened, the user can collapse ancestors or move the cursor freely
+    // without the column yanking them back next frame. `last_follow_key` is
+    // updated only after we *successfully* snap so a transient render
+    // (target not yet built) doesn't burn the change.
+    let follow_key = selected_tool_call_id
+        .map(|tcid| format!("{}|{}|{tcid}", selection.0, selection.1));
+    let follow_changed = follow_key != state.last_follow_key;
+    let snap_target: Option<NodeId> = if follow_changed {
+        if let Some(tcid) = selected_tool_call_id {
+            if let Some((set, target)) = tool_call_hint::auto_expand_for_tool_call(&tree, tcid) {
+                for id in &set {
+                    state.expanded.insert(id.clone());
+                }
+                Some(target)
+            } else {
+                None
             }
-            (Some(target), true)
         } else {
-            (None, false)
+            // Tool selection cleared — reset so re-selecting the same id
+            // will snap again.
+            state.last_follow_key = None;
+            None
         }
     } else {
-        (None, false)
+        None
     };
 
     // ---- Layout ----
@@ -296,9 +328,21 @@ fn render_full(
 
     // Build flat row list, then clamp focus_row BEFORE deriving the hovered
     // id so the indicator never points off the end of the visible list.
-    let rows = build_rows(&tree, state, arrow_target.as_ref());
+    let rows = build_rows(&tree, state);
     state.last_row_count = rows.len();
     state.last_focus_map = rows.iter().map(|r| r.node_id.clone()).collect();
+    // Apply one-shot follow snap before clamping/hovered_id so the snap
+    // takes effect on this same frame. We only burn the follow key after a
+    // successful snap.
+    if let Some(target) = &snap_target {
+        if let Some(idx) = rows
+            .iter()
+            .position(|r| r.node_id.as_ref() == Some(target))
+        {
+            state.focus_row = idx;
+            state.last_follow_key = follow_key;
+        }
+    }
     if state.focus_row >= rows.len() && !rows.is_empty() {
         state.focus_row = rows.len() - 1;
     }
@@ -380,8 +424,6 @@ struct RenderRow {
     indent: u16,
     /// Tree glyph: ▸/▾/blank.
     glyph: &'static str,
-    /// True iff this row is the arrow-target message (`▶` in gutter).
-    arrow: bool,
     /// Right-aligned meta text.
     meta: Option<String>,
     /// Optional left badge (REMOVED/ADDED/UNCHANGED/CHANGED chip).
@@ -403,7 +445,6 @@ impl RenderRow {
         Self {
             indent,
             glyph: "  ",
-            arrow: false,
             meta: None,
             badge: None,
             label: label.into(),
@@ -414,14 +455,10 @@ impl RenderRow {
     }
 }
 
-fn build_rows(
-    root: &TreeNode,
-    state: &ChatDetailState,
-    arrow_target: Option<&NodeId>,
-) -> Vec<RenderRow> {
+fn build_rows(root: &TreeNode, state: &ChatDetailState) -> Vec<RenderRow> {
     let mut out: Vec<RenderRow> = Vec::new();
     for child in &root.children {
-        push_node(child, 0, state, arrow_target, &mut out);
+        push_node(child, 0, state, &mut out);
     }
     out
 }
@@ -430,7 +467,6 @@ fn push_node(
     node: &TreeNode,
     indent: u16,
     state: &ChatDetailState,
-    arrow_target: Option<&NodeId>,
     out: &mut Vec<RenderRow>,
 ) {
     let has_children = !node.children.is_empty() || !node.primitives.is_empty();
@@ -442,7 +478,6 @@ fn push_node(
     } else {
         "▸ "
     };
-    let arrow = arrow_target.map(|t| t == &node.id).unwrap_or(false);
 
     let mut label = node.label.clone();
     // Append bytes inline as a dim suffix.
@@ -452,7 +487,6 @@ fn push_node(
     let row = RenderRow {
         indent,
         glyph,
-        arrow,
         meta: node.meta.clone(),
         badge: node.badge,
         label,
@@ -598,7 +632,7 @@ fn push_node(
     }
 
     for c in &node.children {
-        push_node(c, indent + 1, state, arrow_target, out);
+        push_node(c, indent + 1, state, out);
     }
 }
 
@@ -611,23 +645,20 @@ fn short_id(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn render_row(row: &RenderRow, focused: bool, search_query: &str) -> Line<'static> {
-    // Build: [arrow gutter 1c][focus glyph 1c (▶/space)][indent][glyph][badge?][label][meta?]
+    // Build: [focus marker 1c (▶/space)][indent][glyph][badge?][label][meta?]
+    // The unified focus marker uses the yellow BOLD `▶` glyph for both
+    // user-driven (arrow keys) and externally-driven (tool-call follow)
+    // focus. Tool-call follow snaps `state.focus_row` to the target row on
+    // selection change (see render_full), so the same glyph naturally
+    // appears in both cases and the bar hover indicator follows along.
     let mut spans: Vec<Span<'static>> = Vec::new();
-    // Arrow gutter.
-    let arrow_span = if row.arrow {
+    spans.push(if focused {
         Span::styled(
             "▶",
             Style::default()
                 .fg(Color::Rgb(0xfd, 0xe0, 0x47))
                 .add_modifier(Modifier::BOLD),
         )
-    } else {
-        Span::raw(" ")
-    };
-    spans.push(arrow_span);
-    // Focus marker.
-    spans.push(if focused {
-        Span::styled("▸", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
     } else {
         Span::raw(" ")
     });

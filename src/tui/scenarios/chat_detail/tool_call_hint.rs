@@ -1,4 +1,8 @@
-//! Tool-call hint auto-expand + arrow gutter target locator.
+//! Tool-call follow: locate the `tool`-role message and the ancestor set
+//! required to make it visible. The chat-detail render loop snaps
+//! `state.focus_row` onto the returned target NodeId when a new
+//! `selected_tool_call_id` arrives, so the unified focus marker (yellow `▶`)
+//! ends up on that row and the bar hover indicator follows along.
 //!
 //! Source for (shared `frontend/llr/`):
 //! - `Chat detail tool-call hint auto-expand and arrow`
@@ -10,10 +14,11 @@ use crate::tui::scenarios::chat_detail::tree::{NodeId, NodeKind, TreeNode};
 
 /// Locate the `tool`-role input message whose `tool_call_response` part has
 /// `id == tool_call_id`. On a hit, return `(ancestors_to_expand, target_id)`
-/// where `target_id` is the message node id (the row carrying the `▶` arrow)
-/// and `ancestors_to_expand` is the set of node ids that must be added to
-/// `expanded` to surface that row (root, root/input, root/input/input_messages,
-/// and the matching message node itself).
+/// where `target_id` is the message node id the chat-detail render loop will
+/// snap `state.focus_row` onto, and `ancestors_to_expand` is the set of node
+/// ids that must be added to `expanded` to surface that row (root,
+/// root/input, root/input/input_messages, and the matching message node
+/// itself).
 pub fn auto_expand_for_tool_call(
     root: &TreeNode,
     tool_call_id: &str,

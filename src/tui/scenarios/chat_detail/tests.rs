@@ -365,8 +365,166 @@ fn summary_bar_uses_full_glyph_in_full_mode_even_with_prior() {
     );
 }
 
+/// Helper that drives a single render and returns the rendered buffer.
+fn render_once(
+    state: &mut ChatDetailState,
+    detail: &SpanDetail,
+    selected_tool_call_id: Option<&str>,
+    selection: (&str, &str),
+    w: u16,
+    h: u16,
+) -> ratatui::buffer::Buffer {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, w, h),
+            f.buffer_mut(),
+            state,
+            Some(selection),
+            None,
+            selected_tool_call_id,
+            Some(detail),
+            None,
+            true,
+        );
+    })
+    .unwrap();
+    term.backend().buffer().clone()
+}
+
 #[test]
-fn tool_call_arrow_appears_at_target_message_row() {
+fn tool_call_follow_snaps_focus_row_to_target_message() {
+    // Two input messages so target is NOT index 0 — proves the snap moved
+    // focus_row away from its default.
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hi"}]},
+            {"role":"tool","parts":[
+                {"type":"tool_call_response","id":"call_X","result":"ok"}
+            ]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut state = ChatDetailState::default();
+    assert_eq!(state.focus_row, 0, "precondition: focus_row defaults to 0");
+    let buf = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    // After snap, focus_row must point at the tool-role message row.
+    let target_id = NodeId::from("root/input/input_messages/1");
+    let actual_id = state
+        .last_focus_map
+        .get(state.focus_row)
+        .and_then(|o| o.as_ref())
+        .cloned();
+    assert_eq!(
+        actual_id.as_ref(),
+        Some(&target_id),
+        "focus_row={} should point at tool target, got {:?}",
+        state.focus_row,
+        actual_id,
+    );
+    assert_ne!(state.focus_row, 0, "snap must have moved focus_row off 0");
+    // Follow key recorded so future renders with the same selection don't
+    // re-snap (verified in a separate test).
+    assert_eq!(
+        state.last_follow_key.as_deref(),
+        Some("t|s|call_X"),
+        "follow key should be recorded after successful snap",
+    );
+    // The unified focus marker (▶, yellow) appears in column 0 of the row
+    // at the tree-area y-offset for focus_row.
+    let tree_y0 = 3u16; // header + bar + indicator
+    let view_h = state.last_view_h;
+    let row_y = tree_y0 + (state.focus_row as u16 - state.scroll_top).min(view_h.saturating_sub(1));
+    assert_eq!(buf[(0, row_y)].symbol(), "▶", "expected ▶ at the focus row col 0");
+    assert_eq!(buf[(0, row_y)].fg, ratatui::style::Color::Rgb(0xfd, 0xe0, 0x47));
+}
+
+#[test]
+fn tool_call_follow_does_not_re_snap_on_repeat_with_same_id() {
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hi"}]},
+            {"role":"tool","parts":[
+                {"type":"tool_call_response","id":"call_X","result":"ok"}
+            ]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut state = ChatDetailState::default();
+    // First render: snap.
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    let snapped_row = state.focus_row;
+    assert_ne!(snapped_row, 0);
+    // User moves cursor manually.
+    state.focus_row = 0;
+    // Second render: same id → MUST NOT re-snap.
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    assert_eq!(
+        state.focus_row, 0,
+        "same tool id must not re-snap after user navigation",
+    );
+}
+
+#[test]
+fn tool_call_follow_re_snaps_after_clear_and_reselect() {
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hi"}]},
+            {"role":"tool","parts":[
+                {"type":"tool_call_response","id":"call_X","result":"ok"}
+            ]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut state = ChatDetailState::default();
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    let snapped_row = state.focus_row;
+    assert_ne!(snapped_row, 0);
+    // Clear tool selection.
+    state.focus_row = 0;
+    let _ = render_once(&mut state, &detail, None, ("t", "s"), 100, 15);
+    assert_eq!(state.focus_row, 0, "no tool selection → no snap");
+    assert_eq!(state.last_follow_key, None, "clearing resets follow key");
+    // Re-select same tool.
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    assert_eq!(
+        state.focus_row, snapped_row,
+        "re-selecting same tool after clear must re-snap",
+    );
+}
+
+#[test]
+fn tool_call_follow_re_snaps_when_selected_span_changes() {
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hi"}]},
+            {"role":"tool","parts":[
+                {"type":"tool_call_response","id":"call_X","result":"ok"}
+            ]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut state = ChatDetailState::default();
+    // First render in span "s1" snaps.
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s1"), 100, 15);
+    let snapped_row = state.focus_row;
+    state.focus_row = 0;
+    // Same tool id but selected span changed → must re-snap because the
+    // follow key is composite (trace|span|tcid).
+    let _ = render_once(&mut state, &detail, Some("call_X"), ("t", "s2"), 100, 15);
+    assert_eq!(
+        state.focus_row, snapped_row,
+        "different selected span with same tool id must re-snap",
+    );
+    assert_eq!(state.last_follow_key.as_deref(), Some("t|s2|call_X"));
+}
+
+#[test]
+fn bar_indicator_appears_under_input_segment_in_follow_mode() {
+    // When follow-snap puts focus_row on a message under input.messages, the
+    // bar hover indicator (yellow ▲) should appear across the input segment
+    // because the hover matcher uses slash-prefix ancestor matching and the
+    // focused node id starts with "root/input/input_messages/".
     let attrs = json!({
         "gen_ai.input.messages": [
             {"role":"tool","parts":[
@@ -375,27 +533,20 @@ fn tool_call_arrow_appears_at_target_message_row() {
         ]
     });
     let detail = span_with_attrs(KindClass::Chat, Some(attrs));
-    let mut term = Terminal::new(TestBackend::new(100, 15)).unwrap();
     let mut state = ChatDetailState::default();
-    // Pre-expand root + input + input_messages so the message row is in view.
-    state.expanded.insert(NodeId::from("root"));
-    state.expanded.insert(NodeId::from("root/input"));
-    term.draw(|f| {
-        render(
-            Rect::new(0, 0, 100, 15),
-            f.buffer_mut(),
-            &mut state,
-            Some(("t", "s")),
-            None,
-            Some("call_X"),
-            Some(&detail),
-            None,
-            true,
-        );
-    })
-    .unwrap();
-    let s = buf_to_string(term.backend().buffer());
-    assert!(s.contains('▶'), "expected ▶ arrow in body:\n{s}");
+    let buf = render_once(&mut state, &detail, Some("call_X"), ("t", "s"), 100, 15);
+    // Indicator row is at y=2 (header=0, bar=1, indicator=2).
+    let mut arrow_cells = 0usize;
+    for x in 0..100 {
+        if buf[(x, 2)].symbol() == "▲" {
+            arrow_cells += 1;
+            assert_eq!(buf[(x, 2)].fg, ratatui::style::Color::Yellow);
+        }
+    }
+    assert!(
+        arrow_cells > 0,
+        "expected ▲ cells in indicator row when follow snap focuses an input message",
+    );
 }
 
 #[test]
