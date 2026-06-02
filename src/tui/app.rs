@@ -2201,8 +2201,11 @@ impl App {
                 out.push((s, Color::Green));
             }
         }
-        // Diff-stat badges
         let kind_opt = crate::tui::vendor::copilot::tool_name_mapping(&tool_name);
+        for target in chips::target_chips(kind_opt, &args) {
+            out.push((target, Color::Cyan));
+        }
+        // Diff-stat badges
         if let Some(kind) = kind_opt {
             let (added, removed) = chips::diff_stat(kind, &args);
             if removed > 0 {
@@ -2721,6 +2724,74 @@ mod tests {
             buf[(x, 4)].style().bg,
             Some(crate::tui::format::hash_color("web_fetch"))
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_target_path_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "edit-span",
+            KindClass::ExecuteTool,
+            Some("edit"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "edit-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "path": "/repo/src/lib.rs",
+                    "old_str": "",
+                    "new_str": ""
+                }
+            }),
+        );
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("lib.rs"), "missing target path chip in:\n{text}");
+        let x = row_substr_x(&buf, 4, "lib.rs").expect("lib.rs x");
+        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_target_url_hostname_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "fetch-span",
+            KindClass::ExecuteTool,
+            Some("web_fetch"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "fetch-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "url": "https://example.com/docs/page"
+                }
+            }),
+        );
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("example.com"), "missing target URL chip in:\n{text}");
+        let x = row_substr_x(&buf, 4, "example.com").expect("example.com x");
+        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
     }
 
     #[tokio::test(flavor = "current_thread")]
