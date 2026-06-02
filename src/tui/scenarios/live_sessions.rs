@@ -128,34 +128,35 @@ pub fn handle_key(
     use crate::tui::scenarios::ScenarioEffect;
     use ratatui::crossterm::event::KeyCode;
     let max = sessions.len();
+    let select_current = |state: &LiveSessionsState| {
+        let mut effects = Vec::new();
+        if let Some(s) = sessions.get(state.cursor) {
+            effects.push(ScenarioEffect::PropagateSession {
+                origin_col_idx,
+                cid: s.conversation_id.clone(),
+            });
+            effects.push(ScenarioEffect::PersistWorkspace);
+        }
+        effects
+    };
     match k.code {
         KeyCode::Down => {
             state.move_cursor(1, max);
-            (true, vec![])
+            (true, select_current(state))
         }
         KeyCode::Up => {
             state.move_cursor(-1, max);
-            (true, vec![])
+            (true, select_current(state))
         }
         KeyCode::Home => {
             state.jump_top();
-            (true, vec![])
+            (true, select_current(state))
         }
         KeyCode::End => {
             state.jump_bottom(max);
-            (true, vec![])
+            (true, select_current(state))
         }
-        KeyCode::Enter => {
-            let mut effects = Vec::new();
-            if let Some(s) = sessions.get(state.cursor) {
-                effects.push(ScenarioEffect::PropagateSession {
-                    origin_col_idx,
-                    cid: s.conversation_id.clone(),
-                });
-                effects.push(ScenarioEffect::PersistWorkspace);
-            }
-            (true, effects)
-        }
+        KeyCode::Enter => (true, select_current(state)),
         KeyCode::Char('d') | KeyCode::Delete => {
             let mut effects = Vec::new();
             if let Some(s) = sessions.get(state.cursor) {
@@ -252,6 +253,58 @@ mod tests {
         assert!(row.contains("3 turns"));
         assert!(row.contains("1 tool call"));
         assert!(row.contains("0 agents"));
+    }
+
+    fn mk_session(cid: &str) -> SessionSummary {
+        SessionSummary {
+            conversation_id: cid.into(),
+            first_seen_ns: None,
+            last_seen_ns: None,
+            latest_model: None,
+            chat_turn_count: 0,
+            tool_call_count: 0,
+            agent_run_count: 0,
+            service_name: None,
+            local_name: None,
+            user_named: None,
+            cwd: None,
+            branch: None,
+        }
+    }
+
+    #[test]
+    fn down_moves_cursor_and_live_selects_session() {
+        use crate::tui::scenarios::ScenarioEffect;
+        use ratatui::crossterm::event::KeyCode;
+
+        let sessions = vec![mk_session("cid-a"), mk_session("cid-b")];
+        let mut state = LiveSessionsState::default();
+        let (consumed, effects) = handle_key(
+            ratatui::crossterm::event::KeyEvent::from(KeyCode::Down),
+            &mut state,
+            &sessions,
+            0,
+        );
+
+        assert!(consumed);
+        assert_eq!(state.cursor, 1);
+        assert!(matches!(
+            effects.as_slice(),
+            [ScenarioEffect::PropagateSession { cid, .. }, ScenarioEffect::PersistWorkspace]
+                if cid == "cid-b"
+        ));
+
+        let mut cols = vec![
+            mk_col(ScenarioType::LiveSessions, None),
+            mk_col(ScenarioType::Spans, None),
+            mk_col(ScenarioType::ChatDetail, None),
+        ];
+        if let ScenarioEffect::PropagateSession { origin_col_idx, cid } = &effects[0] {
+            propagate_session(&mut cols, cid, *origin_col_idx);
+        }
+        assert_eq!(cols[0].config.get("session").unwrap().as_str(), Some("cid-b"));
+        assert_eq!(cols[1].config.get("session").unwrap().as_str(), Some("cid-b"));
+        assert_eq!(cols[2].config.get("session").unwrap().as_str(), Some("cid-b"));
     }
 
     #[test]

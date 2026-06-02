@@ -155,12 +155,7 @@ fn build_block_lines(
     } else {
         Vec::new()
     };
-    st.match_count = matches.len();
-    if st.match_count == 0 {
-        st.match_index = 0;
-    } else if st.match_index >= st.match_count {
-        st.match_index = st.match_count - 1;
-    }
+    st.set_match_count(matches.len());
     let cur_range = matches
         .get(st.match_index)
         .map(|m| (m.byte_offset, m.byte_offset + m.byte_len));
