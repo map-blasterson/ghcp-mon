@@ -75,13 +75,115 @@ fn renders_tree_with_counts_and_indented_children() {
         touch("src/main.rs", TouchKind::Read),
     ];
     let out = draw(&mut state, Some("cid"), true, &touches);
-    // Header counts.
-    assert!(out.contains("1 R / 1 W"), "{out}");
+    // Header chips.
+    assert!(out.contains("1R 1W"), "{out}");
     // Dir row with expand glyph (auto-opened).
     assert!(out.contains("▾"), "{out}");
     assert!(out.contains("src"), "{out}");
     // File row indented under src with per-file counts.
     assert!(out.contains("main.rs"), "{out}");
+}
+
+#[test]
+fn count_chips_color_r_blue_and_w_green_independently() {
+    // src/r.rs is read-only → row name + R chip are blue, no W chip.
+    // src/w.rs is write-only → row name + W chip are green, no R chip.
+    let mut state = FileTouchesState::default();
+    let touches = vec![
+        touch("src/r.rs", TouchKind::Read),
+        touch("src/w.rs", TouchKind::Write),
+    ];
+    // Park focus off any tested rows so the highlight doesn't mask colors.
+    state.focus_row = usize::MAX; // gets clamped to the last row (a leaf)
+    let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, 60, 12);
+        render(area, f.buffer_mut(), &mut state, Some("cid"), true, &touches, true);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    // After clamp the focus is on the last visible row. Sweep colors per row.
+    let blue = ratatui::style::Color::Rgb(0x60, 0xa5, 0xfa);
+    let green = ratatui::style::Color::Rgb(0x4a, 0xde, 0x80);
+    let yellow = ratatui::style::Color::Rgb(0xfd, 0xe0, 0x47);
+    let row_colors: Vec<std::collections::HashSet<ratatui::style::Color>> = (0..12)
+        .map(|y| {
+            (0..60)
+                .map(|x| buf[(x, y)].fg)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .collect();
+    let src_row = 1usize; // header=0, src=1
+    let r_row = 2usize;
+    // w_row is index 3 but that's the LAST visible row → focused → black.
+    // Don't assert on it here; the focused_row_highlight_overrides test
+    // covers w-row separately.
+    // src has BOTH counts (1R 1W) → its name renders yellow AND the count
+    // chips render blue+green.
+    assert!(
+        row_colors[src_row].contains(&yellow),
+        "src row name should be yellow (both R+W), got {:?}",
+        row_colors[src_row],
+    );
+    assert!(
+        row_colors[src_row].contains(&blue),
+        "src row should contain blue (R chip), got {:?}",
+        row_colors[src_row],
+    );
+    assert!(
+        row_colors[src_row].contains(&green),
+        "src row should contain green (W chip), got {:?}",
+        row_colors[src_row],
+    );
+    // r.rs row should contain blue but NOT green (no W chip).
+    assert!(
+        row_colors[r_row].contains(&blue),
+        "r.rs row should contain blue cells (R-only), got {:?}",
+        row_colors[r_row],
+    );
+    assert!(
+        !row_colors[r_row].contains(&green),
+        "r.rs row must NOT contain green (no W chip), got {:?}",
+        row_colors[r_row],
+    );
+    // Header row contains both R+W chips.
+    assert!(
+        row_colors[0].contains(&blue) && row_colors[0].contains(&green),
+        "header row should contain both R-blue and W-green chips, got {:?}",
+        row_colors[0],
+    );
+}
+
+#[test]
+fn focused_row_highlight_overrides_chip_colors() {
+    let mut state = FileTouchesState::default();
+    let touches = vec![
+        touch("src/r.rs", TouchKind::Read),
+        touch("src/w.rs", TouchKind::Write),
+    ];
+    // Focus the second file row (index 2: src, r.rs, w.rs → idx 2 = w.rs).
+    state.focus_row = 2;
+    let mut term = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    term.draw(|f| {
+        let area = Rect::new(0, 0, 60, 12);
+        render(area, f.buffer_mut(), &mut state, Some("cid"), true, &touches, true);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let focused_y = 1u16 /*header*/ + 2u16 /*focus_row=2*/;
+    // Every cell on the focused row should have the cyan bg + black fg.
+    for x in 0..60 {
+        assert_eq!(
+            buf[(x, focused_y)].bg,
+            ratatui::style::Color::Cyan,
+            "focused row bg must be cyan at x={x}",
+        );
+        assert_eq!(
+            buf[(x, focused_y)].fg,
+            ratatui::style::Color::Black,
+            "focused row fg must be black at x={x}",
+        );
+    }
 }
 
 #[test]

@@ -8,12 +8,15 @@
 //! newly-discovered directories, and paints the header + scrollable tree.
 //!
 //! ## Layout (top → bottom)
-//! row 0: header — session marker + total `R / W` counts + `[+]`/`[-]` bulk
-//! controls (rendered DIM/disabled when no directories are present).
+//! row 0: header — session marker + total `NR NW` count chips (zero values
+//! omitted; R chips blue, W chips green to match `spans::chips` intent) +
+//! `[+]`/`[-]` bulk controls (rendered DIM/disabled when no directories are
+//! present).
 //! rows 1..: scrollable tree — 2 cells of indent per level, a collapse glyph
-//! (`▾`/`▸`) for directories and a blank for files, the name, then
-//! right-aligned per-node `R / W` counts. The focused row is highlighted with
-//! a cyan background.
+//! (`▾`/`▸`) for directories and a blank for files, the name (colored
+//! blue/green/yellow for R-only/W-only/both), then right-aligned per-node
+//! count chips (`NR` blue, `NW` green). The focused row is highlighted with
+//! a cyan background that overrides the chip colors.
 //!
 //! ## Key dispatch (column layer)
 //! `↑`/`↓` move the row cursor; `←`/`→` collapse/expand the focused directory;
@@ -52,7 +55,21 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+use crate::tui::format::fmt_compact_count;
 use tree::{build_tree, dir_paths, Touch, TouchNode, TouchTree};
+
+/// Per-row colors. These mirror the four-section palette already used by
+/// `chat_detail::color_for_node` so the file-touches column reads as part of
+/// the same visual family.
+const ROW_R_ONLY: Color = Color::Rgb(0x60, 0xa5, 0xfa); // blue
+const ROW_W_ONLY: Color = Color::Rgb(0x4a, 0xde, 0x80); // green
+const ROW_BOTH: Color = Color::Rgb(0xfd, 0xe0, 0x47); // yellow
+
+/// Color the R / W count chips. These match `spans::chips.rs`'s
+/// `-N` red / `+N` green semantic: every chip is its own color-coded glyph
+/// rather than a plain string, and zero-valued chips are omitted entirely.
+const R_CHIP_COLOR: Color = ROW_R_ONLY;
+const W_CHIP_COLOR: Color = ROW_W_ONLY;
 
 /// Verbatim empty state shown when the column has no session configured.
 pub const NO_SESSION_LINE: &str = "pick a session";
@@ -201,24 +218,21 @@ fn render_header(area: Rect, buf: &mut Buffer, tree: &TouchTree, has_dirs: bool)
     let total_r: u64 = tree.root.iter().map(|n| n.reads).sum();
     let total_w: u64 = tree.root.iter().map(|n| n.writes).sum();
 
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(
-            "⊞ files  ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("({total_r} R / {total_w} W)"),
-            Style::default().fg(Color::Gray),
-        ),
-    ];
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(
+        "⊞ files  ",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )];
+    let counts = counts_chip_spans(total_r, total_w);
+    let counts_text_w: usize = counts.iter().map(|s| s.content.chars().count()).sum();
+    spans.extend(counts);
 
     // Compute a gap that right-aligns the bulk controls when there's room.
-    let left_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let header_left_w: usize = "⊞ files  ".chars().count() + counts_text_w;
     let ctrl = "[+] [-]";
     let ctrl_w = ctrl.chars().count();
     let total = area.width as usize;
-    if total > left_w + ctrl_w + 1 {
-        spans.push(Span::raw(" ".repeat(total - left_w - ctrl_w)));
+    if total > header_left_w + ctrl_w + 1 {
+        spans.push(Span::raw(" ".repeat(total - header_left_w - ctrl_w)));
     } else {
         spans.push(Span::raw(" "));
     }
@@ -290,32 +304,100 @@ fn render_row(row: &Row, focused: bool, width: u16) -> Line<'static> {
     };
     let indent = "  ".repeat(row.depth as usize);
     let left = format!("{indent}{glyph} {}", row.name);
-    let counts = format!("{}R / {}W", row.reads, row.writes);
 
+    let counts_spans = counts_chip_spans(row.reads, row.writes);
+    let counts_w: usize = counts_spans.iter().map(|s| s.content.chars().count()).sum();
     let total = width as usize;
-    let counts_w = counts.chars().count();
-    // Reserve a 1-cell gap before the counts column.
-    let avail_left = total.saturating_sub(counts_w + 1);
+    // Reserve a 1-cell gap before the counts column (only when there are
+    // counts to render; an empty counts column doesn't need a separator).
+    let gap = if counts_w > 0 { 1 } else { 0 };
+    let avail_left = total.saturating_sub(counts_w + gap);
     let left = truncate(&left, avail_left);
     let left_w = left.chars().count();
     let pad = total.saturating_sub(left_w + counts_w);
 
-    // A single full-width string lets the focus background cover the whole row.
-    let text = format!("{left}{}{counts}", " ".repeat(pad));
-
-    let style = if focused {
-        Style::default()
+    if focused {
+        // Focus wins: paint the whole row as a single highlighted string so
+        // the cyan background covers all cells. Chip colors flatten under
+        // the highlight — matches the prior behavior.
+        let text = format!("{left}{}{}", " ".repeat(pad), counts_text(row.reads, row.writes));
+        let style = Style::default()
             .bg(Color::Cyan)
             .fg(Color::Black)
-            .add_modifier(Modifier::BOLD)
-    } else if row.is_dir {
-        Style::default()
-            .fg(Color::Rgb(0x60, 0xa5, 0xfa))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::White)
-    };
-    Line::from(Span::styled(text, style))
+            .add_modifier(Modifier::BOLD);
+        return Line::from(Span::styled(text, style));
+    }
+
+    // Unfocused: per-row coloring + multi-color count chips.
+    let name_color = row_name_color(row.reads, row.writes, row.is_dir);
+    let mut name_style = Style::default().fg(name_color);
+    if row.is_dir {
+        name_style = name_style.add_modifier(Modifier::BOLD);
+    }
+    let mut spans: Vec<Span<'static>> = vec![Span::styled(left, name_style)];
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    spans.extend(counts_spans);
+    Line::from(spans)
+}
+
+/// Pick the unfocused row name color from the R / W tally. Reuses the
+/// chat_detail four-section palette: R-only=blue, W-only=green, both=yellow.
+/// File rows with no counts (defensive — shouldn't normally happen) fall back
+/// to white; directories with no counts fall back to the legacy dir blue.
+fn row_name_color(reads: u64, writes: u64, is_dir: bool) -> Color {
+    match (reads, writes) {
+        (0, 0) => {
+            if is_dir {
+                ROW_R_ONLY
+            } else {
+                Color::White
+            }
+        }
+        (_, 0) => ROW_R_ONLY,
+        (0, _) => ROW_W_ONLY,
+        _ => ROW_BOTH,
+    }
+}
+
+/// Build the colored R / W chip spans for the right-aligned count column.
+/// Zero counts are omitted entirely; non-zero counts use `fmt_compact_count`
+/// so very high tallies stay narrow (`128k`, `1.1M`).
+fn counts_chip_spans(reads: u64, writes: u64) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    if reads > 0 {
+        out.push(Span::styled(
+            format!("{}R", fmt_compact_count(reads as i64)),
+            Style::default().fg(R_CHIP_COLOR).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if writes > 0 {
+        if !out.is_empty() {
+            out.push(Span::raw(" "));
+        }
+        out.push(Span::styled(
+            format!("{}W", fmt_compact_count(writes as i64)),
+            Style::default().fg(W_CHIP_COLOR).add_modifier(Modifier::BOLD),
+        ));
+    }
+    out
+}
+
+/// Plain-text rendering of the count chips, used only in the focused-row
+/// single-style path. Mirrors [`counts_chip_spans`] glyph-for-glyph so the
+/// reserved width matches.
+fn counts_text(reads: u64, writes: u64) -> String {
+    match (reads, writes) {
+        (0, 0) => String::new(),
+        (r, 0) => format!("{}R", fmt_compact_count(r as i64)),
+        (0, w) => format!("{}W", fmt_compact_count(w as i64)),
+        (r, w) => format!(
+            "{}R {}W",
+            fmt_compact_count(r as i64),
+            fmt_compact_count(w as i64),
+        ),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
