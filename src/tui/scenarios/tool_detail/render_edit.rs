@@ -122,13 +122,29 @@ pub(crate) fn render(ctx: &mut BodyCtx, attrs: &Value) {
         if let Some(p) = &path {
             ctx.kv_row("path", p);
         }
-        if let Some(old) = &old_str {
-            ctx.sublabel("old_str");
-            ctx.code_block("edit.old", old, lang);
-        }
-        if let Some(new) = &new_str {
-            ctx.sublabel(new_label);
-            ctx.code_block("edit.new", new, lang);
+
+        // When both `old_str` and `new_str` are present this is a diff-shape
+        // update — collapse the two separate code blocks into one inline
+        // line-level diff. Mirrors the web `InlineDiff` component, minus
+        // word-level intra-line emphasis (deferred). When only one side is
+        // present (a fresh write via `content`/`file_text`, or an
+        // ill-formed call missing `new_str`) keep the single-block path.
+        match (&old_str, &new_str) {
+            (Some(old), Some(new)) => {
+                ctx.sublabel("diff");
+                let rows = super::inline_diff::build(old, new);
+                let (text, styles, gutter) = super::inline_diff::render(&rows);
+                ctx.search_block("edit.diff", &text, Some(styles), Some(&gutter));
+            }
+            (None, Some(new)) => {
+                ctx.sublabel(new_label);
+                ctx.code_block("edit.new", new, lang);
+            }
+            (Some(old), None) => {
+                ctx.sublabel("old_str");
+                ctx.code_block("edit.old", old, lang);
+            }
+            (None, None) => {}
         }
 
         // Remaining args under "other" as JSON.

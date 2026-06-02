@@ -37,6 +37,7 @@
 pub mod content;
 pub mod dispatch;
 pub mod hero;
+pub mod inline_diff;
 pub mod render_edit;
 pub mod render_external;
 pub mod render_generic;

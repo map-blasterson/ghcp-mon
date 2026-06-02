@@ -258,12 +258,20 @@ fn url_hostname(url: &str) -> Option<String> {
 
 /// Per `Spans diff stat badges on file mutation tools`. Returns
 /// `(added, removed)`.
+///
+/// For `Edit`, runs the same line-level diff used by the inline-diff
+/// renderer ([`crate::tui::scenarios::tool_detail::inline_diff::build`])
+/// and counts the diff rows that are actually added or removed — NOT the
+/// total line counts of `old_str` and `new_str`. The latter is what the
+/// previous implementation did and it over-counted a one-line touch in a
+/// many-line block as `+N -N`.
 pub fn diff_stat(kind: ToolKind, args: &Value) -> (u32, u32) {
+    use crate::tui::scenarios::tool_detail::inline_diff;
     match kind {
         ToolKind::Edit => {
             let old = args.get("old_str").and_then(Value::as_str).unwrap_or("");
             let new = args.get("new_str").and_then(Value::as_str).unwrap_or("");
-            (count_lines(new), count_lines(old))
+            inline_diff::count_changes(&inline_diff::build(old, new))
         }
         ToolKind::Write => {
             let body = args.get("file_text").and_then(Value::as_str).unwrap_or("");
@@ -447,6 +455,20 @@ mod tests {
     fn diff_stat_other_kinds_zero() {
         assert_eq!(diff_stat(ToolKind::Read, &json!({})), (0, 0));
         assert_eq!(diff_stat(ToolKind::Shell, &json!({})), (0, 0));
+    }
+
+    /// Regression for bug "+/- chip counts are bogus": the prior
+    /// implementation returned (count_lines(new), count_lines(old)),
+    /// which over-counts a one-line touch in a many-line block as `+N -N`.
+    /// The fix routes through the real line-level diff so a one-line
+    /// change reports `(1, 1)`.
+    #[test]
+    fn diff_stat_edit_counts_actual_changed_lines_not_block_totals() {
+        let args = json!({
+            "old_str": "fn a() {\n    let x = 1;\n    println!(\"x\");\n    return;\n}\n",
+            "new_str": "fn a() {\n    let x = 2;\n    println!(\"x\");\n    return;\n}\n",
+        });
+        assert_eq!(diff_stat(ToolKind::Edit, &args), (1, 1));
     }
 
     #[test]
