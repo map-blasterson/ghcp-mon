@@ -41,6 +41,32 @@ fn display_name(node: &SpanNode) -> String {
     {
         return String::new();
     }
+    // Agent rows: the kind badge already says "agent", so don't repeat
+    // the noisy "invoke_agent" prefix. Prefer the server-projected
+    // agent_name (extracted from the suffix on the server) when present;
+    // otherwise locally strip the "invoke_agent " prefix from the raw
+    // name, and suppress entirely when the name is just "invoke_agent"
+    // with no useful suffix.
+    if matches!(node.kind_class, crate::tui::model::KindClass::InvokeAgent) {
+        if let Some(name) = node
+            .projection
+            .agent_run
+            .as_ref()
+            .and_then(|ar| ar.agent_name.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return name.to_string();
+        }
+        if let Some(suffix) = node.name.strip_prefix("invoke_agent ") {
+            let trimmed = suffix.trim();
+            return trimmed.to_string();
+        }
+        if node.name == "invoke_agent" {
+            return String::new();
+        }
+        return node.name.clone();
+    }
     node.name.clone()
 }
 
@@ -278,6 +304,57 @@ mod tests {
             projection: SpanProjection::default(),
             children: vec![],
         }
+    }
+
+    fn agent_node(name: &str, projected_agent_name: Option<&str>) -> SpanNode {
+        let mut proj = SpanProjection::default();
+        if let Some(an) = projected_agent_name {
+            proj.agent_run = Some(crate::tui::model::AgentRunProjection {
+                agent_name: Some(an.into()),
+                ..Default::default()
+            });
+        }
+        SpanNode {
+            span_pk: 0,
+            trace_id: "t".into(),
+            span_id: "agent-1".into(),
+            parent_span_id: None,
+            name: name.into(),
+            kind_class: KindClass::InvokeAgent,
+            ingestion_state: "complete".into(),
+            start_unix_ns: Some(0),
+            end_unix_ns: Some(0),
+            projection: proj,
+            children: vec![],
+        }
+    }
+
+    #[test]
+    fn agent_row_display_name_prefers_projected_agent_name() {
+        let n = agent_node("invoke_agent gpt-4", Some("gpt-4"));
+        assert_eq!(display_name(&n), "gpt-4");
+    }
+
+    #[test]
+    fn agent_row_display_name_strips_invoke_agent_prefix_when_no_projection() {
+        let n = agent_node("invoke_agent gpt-4", None);
+        assert_eq!(display_name(&n), "gpt-4");
+    }
+
+    #[test]
+    fn agent_row_display_name_empty_for_bare_invoke_agent_name() {
+        let n = agent_node("invoke_agent", None);
+        // Bare prefix with no suffix → suppress entirely; the kind badge
+        // already says "agent".
+        assert_eq!(display_name(&n), "");
+    }
+
+    #[test]
+    fn agent_row_display_name_prefers_projection_even_over_richer_name() {
+        // Server may have a richer agent_name (e.g., from gen_ai.agent.name)
+        // that doesn't match the suffix. Projection wins.
+        let n = agent_node("invoke_agent placeholder", Some("Code Reviewer"));
+        assert_eq!(display_name(&n), "Code Reviewer");
     }
 
     fn row_text(buf: &Buffer, y: u16) -> String {
