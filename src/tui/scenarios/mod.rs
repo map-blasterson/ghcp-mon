@@ -9,9 +9,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
+use crate::tui::model::KindClass;
 use crate::tui::workspace::{ColumnConfig, ScenarioType};
 
 pub mod live_sessions;
+pub mod raw_browser;
 pub mod scenario;
 pub mod spans;
 pub mod tool_detail;
@@ -48,6 +50,33 @@ pub enum ScenarioEffect {
     ConfirmDeleteSession { cid: String },
     /// Persist the workspace to disk.
     PersistWorkspace,
+    /// Apply `Span selection routes by kind class allow list` +
+    /// `Spans direct chat selection clears tool call hint` +
+    /// `Spans execute_tool selection auto-advances chat detail` +
+    /// `Spans invoke_agent selection routes to latest chat descendant`.
+    /// Delegates to [`spans::propagate_selection`].
+    PropagateSelection {
+        picked_kind: KindClass,
+        picked: spans::SelectionPatch,
+        chat_route: Option<spans::SelectionPatch>,
+        origin_col_idx: usize,
+    },
+    /// Write `search_query` to every chat/tool detail column.
+    /// Delegates to [`spans::propagate_search`]. Pass `""` to clear.
+    PropagateSearch { query: String },
+    /// Cross-column hovered chat span pk publisher (consumer:
+    /// Context Growth Widget). Pass `None` to clear.
+    ///
+    /// Ordering note: emit AFTER any [`PropagateSelection`] in the same
+    /// batch so widget consumers observe a hovered pk consistent with
+    /// the workspace selection state.
+    SetHoveredChatPk(Option<i64>),
+    /// Set or clear `column.config.kind_filter` for a Spans column.
+    /// `Some(s)` writes; `None` removes the key.
+    SetKindFilter {
+        col_idx: usize,
+        value: Option<String>,
+    },
 }
 
 /// Render a Phase-0 placeholder for any scenario type still without a real

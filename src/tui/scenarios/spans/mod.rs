@@ -24,6 +24,9 @@ pub mod follow_mode;
 pub mod invoke_agent;
 pub mod node_map;
 pub mod reveal_schedule;
+pub mod scenario;
+
+pub use scenario::SpansScenario;
 
 /// Which popover (if any) is currently overlaid on a Spans column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

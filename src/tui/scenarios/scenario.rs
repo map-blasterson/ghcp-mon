@@ -168,6 +168,23 @@ impl<'a> Ctx<'a> {
         .unwrap_or_default()
     }
 
+    /// Read-only counterpart of [`Self::cached_traces`]. Returns
+    /// whatever is currently cached without dispatching a background
+    /// fetch. Used by key handlers (per the "key handlers MUST NOT
+    /// trigger fetches" invariant) — render paths should use
+    /// [`Self::cached_traces`] which is SWR.
+    pub fn cached_traces_readonly(&self) -> Vec<TraceSummary> {
+        swr_read::<ListTracesResponse, _, _>(
+            self.cache,
+            qkey(["traces"]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::ReadOnly,
+            || async move { unreachable!("ReadOnly policy never invokes the fetcher") },
+        )
+        .map(|r| r.traces)
+        .unwrap_or_default()
+    }
+
     /// Read-or-fetch `["session-span-tree", cid]`. Returns the COMPLETE
     /// server tree (per the cache contract — DELTA's prior-chat-span walk
     /// and the file-touches walk MUST read this, not Spans'
@@ -316,7 +333,14 @@ impl<'a> Ctx<'a> {
 /// scenario state. App holds `HashMap<String, Box<dyn Scenario>>` keyed
 /// by column id and dispatches to the matching scenario from
 /// `draw_workspace` / `scenario_handle_key` / `on_ws_envelopes`.
-pub trait Scenario {
+pub trait Scenario: std::any::Any {
+    /// Downcast escape hatch — used by App for the small set of
+    /// behaviours that need typed access to a specific scenario
+    /// (currently `widget_select_current` reaching into `SpansScenario`
+    /// to reposition row cursors). Implementors return `self`.
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     /// Render this column. Scenarios MUST flip
     /// `outcome.spinner_visible = true` whenever they render an animated
     /// affordance (rolling dots, progress bar, etc.) so the event loop
@@ -362,5 +386,60 @@ pub trait Scenario {
         _meta: &WsBatchMeta,
     ) -> Vec<ScenarioEffect> {
         Vec::new()
+    }
+
+    /// Called once per scenario after the cache emits a "value changed"
+    /// notification (e.g. a background SWR fetch completed). Used by
+    /// follow-mode to re-run the latest-tool-span walk once the freshly
+    /// arrived `["session-span-tree", cid]` is queryable. Default no-op.
+    fn on_cache_changed(
+        &mut self,
+        _ctx: &mut Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        _config: &ColumnConfig,
+    ) -> Vec<ScenarioEffect> {
+        Vec::new()
+    }
+
+    /// Called from the event loop's animation tick. Drain due
+    /// reveal-queue entries or advance other time-based state. Default
+    /// no-op. Effects are applied post-batch in column order.
+    fn tick(
+        &mut self,
+        _ctx: &mut Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        _config: &ColumnConfig,
+        _now_ms: u64,
+    ) -> Vec<ScenarioEffect> {
+        Vec::new()
+    }
+
+    /// Earliest wall-clock ms at which the scenario must be re-ticked
+    /// (e.g. the head of its reveal queue). `None` when nothing is
+    /// scheduled. Aggregated by `App::next_anim_deadline_ms`.
+    fn next_anim_deadline(&self, _config: &ColumnConfig) -> Option<u64> {
+        None
+    }
+
+    /// True when the scenario is in a text-input mode that should
+    /// intercept printable keys before any other dispatch layer (App
+    /// Layer 1). The scenario's `handle_key` is then invoked with the
+    /// key; if it returns `consumed = true`, dispatch stops, otherwise
+    /// the key falls through to subsequent layers (modal/widget/column/
+    /// global). Default false.
+    fn text_input_active(&self, _config: &ColumnConfig) -> bool {
+        false
+    }
+
+    /// True when the scenario is showing a column-scoped modal popover
+    /// that should consume all keys (App Layer 2). When true, App
+    /// dispatches the key via `handle_key` and ALWAYS treats it as
+    /// consumed, regardless of the scenario's return value, so non-
+    /// matching keys cannot fall through (e.g. `q` mustn't quit while
+    /// a session picker is open). Default false.
+    fn popover_active(&self, _config: &ColumnConfig) -> bool {
+        false
     }
 }

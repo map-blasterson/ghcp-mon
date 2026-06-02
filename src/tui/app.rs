@@ -32,28 +32,23 @@ use tracing::{debug, info, warn};
 
 use crate::tui::api::ApiClient;
 use crate::tui::cache::{
-    FetchPolicy, QueryCache, cache_get, qkey, swr_read, ws_invalidation_prefixes,
+    FetchPolicy, QueryCache, qkey, swr_read, ws_invalidation_prefixes,
 };
-use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt, WsEnvelope, WsKind};
+use crate::tui::model::{SessionSpanTreeResponse, SpanTreeExt, WsEnvelope, WsKind};
 use crate::tui::persist;
 use crate::tui::scenarios::live_sessions::{
     clear_session_everywhere, delete_prompt, propagate_session,
 };
 use crate::tui::scenarios::render_placeholder;
-use crate::tui::scenarios::spans::{
-    SelectionPatch, SpansPopover, SpansState, attrs, chips, follow_chat, follow_mode,
-    hovered_chat_ancestor, invoke_agent, propagate_search, propagate_selection,
-};
+use crate::tui::scenarios::spans::{propagate_search, propagate_selection};
 use crate::tui::widgets::confirm_modal::{ConfirmModalState, ConfirmModalView};
 use crate::tui::widgets::context_growth::{
     ContextGrowthState, ContextGrowthWidget, MergedRows, chat_span_pks, max_current_tokens,
     merge_snapshots,
 };
 use crate::tui::widgets::keymap_overlay::KeymapOverlay;
-use crate::tui::widgets::kind_badge::kind_label;
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
 use crate::tui::widgets::select::{SelectPopover, SelectState};
-use crate::tui::widgets::spans_tree_row::SpansTreeRow;
 use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
 use crate::tui::ws::{WsBus, WsStatus};
@@ -150,16 +145,11 @@ pub struct App {
     pub app_popover: Option<AppPopover>,
     pub add_column_picker: SelectState,
     pub status: WsStatus,
-    /// Per-column Spans scenario state (not yet migrated to the
-    /// `Scenario` trait — see `scenario-trait-spans` todo). All other
-    /// scenarios live in `scenarios` below.
-    pub spans_state: HashMap<String, SpansState>,
-    /// Per-column `Scenario` instances (LiveSessions, ToolDetail,
-    /// ChatDetail, FileTouches, …). Spans is special-cased in dispatch
-    /// until its migration lands.
+    /// Per-column `Scenario` instances. Every column scenario type goes
+    /// through the trait now.
     pub scenarios: HashMap<String, Box<dyn crate::tui::scenarios::Scenario>>,
-    /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
-    /// consumes.
+    /// Cross-column hovered chat pk store. Spans publishes via the
+    /// `SetHoveredChatPk` effect; the Context Growth Widget consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
     pub confirm_modal: ConfirmModalState,
     /// Records what session id the pending confirm-delete refers to (none
@@ -170,11 +160,12 @@ pub struct App {
     /// Last known terminal size `(width, height)`. Updated on resize and at
     /// startup; drives the widget-height `0.8 * term_h` clamp.
     pub term_size: (u16, u16),
-    /// Memo for [`Self::cached_span_detail`]. Keyed by `(trace_id, span_id)`
-    /// → `(cache_generation, Rc<SpanDetail>)`. Re-deserialized only when the
-    /// cache generation for the span key changes; survives across draws so
-    /// repeated lookups of an unchanged span (chips, report_intent walk,
-    /// inspector pane, chat-detail prior lookup) cost a single HashMap hit.
+    /// Memo for `Ctx::cached_span_detail`. Keyed by `(trace_id, span_id)`
+    /// → `(cache_generation, Rc<SpanDetail>)`. Re-deserialized only when
+    /// the cache generation for the span key changes; survives across
+    /// draws so repeated lookups of an unchanged span (chips,
+    /// report_intent walk, inspector pane, chat-detail prior lookup)
+    /// cost a single HashMap hit. Lent to scenarios via `Ctx::new`.
     pub span_detail_memo:
         HashMap<(String, String), (u64, Rc<crate::tui::model::SpanDetail>)>,
 }
@@ -205,7 +196,6 @@ impl App {
             mouse_enabled,
             app_popover: None,
             add_column_picker: SelectState::default(),
-            spans_state: HashMap::new(),
             scenarios: HashMap::new(),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
@@ -218,9 +208,36 @@ impl App {
         app
     }
 
+    /// Test-only typed accessor for the [`crate::tui::scenarios::spans::SpansScenario`]
+    /// bound to `col_id`. Returns `None` when the column doesn't exist or
+    /// isn't a Spans column. Used by App-integration tests that
+    /// previously poked the legacy `spans_state` HashMap directly.
+    #[cfg(test)]
+    pub fn spans_scenario(
+        &self,
+        col_id: &str,
+    ) -> Option<&crate::tui::scenarios::spans::SpansScenario> {
+        self.scenarios
+            .get(col_id)?
+            .as_any()
+            .downcast_ref::<crate::tui::scenarios::spans::SpansScenario>()
+    }
+
+    /// Mutable counterpart of [`Self::spans_scenario`].
+    #[cfg(test)]
+    pub fn spans_scenario_mut(
+        &mut self,
+        col_id: &str,
+    ) -> Option<&mut crate::tui::scenarios::spans::SpansScenario> {
+        self.scenarios
+            .get_mut(col_id)?
+            .as_any_mut()
+            .downcast_mut::<crate::tui::scenarios::spans::SpansScenario>()
+    }
+
     /// Instantiate the `Scenario` for a given `ScenarioType`. Returns
-    /// `None` for scenario types that are not yet trait-migrated (Spans,
-    /// RawBrowser) — those go through legacy dispatch in App.
+    /// `None` for scenario types that have no implementation (none today
+    /// — all six types are trait-migrated).
     fn scenario_for(t: ScenarioType) -> Option<Box<dyn crate::tui::scenarios::Scenario>> {
         use crate::tui::scenarios as sc;
         match t {
@@ -228,9 +245,8 @@ impl App {
             ScenarioType::ToolDetail => Some(Box::new(sc::tool_detail::ToolDetailScenario::new())),
             ScenarioType::ChatDetail => Some(Box::new(sc::chat_detail::ChatDetailScenario::new())),
             ScenarioType::FileTouches => Some(Box::new(sc::file_touches::FileTouchesScenario::new())),
-            // Not yet migrated:
-            ScenarioType::Spans => None,
-            ScenarioType::RawBrowser => None,
+            ScenarioType::RawBrowser => Some(Box::new(sc::raw_browser::RawBrowserScenario::new())),
+            ScenarioType::Spans => Some(Box::new(sc::spans::SpansScenario::new())),
         }
     }
 
@@ -334,13 +350,33 @@ impl App {
         );
     }
 
-    /// Drain due reveal-queue entries on every Spans column. Called by the
+    /// Drain due reveal-queue entries on every scenario. Called by the
     /// event loop when its animation deadline fires.
     pub fn tick_anim(&mut self) {
         let now_ms = self.now_ms();
-        for s in self.spans_state.values_mut() {
-            let _ = s.reveal.drain_due(now_ms);
+        let cols: Vec<(usize, String, crate::tui::workspace::ColumnConfig)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.id.clone(), c.config.clone()))
+            .collect();
+        let mut all_effects = Vec::new();
+        for (i, col_id, cfg) in cols {
+            let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+                continue;
+            };
+            let mut ctx = crate::tui::scenarios::Ctx::new(
+                &self.rt.api,
+                &self.rt.cache,
+                &self.workspace,
+                &self.hovered_chat_pk,
+                &mut self.span_detail_memo,
+            );
+            let effects = scenario.tick(&mut ctx, i, &col_id, &cfg, now_ms);
+            all_effects.extend(effects);
         }
+        self.apply_effects(all_effects);
     }
 
     /// Earliest wall-clock deadline at which the event loop must wake to
@@ -358,9 +394,11 @@ impl App {
     /// next WS envelope.
     pub fn next_anim_deadline_ms(&self, spinner_visible: bool) -> Option<u64> {
         let mut earliest: Option<u64> = None;
-        for s in self.spans_state.values() {
-            if let Some(&(_, at)) = s.reveal.queue.first() {
-                earliest = Some(earliest.map_or(at, |e| e.min(at)));
+        for c in &self.workspace.columns {
+            if let Some(scenario) = self.scenarios.get(&c.id) {
+                if let Some(at) = scenario.next_anim_deadline(&c.config) {
+                    earliest = Some(earliest.map_or(at, |e| e.min(at)));
+                }
             }
         }
         if spinner_visible {
@@ -373,13 +411,71 @@ impl App {
         earliest
     }
 
-    /// For every Spans column with `follow_mode` engaged, advance the
-    /// cursor to the latest tool span and propagate selection. Idempotent
-    /// when no new latest tool span exists. Pulled out of the old per-tick
-    /// loop and invoked from [`Self::on_ws_envelope`] for spans-touching
-    /// envelopes.
+    /// For every column whose scenario engages follow-mode advance,
+    /// dispatch `on_ws_batch` with `touches_spans=true`. Pulled out of
+    /// the old per-tick loop and invoked from [`Self::on_ws_envelopes`]
+    /// for spans-touching envelopes.
     pub(crate) fn advance_follow_mode_columns(&mut self) {
-        self.tick_follow_mode_advance();
+        self.dispatch_ws_batch(crate::tui::scenarios::WsBatchMeta { touches_spans: true });
+    }
+
+    /// Dispatch `on_ws_batch` to every scenario in workspace order.
+    /// Collects effects from all scenarios then applies them after the
+    /// loop so cross-scenario effect ordering is deterministic.
+    fn dispatch_ws_batch(&mut self, meta: crate::tui::scenarios::WsBatchMeta) {
+        let cols: Vec<(usize, String, crate::tui::workspace::ColumnConfig)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.id.clone(), c.config.clone()))
+            .collect();
+        let mut all_effects = Vec::new();
+        for (i, col_id, cfg) in cols {
+            let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+                continue;
+            };
+            let mut ctx = crate::tui::scenarios::Ctx::new(
+                &self.rt.api,
+                &self.rt.cache,
+                &self.workspace,
+                &self.hovered_chat_pk,
+                &mut self.span_detail_memo,
+            );
+            let effects = scenario.on_ws_batch(&mut ctx, i, &col_id, &cfg, &meta);
+            all_effects.extend(effects);
+        }
+        self.apply_effects(all_effects);
+    }
+
+    /// Dispatch `on_cache_changed` to every scenario in workspace order.
+    /// Called from the event-loop `cache_changed` arm so follow-mode
+    /// columns re-run their latest-tool-span walk against the freshly
+    /// arrived `["session-span-tree", cid]` cache value.
+    fn dispatch_cache_changed(&mut self) {
+        let cols: Vec<(usize, String, crate::tui::workspace::ColumnConfig)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.id.clone(), c.config.clone()))
+            .collect();
+        let mut all_effects = Vec::new();
+        for (i, col_id, cfg) in cols {
+            let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+                continue;
+            };
+            let mut ctx = crate::tui::scenarios::Ctx::new(
+                &self.rt.api,
+                &self.rt.cache,
+                &self.workspace,
+                &self.hovered_chat_pk,
+                &mut self.span_detail_memo,
+            );
+            let effects = scenario.on_cache_changed(&mut ctx, i, &col_id, &cfg);
+            all_effects.extend(effects);
+        }
+        self.apply_effects(all_effects);
     }
 
     fn now_ms(&self) -> u64 {
@@ -412,82 +508,44 @@ impl App {
         self.layer_global(k)
     }
 
-    /// Layer 1 — text-input mode. Currently the only text-input target is
-    /// the Spans column's search box (`/`-activated). Per
-    /// `TUI Spans search input edit semantics`: printable characters and
-    /// arrows go to the input verbatim; `Esc` exits to column-focused mode
-    /// preserving the query; `Delete` exits AND clears the query (btop-
-    /// style); `Enter` / `Shift+Enter` cycle to the next / previous server-
-    /// side search match in the visible tree (auto-selects the landed row).
+    /// Layer 1 — text-input mode. Asks the focused scenario whether it
+    /// is in a text-input mode (e.g. Spans `/`-active); if so, dispatch
+    /// the key to its `handle_key` and respect `KeyOutcome.consumed` —
+    /// keys the scenario passes back fall through to subsequent layers
+    /// (so e.g. `Tab` while typing still cycles focus, matching the
+    /// pre-migration behaviour).
     fn layer_text_input(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
         let Some(i) = self.focus.column_idx() else {
             return Dispatch::Pass;
         };
         let col_id = self.workspace.columns[i].id.clone();
-        if self.workspace.columns[i].scenario_type != ScenarioType::Spans {
-            return Dispatch::Pass;
-        }
+        let cfg = self.workspace.columns[i].config.clone();
         let active = self
-            .spans_state
+            .scenarios
             .get(&col_id)
-            .map(|s| s.search_active)
+            .map(|s| s.text_input_active(&cfg))
             .unwrap_or(false);
         if !active {
             return Dispatch::Pass;
         }
-        // Esc exits search-input mode (does not propagate further). Query
-        // text is preserved per btop semantics.
-        if matches!(k.code, KeyCode::Esc) {
-            if let Some(s) = self.spans_state.get_mut(&col_id) {
-                s.search_active = false;
-            }
-            return Dispatch::Consumed;
+        let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+            return Dispatch::Pass;
+        };
+        let mut ctx = crate::tui::scenarios::Ctx::new(
+            &self.rt.api,
+            &self.rt.cache,
+            &self.workspace,
+            &self.hovered_chat_pk,
+            &mut self.span_detail_memo,
+        );
+        let outcome = scenario.handle_key(&mut ctx, i, &col_id, &cfg, k);
+        let consumed = outcome.consumed;
+        self.apply_effects(outcome.effects);
+        if consumed {
+            Dispatch::Consumed
+        } else {
+            Dispatch::Pass
         }
-        // Delete (forward-delete key) exits search mode AND clears the
-        // query — btop-style. Overrides the SearchInput's per-character
-        // forward-delete behavior, which is rarely used in practice.
-        if matches!(k.code, KeyCode::Delete) {
-            if let Some(s) = self.spans_state.get_mut(&col_id) {
-                s.search_active = false;
-                s.search.clear();
-                let _ = s.search.take_changed();
-                s.last_search_emitted.clear();
-            }
-            propagate_search(&mut self.workspace.columns, "");
-            let _ = persist::save(&self.workspace);
-            self.kick_search_debounce(&col_id, String::new());
-            return Dispatch::Consumed;
-        }
-        // Enter / Shift+Enter cycle to next / previous search match. Only
-        // intercept bare or Shift-only Enter — Ctrl/Alt+Enter falls through
-        // to the SearchInput which currently ignores them anyway.
-        if matches!(k.code, KeyCode::Enter)
-            && !k.modifiers.contains(KeyModifiers::CONTROL)
-            && !k.modifiers.contains(KeyModifiers::ALT)
-        {
-            let forward = !k.modifiers.contains(KeyModifiers::SHIFT);
-            self.spans_jump_to_match(i, forward);
-            return Dispatch::Consumed;
-        }
-        let mut emitted: Option<String> = None;
-        if let Some(s) = self.spans_state.get_mut(&col_id) {
-            if s.search.handle_key(k) {
-                if s.search.take_changed() {
-                    let t = s.search.text().to_string();
-                    if t != s.last_search_emitted {
-                        s.last_search_emitted = t.clone();
-                        emitted = Some(t);
-                    }
-                }
-                if let Some(query) = emitted {
-                    propagate_search(&mut self.workspace.columns, &query);
-                    let _ = persist::save(&self.workspace);
-                    self.kick_search_debounce(&col_id, query);
-                }
-                return Dispatch::Consumed;
-            }
-        }
-        Dispatch::Pass
     }
 
     /// Layer 2 — modal overlays: the keymap overlay, log overlay, the
@@ -533,14 +591,28 @@ impl App {
         }
         if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
-            let popover = self
-                .spans_state
+            let cfg = self.workspace.columns[i].config.clone();
+            let popover_active = self
+                .scenarios
                 .get(&col_id)
-                .and_then(|s| s.popover);
-            if let Some(pk) = popover {
-                if self.handle_spans_popover_key(i, &col_id, pk, k) {
-                    return Dispatch::Consumed;
+                .map(|s| s.popover_active(&cfg))
+                .unwrap_or(false);
+            if popover_active {
+                if let Some(scenario) = self.scenarios.get_mut(&col_id) {
+                    let mut ctx = crate::tui::scenarios::Ctx::new(
+                        &self.rt.api,
+                        &self.rt.cache,
+                        &self.workspace,
+                        &self.hovered_chat_pk,
+                        &mut self.span_detail_memo,
+                    );
+                    let outcome = scenario.handle_key(&mut ctx, i, &col_id, &cfg, k);
+                    self.apply_effects(outcome.effects);
                 }
+                // Popover swallows ALL keys regardless of scenario return
+                // value — non-matching keys must not fall through to quit
+                // / cycle focus while a picker is open.
+                return Dispatch::Consumed;
             }
         }
         Dispatch::Pass
@@ -673,8 +745,17 @@ impl App {
     }
 
     fn active_keymap_entries(&self) -> Vec<(String, String)> {
-        if self.spans_search_input_active() {
-            return Self::text_input_keymap();
+        // When the focused scenario is in text-input mode, surface ONLY
+        // that scenario's text-input keymap (no global keys — they don't
+        // apply while typing).
+        if let Some(i) = self.focus.column_idx() {
+            if let Some(col) = self.workspace.columns.get(i) {
+                if let Some(scenario) = self.scenarios.get(&col.id) {
+                    if scenario.text_input_active(&col.config) {
+                        return scenario.keymap_entries(&col.config);
+                    }
+                }
+            }
         }
 
         let mut entries = Self::global_keymap();
@@ -683,34 +764,13 @@ impl App {
             Focus::Widget => entries.extend(Self::context_widget_keymap()),
             Focus::Column(i) => {
                 if let Some(col) = self.workspace.columns.get(i) {
-                    match col.scenario_type {
-                        ScenarioType::Spans => entries.extend(Self::spans_keymap()),
-                        _ => {
-                            if let Some(scenario) = self.scenarios.get(&col.id) {
-                                entries.extend(scenario.keymap_entries(&col.config));
-                            }
-                        }
+                    if let Some(scenario) = self.scenarios.get(&col.id) {
+                        entries.extend(scenario.keymap_entries(&col.config));
                     }
                 }
             }
         }
         entries
-    }
-
-    fn spans_search_input_active(&self) -> bool {
-        let Some(i) = self.focus.column_idx() else {
-            return false;
-        };
-        let Some(col) = self.workspace.columns.get(i) else {
-            return false;
-        };
-        if col.scenario_type != ScenarioType::Spans {
-            return false;
-        }
-        self.spans_state
-            .get(&col.id)
-            .map(|s| s.search_active)
-            .unwrap_or(false)
     }
 
     fn keymap_entry(key: &str, desc: &str) -> (String, String) {
@@ -732,18 +792,6 @@ impl App {
         ]
     }
 
-    fn text_input_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("printable", "append character"),
-            Self::keymap_entry("← / →", "move cursor"),
-            Self::keymap_entry("Home / End", "jump cursor"),
-            Self::keymap_entry("Backspace", "delete character left"),
-            Self::keymap_entry("Enter / Shift+Enter", "next / previous match"),
-            Self::keymap_entry("Esc", "exit search input (keep query)"),
-            Self::keymap_entry("Delete", "clear query and exit search"),
-        ]
-    }
-
     fn context_widget_keymap() -> Vec<(String, String)> {
         vec![
             Self::keymap_entry("← / →", "move widget bar cursor"),
@@ -752,30 +800,10 @@ impl App {
         ]
     }
 
-    fn spans_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("↑ / ↓", "move row cursor (auto-selects)"),
-            Self::keymap_entry("← / →", "collapse / expand focused row"),
-            Self::keymap_entry("Home / End", "jump to top / bottom (auto-selects)"),
-            Self::keymap_entry("+ / -", "expand all / collapse all"),
-            Self::keymap_entry("Space", "toggle focused row"),
-            Self::keymap_entry("f", "toggle follow mode"),
-            Self::keymap_entry("/", "focus search input"),
-            Self::keymap_entry("s", "open session selector"),
-            Self::keymap_entry("k", "open kind filter"),
-            Self::keymap_entry("Enter / Shift+Enter", "next / previous search match"),
-        ]
-    }
-
     /// Dispatch a key to the focused column's scenario. Returns `true` if
-    /// the key was consumed. Spans is still legacy-dispatched on App; every
-    /// other scenario goes through the trait.
+    /// the key was consumed. Every scenario now goes through the trait.
     fn scenario_handle_key(&mut self, col_idx: usize, k: crossterm::event::KeyEvent) -> bool {
-        let st = self.workspace.columns[col_idx].scenario_type;
         let col_id = self.workspace.columns[col_idx].id.clone();
-        if matches!(st, ScenarioType::Spans) {
-            return self.spans_key(col_idx, &col_id, k);
-        }
         let cfg = self.workspace.columns[col_idx].config.clone();
         let Some(scenario) = self.scenarios.get_mut(&col_id) else {
             return false;
@@ -788,7 +816,6 @@ impl App {
             &mut self.span_detail_memo,
         );
         let outcome = scenario.handle_key(&mut ctx, col_idx, &col_id, &cfg, k);
-        drop(ctx);
         self.apply_effects(outcome.effects);
         outcome.consumed
     }
@@ -817,526 +844,42 @@ impl App {
             ScenarioEffect::PersistWorkspace => {
                 let _ = persist::save(&self.workspace);
             }
-        }
-    }
-
-    fn spans_key(
-        &mut self,
-        col_idx: usize,
-        col_id: &str,
-        k: crossterm::event::KeyEvent,
-    ) -> bool {
-        // Per `TUI Spans traces list mode`: when `column.config.session` is
-        // unset, the body is the recent-traces list (cursor = traces_cursor,
-        // Enter reserved for Phase 6). When set, the body is the session
-        // span tree (cursor = state.cursor, Enter routes via spans_pick).
-        let has_session = self.workspace.columns[col_idx]
-            .config
-            .get("session")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty());
-
-        // Common keys (route to popovers / search-input toggle) apply in
-        // both modes — the popovers and the search input themselves are
-        // mode-agnostic affordances.
-        match k.code {
-            KeyCode::Char('/') => {
-                let s = self.spans_state.entry(col_id.to_string()).or_default();
-                s.search_active = true;
-                return true;
+            ScenarioEffect::PropagateSelection {
+                picked_kind,
+                picked,
+                chat_route,
+                origin_col_idx,
+            } => {
+                propagate_selection(
+                    &mut self.workspace.columns,
+                    picked_kind,
+                    picked,
+                    chat_route,
+                    origin_col_idx,
+                );
             }
-            KeyCode::Char('s') => {
-                let sessions = self.cached_sessions();
-                let n_sessions = sessions.len();
-                let current_cid = self.workspace.columns[col_idx]
-                    .config
-                    .get("session")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let cur = current_cid
-                    .as_ref()
-                    .and_then(|cid| {
-                        sessions.iter().position(|x| &x.conversation_id == cid)
-                    })
-                    .unwrap_or(0);
-                let s = self.spans_state.entry(col_id.to_string()).or_default();
-                s.popover = Some(SpansPopover::Session);
-                let safe_cursor = cur.min(n_sessions.saturating_sub(1));
-                s.session_picker.open(safe_cursor);
-                return true;
+            ScenarioEffect::PropagateSearch { query } => {
+                propagate_search(&mut self.workspace.columns, &query);
             }
-            KeyCode::Char('k') => {
-                let s = self.spans_state.entry(col_id.to_string()).or_default();
-                s.popover = Some(SpansPopover::Kind);
-                s.kind_picker.open(0);
-                return true;
-            }
-            _ => {}
-        }
-
-        if has_session {
-            self.spans_key_session_tree(col_idx, col_id, k)
-        } else {
-            self.spans_key_traces(col_id, k)
-        }
-    }
-
-    /// Key dispatch for the no-session traces-list mode. Per
-    /// `TUI Spans traces list mode`: arrow keys move the cursor; `Enter` is
-    /// reserved for Phase 6 trace-pick and MUST be consumed (no-op) so it
-    /// does not fall through to the global layer.
-    fn spans_key_traces(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
-        // Key handlers MUST NOT trigger network fetches — render owns the
-        // SWR lifecycle. Peek the cached traces length read-only.
-        let max = swr_read::<crate::tui::model::ListTracesResponse, _, _>(
-            &self.rt.cache,
-            qkey(["traces"]),
-            std::time::Duration::from_secs(5),
-            FetchPolicy::ReadOnly,
-            || async move { unreachable!("ReadOnly policy never invokes the fetcher") },
-        )
-        .map(|r| r.traces.len())
-        .unwrap_or(0);
-        let s = self.spans_state.entry(col_id.to_string()).or_default();
-        match k.code {
-            KeyCode::Up => {
-                s.traces_cursor = s.traces_cursor.saturating_sub(1);
-                true
-            }
-            KeyCode::Down => {
-                if s.traces_cursor + 1 < max {
-                    s.traces_cursor += 1;
+            ScenarioEffect::SetHoveredChatPk(pk) => {
+                if let Ok(mut g) = self.hovered_chat_pk.write() {
+                    *g = pk;
                 }
-                true
             }
-            KeyCode::Home => {
-                s.traces_cursor = 0;
-                true
-            }
-            KeyCode::End => {
-                s.traces_cursor = max.saturating_sub(1);
-                true
-            }
-            // Phase 6 reserved; swallow so it does not quit / reach global.
-            KeyCode::Enter => true,
-            _ => false,
-        }
-    }
-
-    /// Key dispatch for the session-span-tree body mode.
-    fn spans_key_session_tree(
-        &mut self,
-        col_idx: usize,
-        col_id: &str,
-        k: crossterm::event::KeyEvent,
-    ) -> bool {
-        let tree = self.cached_session_tree(col_idx);
-        let flat = tree.flatten_visible(
-            &self
-                .spans_state
-                .get(col_id)
-                .map(|s| s.user_collapsed.clone())
-                .unwrap_or_default(),
-        );
-        let max = flat.len();
-        let state = self.spans_state.entry(col_id.to_string()).or_default();
-        match k.code {
-            KeyCode::Up => {
-                state.cursor = state.cursor.saturating_sub(1);
-                self.publish_hovered_chat(col_idx);
-                if let Some(id) = flat.get(self.spans_state.get(col_id).map(|s| s.cursor).unwrap_or(0)).cloned() {
-                    self.spans_pick(col_idx, &id);
-                }
-                true
-            }
-            KeyCode::Down => {
-                if state.cursor + 1 < max {
-                    state.cursor += 1;
-                }
-                self.publish_hovered_chat(col_idx);
-                if let Some(id) = flat.get(self.spans_state.get(col_id).map(|s| s.cursor).unwrap_or(0)).cloned() {
-                    self.spans_pick(col_idx, &id);
-                }
-                true
-            }
-            KeyCode::Home => {
-                state.cursor = 0;
-                self.publish_hovered_chat(col_idx);
-                if let Some(id) = flat.first().cloned() {
-                    self.spans_pick(col_idx, &id);
-                }
-                true
-            }
-            KeyCode::End => {
-                state.cursor = max.saturating_sub(1);
-                self.publish_hovered_chat(col_idx);
-                if let Some(id) = flat.last().cloned() {
-                    self.spans_pick(col_idx, &id);
-                }
-                true
-            }
-            KeyCode::Left => {
-                if let Some(id) = flat.get(state.cursor) {
-                    state.user_collapsed.insert(id.clone());
-                }
-                true
-            }
-            KeyCode::Right => {
-                if let Some(id) = flat.get(state.cursor) {
-                    state.user_collapsed.remove(id);
-                }
-                true
-            }
-            KeyCode::Char(' ') => {
-                if let Some(id) = flat.get(state.cursor) {
-                    if state.user_collapsed.contains(id) {
-                        state.user_collapsed.remove(id);
-                    } else {
-                        state.user_collapsed.insert(id.clone());
-                    }
-                }
-                true
-            }
-            KeyCode::Char('+') => {
-                state.user_collapsed.clear();
-                true
-            }
-            KeyCode::Char('-') => {
-                // Collapse all rows that have children.
-                let mut all: Vec<String> = Vec::new();
-                fn walk(n: &crate::tui::model::SpanNode, out: &mut Vec<String>) {
-                    if !n.children.is_empty() {
-                        out.push(n.span_id.clone());
-                    }
-                    for c in &n.children {
-                        walk(c, out);
-                    }
-                }
-                for r in tree.iter() {
-                    walk(r, &mut all);
-                }
-                for id in all {
-                    state.user_collapsed.insert(id);
-                }
-                true
-            }
-            KeyCode::Char('f') => {
-                state.follow_mode = !state.follow_mode;
-                true
-            }
-            KeyCode::Enter
-                if !k.modifiers.contains(KeyModifiers::CONTROL)
-                    && !k.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                // Hover-as-select made Enter redundant for picking. Enter
-                // and Shift+Enter now navigate to the next / previous
-                // server-side search match; spans_jump_to_match auto-picks
-                // the landed row via spans_pick.
-                let forward = !k.modifiers.contains(KeyModifiers::SHIFT);
-                self.spans_jump_to_match(col_idx, forward);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Popover key dispatch (session selector / kind filter). Returns true
-    /// if the key was consumed.
-    fn handle_spans_popover_key(
-        &mut self,
-        col_idx: usize,
-        col_id: &str,
-        which: SpansPopover,
-        k: crossterm::event::KeyEvent,
-    ) -> bool {
-        match which {
-            SpansPopover::Session => {
-                let options: Vec<crate::tui::model::SessionSummary> = self.cached_sessions();
-                let max = options.len();
-                let Some(s) = self.spans_state.get_mut(col_id) else {
-                    return false;
-                };
-                match k.code {
-                    KeyCode::Esc => {
-                        s.session_picker.close();
-                        s.popover = None;
-                        true
-                    }
-                    KeyCode::Up => {
-                        s.session_picker.move_cursor(-1, max);
-                        true
-                    }
-                    KeyCode::Down => {
-                        s.session_picker.move_cursor(1, max);
-                        true
-                    }
-                    KeyCode::Enter => {
-                        let cursor = s.session_picker.cursor;
-                        s.session_picker.close();
-                        s.popover = None;
-                        if let Some(opt) = options.get(cursor) {
-                            let cid = opt.conversation_id.clone();
-                            propagate_session(
-                                &mut self.workspace.columns,
-                                &cid,
-                                col_idx,
-                            );
-                            let _ = persist::save(&self.workspace);
+            ScenarioEffect::SetKindFilter { col_idx, value } => {
+                if let Some(col) = self.workspace.columns.get_mut(col_idx) {
+                    match value {
+                        Some(s) => {
+                            col.config
+                                .insert("kind_filter".into(), toml::Value::String(s));
                         }
-                        true
-                    }
-                    _ => true, // swallow other keys while popover is open
-                }
-            }
-            SpansPopover::Kind => {
-                let options: &[&str] =
-                    &["chat", "execute_tool", "external_tool", "invoke_agent", "other"];
-                let max = options.len();
-                let Some(s) = self.spans_state.get_mut(col_id) else {
-                    return false;
-                };
-                match k.code {
-                    KeyCode::Esc => {
-                        s.kind_picker.close();
-                        s.popover = None;
-                        true
-                    }
-                    KeyCode::Up => {
-                        s.kind_picker.move_cursor(-1, max);
-                        true
-                    }
-                    KeyCode::Down => {
-                        s.kind_picker.move_cursor(1, max);
-                        true
-                    }
-                    KeyCode::Enter => {
-                        let cursor = s.kind_picker.cursor;
-                        s.kind_picker.close();
-                        s.popover = None;
-                        if let Some(opt) = options.get(cursor) {
-                            self.workspace.columns[col_idx].config.insert(
-                                "kind_filter".into(),
-                                toml::Value::String((*opt).to_string()),
-                            );
-                            let _ = persist::save(&self.workspace);
+                        None => {
+                            col.config.remove("kind_filter");
                         }
-                        true
                     }
-                    KeyCode::Delete | KeyCode::Backspace => {
-                        // Clear the kind filter.
-                        self.workspace.columns[col_idx].config.remove("kind_filter");
-                        s.kind_picker.close();
-                        s.popover = None;
-                        let _ = persist::save(&self.workspace);
-                        true
-                    }
-                    _ => true,
                 }
             }
         }
-    }
-
-    /// Realize selection routing for a picked span in the Spans column.
-    fn spans_pick(&mut self, col_idx: usize, picked_span_id: &str) {
-        let tree = self.cached_session_tree(col_idx);
-        // Locate the picked node for trace_id + kind + tool_call_id.
-        let Some(node) = tree.find_by_id(picked_span_id) else {
-            return;
-        };
-        let picked_kind = node.kind_class;
-        let picked = SelectionPatch {
-            trace_id: node.trace_id.clone(),
-            span_id: node.span_id.clone(),
-            tool_call_id: node
-                .projection
-                .tool_call
-                .as_ref()
-                .and_then(|tc| tc.call_id.clone()),
-        };
-        let chat_route: Option<SelectionPatch> = match picked_kind {
-            KindClass::ExecuteTool | KindClass::ExternalTool => {
-                follow_chat::find_following_chat_span(&tree, picked_span_id).map(|(t, s)| {
-                    SelectionPatch {
-                        trace_id: t,
-                        span_id: s,
-                        tool_call_id: None,
-                    }
-                })
-            }
-            KindClass::InvokeAgent => {
-                invoke_agent::latest_chat_descendant(&tree, picked_span_id).map(|(t, s)| {
-                    SelectionPatch {
-                        trace_id: t,
-                        span_id: s,
-                        tool_call_id: None,
-                    }
-                })
-            }
-            _ => None,
-        };
-        propagate_selection(
-            &mut self.workspace.columns,
-            picked_kind,
-            picked,
-            chat_route,
-            col_idx,
-        );
-        // Auto-engage / disengage follow-mode per the LLR.
-        let latest = follow_mode::latest_tool_span(&tree).map(|(_, sid)| sid);
-        let col_id = self.workspace.columns[col_idx].id.clone();
-        if let Some(state) = self.spans_state.get_mut(&col_id) {
-            state.focused_span_id = Some(picked_span_id.to_string());
-            if latest.as_deref() == Some(picked_span_id) {
-                state.follow_mode = true;
-            } else {
-                state.follow_mode = false;
-            }
-        }
-        let _ = persist::save(&self.workspace);
-    }
-
-    fn publish_hovered_chat(&self, col_idx: usize) {
-        let tree = self.cached_session_tree(col_idx);
-        let col_id = &self.workspace.columns[col_idx].id;
-        let Some(state) = self.spans_state.get(col_id) else {
-            return;
-        };
-        let flat = tree.flatten_visible(&state.user_collapsed);
-        let pk = flat
-            .get(state.cursor)
-            .and_then(|id| hovered_chat_ancestor(&tree, id));
-        if let Ok(mut g) = self.hovered_chat_pk.write() {
-            *g = pk;
-        }
-    }
-
-    /// Move the cursor to the next (or previous, when `forward=false`) row
-    /// in the visible flat list whose `span_id` is in the current server-
-    /// side search-hits set, then route the new selection through
-    /// [`Self::spans_pick`] so peer columns follow.
-    ///
-    /// Wrap-around: cycles past the end / before the start. When the cursor
-    /// already sits on a match, the search skips it (vim `n` / `N` semantics).
-    ///
-    /// No-op when any of the following hold:
-    /// * The column has no `session` configured.
-    /// * The search query is empty.
-    /// * The server-side hits are not yet cached (the 300 ms debounce hasn't
-    ///   landed — typing `/foo<Enter>` immediately may swallow the first
-    ///   Enter; a second press once results arrive succeeds).
-    /// * The visible flat list contains no rows in the hit set.
-    fn spans_jump_to_match(&mut self, col_idx: usize, forward: bool) {
-        let col_id = self.workspace.columns[col_idx].id.clone();
-        let Some(session) = self.workspace.columns[col_idx]
-            .config
-            .get("session")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        else {
-            return;
-        };
-        let (q, cursor, user_collapsed) = {
-            let Some(s) = self.spans_state.get(&col_id) else {
-                return;
-            };
-            (
-                s.search.text().to_string(),
-                s.cursor,
-                s.user_collapsed.clone(),
-            )
-        };
-        if q.is_empty() {
-            return;
-        }
-        let Some(resp) = self.cached_search_hits(&session, &q) else {
-            return;
-        };
-        let hits: std::collections::HashSet<String> =
-            resp.results.into_iter().map(|r| r.span_id).collect();
-        if hits.is_empty() {
-            return;
-        }
-        let tree = self.cached_session_tree(col_idx);
-        let flat = tree.flatten_visible(&user_collapsed);
-        if flat.is_empty() {
-            return;
-        }
-        let n = flat.len();
-        let start = cursor.min(n.saturating_sub(1));
-        // Walk all n indices in order from start+1 (or start-1), wrapping.
-        // step ∈ 1..=n: every index visited exactly once, the current `start`
-        // is checked last → naturally implements "skip current if it's a hit".
-        let new_idx = (1..=n).find_map(|step| {
-            let idx = if forward {
-                (start + step) % n
-            } else {
-                (start + n - step) % n
-            };
-            hits.contains(&flat[idx]).then_some(idx)
-        });
-        let Some(new_idx) = new_idx else {
-            return;
-        };
-        if let Some(s) = self.spans_state.get_mut(&col_id) {
-            s.cursor = new_idx;
-        }
-        self.publish_hovered_chat(col_idx);
-        let id = flat[new_idx].clone();
-        self.spans_pick(col_idx, &id);
-    }
-
-    /// 300 ms debounce kick for the server-side span search. Per the
-    /// `TUI Spans search input edit semantics` LLR: rapid typing must not
-    /// fan out into N HTTP requests. The cache's in-flight dedupe coalesces
-    /// identical queries (different debounce calls with the same text) and
-    /// generation-bumped invalidation drops superseded results.
-    ///
-    /// `cache_get` is the only fetcher of `["search-spans", session, q]` —
-    /// render reads through [`Self::cached_search_hits`] with
-    /// `FetchPolicy::ReadOnly` and never kicks its own fetch.
-    fn kick_search_debounce(&mut self, col_id: &str, q: String) {
-        self.spans_state
-            .entry(col_id.to_string())
-            .or_default()
-            .search_nonce = self
-            .spans_state
-            .get(col_id)
-            .map(|s| s.search_nonce)
-            .unwrap_or(0)
-            .wrapping_add(1);
-        // Empty q clears search results without fetching.
-        if q.is_empty() {
-            if let Some(s) = self.spans_state.get_mut(col_id) {
-                s.search_hits = None;
-            }
-            return;
-        }
-        let Some(session) = self
-            .workspace
-            .columns
-            .iter()
-            .find(|c| c.id == col_id)
-            .and_then(|c| c.config.get("session"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-        else {
-            return;
-        };
-        let cache = self.rt.cache.clone();
-        let api = self.rt.api.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let _ = cache_get(
-                &cache,
-                qkey(["search-spans", &session, &q]),
-                std::time::Duration::from_secs(5),
-                || async move {
-                    let r = api.search_spans(&q, &session, Some(200)).await?;
-                    Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-                },
-            )
-            .await;
-        });
     }
 
     fn do_delete_session(&mut self, cid: &str) {
@@ -1349,25 +892,6 @@ impl App {
         });
         clear_session_everywhere(&mut self.workspace.columns, cid);
         let _ = persist::save(&self.workspace);
-    }
-
-    /// Read-or-fetch `["sessions"]` and return the parsed list. Synchronous
-    /// from the renderer's point of view: returns whatever is cached and
-    /// triggers a refetch when stale (stale-while-revalidate).
-    fn cached_sessions(&self) -> Vec<crate::tui::model::SessionSummary> {
-        let api = self.rt.api.clone();
-        swr_read::<crate::tui::model::ListSessionsResponse, _, _>(
-            &self.rt.cache,
-            qkey(["sessions"]),
-            std::time::Duration::from_secs(5),
-            FetchPolicy::Swr,
-            move || async move {
-                let r = api.list_sessions(Some(50), None).await?;
-                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-            },
-        )
-        .map(|r| r.sessions)
-        .unwrap_or_default()
     }
 
     /// Read-or-fetch `["session-span-tree", cid]` for the given column. Returns
@@ -1481,9 +1005,9 @@ impl App {
     /// `Enter` on the focused widget bar → route the bar's chat span as a
     /// selection through every Spans column (`Context widget bar click
     /// selects chat in Spans column`). Synchronous: for each Spans column,
-    /// move the row cursor to the chat span (if visible in the flattened
-    /// tree) and call [`Self::spans_pick`] for the standard selection
-    /// routing.
+    /// downcast the scenario to [`crate::tui::scenarios::spans::SpansScenario`]
+    /// and delegate to its `pick_span_externally`, which moves the row
+    /// cursor and emits the standard selection-routing effects.
     fn widget_select_current(&mut self) {
         let Some(i) = self.context_widget.bar_cursor else {
             return;
@@ -1506,24 +1030,29 @@ impl App {
             .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
             .map(|(i, c)| (i, c.id.clone()))
             .collect();
+        let mut all_effects = Vec::new();
         for (idx, col_id) in spans_cols {
-            // Move the row cursor to the picked chat span when it is visible
-            // in the column's current flatten (collapse-state respected).
-            let col_tree = self.cached_session_tree(idx);
-            let collapsed = self
-                .spans_state
-                .get(&col_id)
-                .map(|s| s.user_collapsed.clone())
-                .unwrap_or_default();
-            let flat = col_tree.flatten_visible(&collapsed);
-            if let Some(pos) = flat.iter().position(|id| id == &picked_sid) {
-                self.spans_state
-                    .entry(col_id.clone())
-                    .or_default()
-                    .cursor = pos;
-            }
-            self.spans_pick(idx, &picked_sid);
+            let cfg = self.workspace.columns[idx].config.clone();
+            let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+                continue;
+            };
+            let Some(spans) = scenario
+                .as_any_mut()
+                .downcast_mut::<crate::tui::scenarios::spans::SpansScenario>()
+            else {
+                continue;
+            };
+            let mut ctx = crate::tui::scenarios::Ctx::new(
+                &self.rt.api,
+                &self.rt.cache,
+                &self.workspace,
+                &self.hovered_chat_pk,
+                &mut self.span_detail_memo,
+            );
+            let effects = spans.pick_span_externally(&mut ctx, idx, &cfg, &picked_sid);
+            all_effects.extend(effects);
         }
+        self.apply_effects(all_effects);
     }
 
     /// Toggle the Context Growth Widget visibility (`c` global key). When
@@ -1560,191 +1089,6 @@ impl App {
         if clamped != self.workspace.context_widget_height_rows {
             self.workspace.context_widget_height_rows = clamped;
             let _ = persist::save(&self.workspace);
-        }
-    }
-
-    /// Read-or-fetch `["traces"]` for traces-list mode (when no session is
-    /// configured). Stale-while-revalidate.
-    fn cached_traces(&self) -> Vec<crate::tui::model::TraceSummary> {
-        let api = self.rt.api.clone();
-        swr_read::<crate::tui::model::ListTracesResponse, _, _>(
-            &self.rt.cache,
-            qkey(["traces"]),
-            std::time::Duration::from_secs(5),
-            FetchPolicy::Swr,
-            move || async move {
-                let r = api.list_traces(Some(50), None).await?;
-                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-            },
-        )
-        .map(|r| r.traces)
-        .unwrap_or_default()
-    }
-
-    /// Read-or-fetch a single span's detail under `["span", trace_id, span_id]`
-    /// (stale_after = 30 s). Returns `None` while the fetch is still in
-    /// flight or if the response shape doesn't parse.
-    /// Read the SpanDetail for `(trace_id, span_id)` through the query
-    /// cache, memoising the deserialized value keyed by the cache entry's
-    /// `generation`. Re-deserializes only when the cache entry changes
-    /// (background fetch completion or WS invalidation). Survives across
-    /// draws — see `span_detail_memo` on [`App`].
-    fn cached_span_detail(
-        &mut self,
-        trace_id: &str,
-        span_id: &str,
-    ) -> Option<Rc<crate::tui::model::SpanDetail>> {
-        let memo_key = (trace_id.to_string(), span_id.to_string());
-        let cache_key = qkey(["span", trace_id, span_id]);
-
-        // Memo hit when our stored generation matches the cache's current
-        // generation. Stale-or-absent cache value → fall through and let
-        // swr_read decide whether to refetch.
-        let current_gen = self
-            .rt
-            .cache
-            .peek(&cache_key)
-            .value
-            .as_ref()
-            .map(|c| c.generation);
-        if let (Some(g), Some((memo_g, rc))) =
-            (current_gen, self.span_detail_memo.get(&memo_key))
-        {
-            if *memo_g == g {
-                return Some(rc.clone());
-            }
-        }
-
-        let api = self.rt.api.clone();
-        let tid = trace_id.to_string();
-        let sid = span_id.to_string();
-        let parsed = swr_read::<crate::tui::model::SpanDetail, _, _>(
-            &self.rt.cache,
-            cache_key.clone(),
-            std::time::Duration::from_secs(30),
-            FetchPolicy::Swr,
-            move || async move {
-                let r = api.get_span(&tid, &sid).await?;
-                Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
-            },
-        )?;
-        let rc = Rc::new(parsed);
-        // Re-peek post-`swr_read`; if a background fetch has already raced
-        // ahead the generation may have bumped — store whatever the cache
-        // now reports so the next lookup is a clean memo hit.
-        let stored_gen = self
-            .rt
-            .cache
-            .peek(&cache_key)
-            .value
-            .as_ref()
-            .map(|c| c.generation)
-            .unwrap_or(0);
-        self.span_detail_memo.insert(memo_key, (stored_gen, rc.clone()));
-
-        // Bound the memo loosely so it can't grow without limit on long
-        // sessions. SPAN_LRU_CAP (1024) matches the cache's own span-key
-        // cap; when we cross 2× that, drop everything and let lookups
-        // repopulate. Coarse but predictable.
-        if self.span_detail_memo.len() > 2 * crate::tui::cache::SPAN_LRU_CAP {
-            self.span_detail_memo.clear();
-        }
-        Some(rc)
-    }
-
-    /// Read-only lookup of `["search-spans", session, q]`. The fetch
-    /// lifecycle is owned by [`Self::kick_search_debounce`] (per the
-    /// `TUI Spans search input edit semantics` LLR's 300 ms debounce
-    /// contract) — render MUST NOT kick its own fetch here.
-    fn cached_search_hits(
-        &self,
-        session: &str,
-        q: &str,
-    ) -> Option<crate::tui::model::SearchResponse> {
-        if q.is_empty() {
-            return None;
-        }
-        swr_read::<crate::tui::model::SearchResponse, _, _>(
-            &self.rt.cache,
-            qkey(["search-spans", session, q]),
-            std::time::Duration::from_secs(5),
-            FetchPolicy::ReadOnly,
-            || async move { unreachable!("ReadOnly policy never invokes the fetcher") },
-        )
-    }
-
-    /// Follow-mode advance hook (per `Spans follows latest tool span`).
-    fn tick_follow_mode_advance(&mut self) {
-        let col_ids: Vec<(usize, String)> = self
-            .workspace
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
-            .map(|(i, c)| (i, c.id.clone()))
-            .collect();
-        for (col_idx, col_id) in col_ids {
-            let follow = self
-                .spans_state
-                .get(&col_id)
-                .map(|s| s.follow_mode)
-                .unwrap_or(false);
-            if !follow {
-                continue;
-            }
-            let tree = self.cached_session_tree(col_idx);
-            let Some((tid, sid)) = follow_mode::latest_tool_span(&tree) else {
-                continue;
-            };
-            let current = self
-                .spans_state
-                .get(&col_id)
-                .and_then(|s| s.focused_span_id.clone());
-            if current.as_deref() == Some(sid.as_str()) {
-                continue;
-            }
-            // Advance cursor to the new latest tool span.
-            let collapsed = self
-                .spans_state
-                .get(&col_id)
-                .map(|s| s.user_collapsed.clone())
-                .unwrap_or_default();
-            let flat = tree.flatten_visible(&collapsed);
-            if let Some(new_idx) = flat.iter().position(|id| id == &sid) {
-                if let Some(s) = self.spans_state.get_mut(&col_id) {
-                    s.cursor = new_idx;
-                    s.focused_span_id = Some(sid.clone());
-                }
-                // Propagate selection — same path as Enter (but without
-                // disengaging follow-mode).
-                let node = tree.find_by_id(&sid);
-                if let Some(node) = node {
-                    let picked = SelectionPatch {
-                        trace_id: tid,
-                        span_id: sid.clone(),
-                        tool_call_id: node
-                            .projection
-                            .tool_call
-                            .as_ref()
-                            .and_then(|tc| tc.call_id.clone()),
-                    };
-                    let chat_route =
-                        follow_chat::find_following_chat_span(&tree, &sid).map(
-                            |(t, s)| SelectionPatch {
-                                trace_id: t,
-                                span_id: s,
-                                tool_call_id: None,
-                            },
-                        );
-                    propagate_selection(
-                        &mut self.workspace.columns,
-                        node.kind_class,
-                        picked,
-                        chat_route,
-                        col_idx,
-                    );
-                }
-            }
         }
     }
 
@@ -1884,19 +1228,13 @@ impl App {
     /// the binding is column-scoped — when widget is focused (not a column)
     /// it MUST be a no-op so the user does not accidentally destroy a column
     /// they cannot see being targeted.
-    ///
-    /// On success, scrub the removed column's id from the spans-state map
-    /// (the only legacy per-scenario state map left on `App` — all other
-    /// scenarios live in `App::scenarios`, scrubbed by
-    /// `sync_scenarios_with_workspace`).
     fn remove_focused_column(&mut self) {
         let Some(i) = self.focus.column_idx() else {
             return;
         };
-        let Some(removed_id) = self.workspace.remove_column(i) else {
+        let Some(_removed_id) = self.workspace.remove_column(i) else {
             return;
         };
-        self.spans_state.remove(&removed_id);
         self.sync_scenarios_with_workspace();
         let n = self.workspace.columns.len();
         if n == 0 {
@@ -2045,22 +1383,17 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        // Per-column dispatch. The Spans branch still needs `&mut self`
-        // for legacy draw_spans, so each iteration re-reads the column
-        // header off `&self.workspace.columns[i]` for that branch's call.
-        // Non-Spans branches go through `self.scenarios.get_mut(&col_id)`
-        // with a disjoint Ctx (api, cache, workspace, hovered_chat_pk,
-        // span_detail_memo) — no clones of column state required.
+        // Per-column dispatch — every scenario type goes through the
+        // trait now. The `&self.workspace.columns[i].config` borrow is
+        // disjoint from the `&mut self.scenarios` / `&mut self.span_detail_memo`
+        // borrows held by Ctx, so we can pass them into one call without
+        // cloning column state.
         for i in 0..self.workspace.columns.len() {
             let rect = cols[i];
             let focused = self.focus.column_idx() == Some(i);
-            // Snapshot just the scalars + ids needed by the legacy Spans
-            // branch (its `&mut self` call invalidates any `&self.workspace`
-            // borrow). For non-Spans branches we re-borrow `config` later
-            // inside the disjoint window.
-            let (col_id, title, st) = {
+            let (col_id, title) = {
                 let c = &self.workspace.columns[i];
-                (c.id.clone(), c.title.clone(), c.scenario_type)
+                (c.id.clone(), c.title.clone())
             };
 
             let mut block = Block::default()
@@ -2078,31 +1411,20 @@ impl App {
                 continue;
             }
             let buf: &mut Buffer = frame.buffer_mut();
-            match st {
-                ScenarioType::Spans => {
-                    // Legacy: takes &mut self; the function reads its own
-                    // config off `self.workspace.columns[col_idx]`.
-                    self.draw_spans(inner, buf, i, &col_id, outcome);
-                }
-                _ => {
-                    // Disjoint-borrow Ctx: holds `&self.workspace` (so
-                    // `&self.workspace.columns[i].config` is fine to alias
-                    // for the scenario call).
-                    if let Some(scenario) = self.scenarios.get_mut(&col_id) {
-                        let cfg = &self.workspace.columns[i].config;
-                        let mut ctx = crate::tui::scenarios::Ctx::new(
-                            &self.rt.api,
-                            &self.rt.cache,
-                            &self.workspace,
-                            &self.hovered_chat_pk,
-                            &mut self.span_detail_memo,
-                        );
-                        scenario.draw(&mut ctx, i, &col_id, cfg, inner, buf, focused, outcome);
-                    } else {
-                        let cfg = &self.workspace.columns[i].config;
-                        render_placeholder(inner, buf, st, cfg);
-                    }
-                }
+            if let Some(scenario) = self.scenarios.get_mut(&col_id) {
+                let cfg = &self.workspace.columns[i].config;
+                let mut ctx = crate::tui::scenarios::Ctx::new(
+                    &self.rt.api,
+                    &self.rt.cache,
+                    &self.workspace,
+                    &self.hovered_chat_pk,
+                    &mut self.span_detail_memo,
+                );
+                scenario.draw(&mut ctx, i, &col_id, cfg, inner, buf, focused, outcome);
+            } else {
+                let cfg = &self.workspace.columns[i].config;
+                let st = self.workspace.columns[i].scenario_type;
+                render_placeholder(inner, buf, st, cfg);
             }
         }
     }
@@ -2130,520 +1452,6 @@ impl App {
         .unwrap_or_default()
     }
 
-    fn draw_spans(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_idx: usize,
-        col_id: &str,
-        outcome: &mut DrawOutcome,
-    ) {
-        let cfg = &self.workspace.columns[col_idx].config;
-        let session = cfg.get("session").and_then(|v| v.as_str()).map(str::to_string);
-        let kind_filter: Option<String> = cfg
-            .get("kind_filter")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        // Two-row header.
-        if area.height < 3 {
-            return;
-        }
-        let header_h: u16 = 2;
-        let h_top = Rect::new(area.x, area.y, area.width, 1);
-        let h_bot = Rect::new(area.x, area.y + 1, area.width, 1);
-        let body_total = Rect::new(area.x, area.y + header_h, area.width, area.height - header_h);
-
-        // Row 1: session label.
-        let sess_label = match &session {
-            Some(s) => format!("session: {}", s.chars().take(8).collect::<String>()),
-            None => "session: (none) — press 's'".to_string(),
-        };
-        Paragraph::new(Span::styled(sess_label, Style::default().fg(Color::Cyan)))
-            .render(h_top, buf);
-
-        // Snapshot SpansState scalars / cloned collections up front so the
-        // immutable borrow on `self.spans_state` does not collide with the
-        // `&mut self` calls (`draw_span_detail_pane`, `draw_spans_popover`,
-        // `compute_row_chips`, `compute_report_intent_titles`,
-        // `cached_search_hits`) later in this function.
-        let snap = self.spans_state.get(col_id);
-        let (cursor, follow_mode, search_active, search_text, user_collapsed) = match snap {
-            Some(s) => (
-                s.cursor,
-                s.follow_mode,
-                s.search_active,
-                s.search.text().to_string(),
-                s.user_collapsed.clone(),
-            ),
-            None => (0, false, false, String::new(), Default::default()),
-        };
-
-        // Row 2: kind / search / follow / collapse hints.
-        let follow = if follow_mode { "[x] follow" } else { "[ ] follow" };
-        let search_label = if search_active {
-            format!("/ {search_text}_")
-        } else if !search_text.is_empty() {
-            format!("/ {search_text}")
-        } else {
-            "/  ".to_string()
-        };
-        let kf_label = kind_filter
-            .as_deref()
-            .map(|s| format!("k:{s}"))
-            .unwrap_or_else(|| "k:kind".to_string());
-        let hint = format!(
-            "{kf_label}  {search_label}  {follow}  +/-:expand/collapse  s:session"
-        );
-        Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray)))
-            .render(h_bot, buf);
-
-        // No-session mode: render traces list.
-        let Some(session) = session else {
-            self.draw_traces_list(body_total, buf, col_id, outcome);
-            self.draw_spans_popover(body_total, buf, col_id);
-            return;
-        };
-
-        // Session mode: tree on top, span-detail inspector at the bottom.
-        let detail_h: u16 = if body_total.height >= 12 { 6 } else { 0 };
-        let tree_area = Rect::new(
-            body_total.x,
-            body_total.y,
-            body_total.width,
-            body_total.height.saturating_sub(detail_h),
-        );
-        let detail_area = Rect::new(
-            body_total.x,
-            body_total.y + body_total.height.saturating_sub(detail_h),
-            body_total.width,
-            detail_h,
-        );
-
-        // Render tree.
-        let tree = self.cached_session_tree(col_idx);
-        if tree.is_empty() {
-            let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
-            outcome.spinner_visible = true;
-            let line = Line::from(vec![
-                Span::styled(
-                    "loading spans".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
-            ]);
-            Paragraph::new(line).render(tree_area, buf);
-            self.draw_spans_popover(body_total, buf, col_id);
-            return;
-        }
-        let flat = tree.flatten_visible(&user_collapsed);
-        let visible_rows = tree_area.height as usize;
-        let start = if cursor >= visible_rows {
-            cursor + 1 - visible_rows
-        } else {
-            0
-        };
-        // Resolve search-hit set from the cache (server-side search).
-        let hit_set: Option<std::collections::HashSet<String>> = if !search_text.is_empty() {
-            self.cached_search_hits(&session, &search_text).map(|resp| {
-                resp.results.into_iter().map(|r| r.span_id).collect()
-            })
-        } else {
-            None
-        };
-
-        // Pre-compute per-parent report_intent titles (latest direct child with
-        // tool_name == "report_intent" → intent string).
-        let report_titles = self.compute_report_intent_titles(&tree);
-        let kf_lower = kind_filter.as_deref().map(str::to_lowercase);
-
-        for (i_visible, flat_idx) in (start..flat.len().min(start + visible_rows)).enumerate() {
-            let row_id = &flat[flat_idx];
-            let Some((node, depth)) = tree.find_with_depth(row_id) else {
-                continue;
-            };
-            if node.ingestion_state == "placeholder" {
-                // Mirror the condition in SpansTreeRow::render so the loop
-                // can schedule the next dot-frame wake without inspecting
-                // the rendered buffer.
-                outcome.spinner_visible = true;
-            }
-            let row_y = tree_area.y + i_visible as u16;
-            let focused = flat_idx == cursor;
-            let (row_bg, mut row_dim) = match &hit_set {
-                Some(set) if set.contains(&node.span_id) => (Some(Color::Yellow), false),
-                Some(_) => (None, true),
-                None => (None, false),
-            };
-            if let Some(kf) = &kf_lower {
-                let cur = format!("{:?}", node.kind_class).to_lowercase();
-                if cur != *kf {
-                    row_dim = true;
-                }
-            }
-            // `compute_row_chips` and the SpansTreeRow render want `node`
-            // (an immutable reference into `tree`). Borrow scoping is fine
-            // here — `tree` is a local Vec we own.
-            let (chips, description) = self.compute_row_chips(node);
-            let report_title = report_titles.get(&node.span_id).cloned();
-            let row_area = Rect::new(tree_area.x, row_y, tree_area.width, 1);
-            SpansTreeRow {
-                node,
-                depth,
-                focused,
-                collapsed: user_collapsed.contains(row_id),
-                row_bg,
-                row_dim,
-                chips: &chips,
-                description: description.as_deref(),
-                report_title: report_title.as_deref(),
-                now_ms: self.now_ms(),
-            }
-            .render(row_area, buf);
-        }
-
-        // Bottom detail inspector pane.
-        if detail_h >= 3 {
-            self.draw_span_detail_pane(detail_area, buf, &tree, &flat, cursor);
-        }
-
-        // Popover overlay (drawn over the body).
-        self.draw_spans_popover(body_total, buf, col_id);
-    }
-
-    /// Render the no-session traces list. Implements `Traces list dims rows
-    /// below kind filter`.
-    fn draw_traces_list(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_id: &str,
-        outcome: &mut DrawOutcome,
-    ) {
-        let traces = self.cached_traces();
-        let default = SpansState::default();
-        let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default);
-        if traces.is_empty() {
-            let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
-            outcome.spinner_visible = true;
-            let line = Line::from(vec![
-                Span::styled(
-                    "loading traces".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
-            ]);
-            Paragraph::new(line).render(area, buf);
-            return;
-        }
-        let kind_filter: Option<String> = self.workspace.columns[
-            self.workspace.columns.iter().position(|c| c.id == col_id).unwrap_or(0)
-        ]
-            .config
-            .get("kind_filter")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let visible_rows = area.height as usize;
-        let cursor = st.traces_cursor.min(traces.len().saturating_sub(1));
-        let start = if cursor >= visible_rows {
-            cursor + 1 - visible_rows
-        } else {
-            0
-        };
-        for (i_visible, idx) in (start..traces.len().min(start + visible_rows)).enumerate() {
-            let t = &traces[idx];
-            let id8: String = t.trace_id.chars().take(8).collect();
-            let when = crate::tui::format::fmt_relative(
-                t.last_seen_ns.map(|n| n as i128),
-                None,
-            );
-            let counts = format!(
-                "chat:{} tool:{} ext:{} agent:{} other:{}",
-                t.kind_counts.chat,
-                t.kind_counts.execute_tool,
-                t.kind_counts.external_tool,
-                t.kind_counts.invoke_agent,
-                t.kind_counts.other,
-            );
-            let row = format!("{id8}  {when}  spans:{}  {counts}", t.span_count);
-            let mut style = if idx == cursor {
-                Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            // Kind filter dim: when filter set and the row has 0 of that kind.
-            if let Some(kf) = &kind_filter {
-                let count = match kf.as_str() {
-                    "chat" => t.kind_counts.chat,
-                    "execute_tool" => t.kind_counts.execute_tool,
-                    "external_tool" => t.kind_counts.external_tool,
-                    "invoke_agent" => t.kind_counts.invoke_agent,
-                    "other" => t.kind_counts.other,
-                    _ => 1,
-                };
-                if count == 0 {
-                    style = style.add_modifier(Modifier::DIM);
-                }
-            }
-            let row_y = area.y + i_visible as u16;
-            buf.set_span(area.x, row_y, &Span::styled(row, style), area.width);
-        }
-    }
-
-    /// Bottom span-detail inspector pane — parent, children, projection.
-    fn draw_span_detail_pane(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        tree: &[crate::tui::model::SpanNode],
-        flat: &[String],
-        cursor: usize,
-    ) {
-        // Border
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .title(" detail ")
-            .border_style(Style::default().fg(Color::DarkGray));
-        let inner = block.inner(area);
-        block.render(area, buf);
-        if inner.height == 0 || inner.width < 8 {
-            return;
-        }
-        let Some(focused_id) = flat.get(cursor) else {
-            return;
-        };
-        let Some(node) = tree.find_by_id(focused_id) else {
-            return;
-        };
-        // Try the cache for full detail; fall back to in-tree node for parent/children.
-        let detail = self.cached_span_detail(&node.trace_id, &node.span_id);
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let id8: String = node.span_id.chars().take(8).collect();
-        let head = format!(
-            "{}  [{}]  {}",
-            node.name,
-            kind_label(node.kind_class),
-            id8
-        );
-        lines.push(Line::from(Span::styled(
-            head,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        )));
-
-        // Parent + children. Prefer detail (server) when available.
-        let parent_label = if let Some(d) = &detail {
-            match &d.parent {
-                Some(p) => format!(
-                    "↑ parent: {} ({})",
-                    p.name,
-                    p.span_id.chars().take(8).collect::<String>()
-                ),
-                None => "↑ parent: —".to_string(),
-            }
-        } else if let Some(parent_id) = &node.parent_span_id {
-            format!("↑ parent: {}", parent_id.chars().take(8).collect::<String>())
-        } else {
-            "↑ parent: —".to_string()
-        };
-        lines.push(Line::from(Span::styled(
-            parent_label,
-            Style::default().fg(Color::Cyan),
-        )));
-
-        let child_refs: Vec<(String, String, String)> = if let Some(d) = &detail {
-            d.children
-                .iter()
-                .map(|c| (c.name.clone(), format!("{:?}", c.kind_class), c.span_id.clone()))
-                .collect()
-        } else {
-            node.children
-                .iter()
-                .map(|c| (c.name.clone(), format!("{:?}", c.kind_class), c.span_id.clone()))
-                .collect()
-        };
-        if child_refs.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "↓ children: (none)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                format!("↓ children ({}):", child_refs.len()),
-                Style::default().fg(Color::Cyan),
-            )));
-            let take_n = (inner.height as usize).saturating_sub(3).min(child_refs.len()).max(0);
-            for (name, kind, id) in child_refs.iter().take(take_n) {
-                let id8: String = id.chars().take(8).collect();
-                lines.push(Line::from(format!("  • {name} [{kind}] {id8}")));
-            }
-        }
-
-        // Projection summary
-        if let Some(d) = &detail {
-            let p = &d.projection;
-            let present: Vec<&str> = [
-                p.chat_turn.as_ref().map(|_| "chat_turn"),
-                p.tool_call.as_ref().map(|_| "tool_call"),
-                p.agent_run.as_ref().map(|_| "agent_run"),
-                p.external_tool_call.as_ref().map(|_| "external_tool_call"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            if !present.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    format!("projection: {}", present.join(", ")),
-                    Style::default().fg(Color::Magenta),
-                )));
-            }
-        } else {
-            lines.push(Line::from(Span::styled(
-                "(loading detail…)",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )));
-        }
-        Paragraph::new(lines).render(inner, buf);
-    }
-
-    /// Compute per-row chips (text, bg color) using cached per-span details.
-    /// Returns chips + an optional plain-white description label that the
-    /// renderer paints separately (no chip styling, per the LLR).
-    fn compute_row_chips(
-        &mut self,
-        node: &crate::tui::model::SpanNode,
-    ) -> (Vec<(String, Color)>, Option<String>) {
-        let mut out: Vec<(String, Color)> = Vec::new();
-
-        // Chat rows: no chips, but surface the first ~20 chars of the
-        // chat's captured text in the description slot so the user can
-        // tell turns apart at a glance.
-        if matches!(node.kind_class, KindClass::Chat) {
-            let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id)
-            else {
-                return (out, None);
-            };
-            let Some(attrs_v) = &detail.span.attributes else {
-                return (out, None);
-            };
-            return (out, chips::chat_text_preview(attrs_v));
-        }
-
-        if !node.is_tool_row() {
-            return (out, None);
-        }
-        let tool_name = node.projected_tool_name().unwrap_or_default().to_string();
-        if !tool_name.is_empty() {
-            out.push((tool_name.clone(), crate::tui::format::hash_color(&tool_name)));
-        }
-        let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id) else {
-            return (out, None);
-        };
-        let Some(attrs_v) = &detail.span.attributes else {
-            return (out, None);
-        };
-        let Some(args) = attrs::parse_tool_call_arguments(attrs_v) else {
-            return (out, None);
-        };
-
-        // Skill chip
-        if tool_name == "skill" {
-            if let Some(s) = chips::skill_chip(&args) {
-                out.push((s, Color::Green));
-            }
-        }
-        let kind_opt = crate::tui::vendor::copilot::tool_name_mapping(&tool_name);
-        for target in chips::target_chips(kind_opt, &args) {
-            out.push((target, Color::Cyan));
-        }
-        // Diff-stat badges
-        if let Some(kind) = kind_opt {
-            let (added, removed) = chips::diff_stat(kind, &args);
-            if removed > 0 {
-                out.push((format!("-{removed}"), Color::Red));
-            }
-            if added > 0 {
-                out.push((format!("+{added}"), Color::Green));
-            }
-            // Shell chips
-            if matches!(kind, crate::tui::vendor::copilot::ToolKind::Shell) {
-                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                    let mut shell_chips = chips::shell_command_chips(cmd);
-                    if shell_chips.len() > 6 {
-                        shell_chips.truncate(6);
-                        shell_chips.push("…".to_string());
-                    }
-                    for c in shell_chips {
-                        let color = crate::tui::format::hash_color(&c);
-                        out.push((c, color));
-                    }
-                }
-            }
-        }
-        // Tool description label — per `Spans tool description inline label`,
-        // rendered as plain white text with no chip styling. Kept separate
-        // from the `chips` Vec so the renderer can paint it without forcing
-        // a (bg, black-fg) chip style that would render black-on-black.
-        let description = chips::tool_description_label(&args);
-        (out, description)
-    }
-
-    /// Per `Report intent title shows on parent row` — for each node, look at
-    /// its direct children for `tool_call.tool_name == "report_intent"`,
-    /// pick the latest by `start_unix_ns ?? span_pk`, fetch its detail and
-    /// parse `args.intent`. Returns `parent.span_id -> intent`.
-    fn compute_report_intent_titles(
-        &mut self,
-        tree: &[crate::tui::model::SpanNode],
-    ) -> std::collections::HashMap<String, String> {
-        let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        fn walk(
-            node: &crate::tui::model::SpanNode,
-            app: &mut App,
-            out: &mut std::collections::HashMap<String, String>,
-        ) {
-            // Find latest report_intent direct child.
-            let mut best: Option<&crate::tui::model::SpanNode> = None;
-            let mut best_key: i128 = i128::MIN;
-            for c in &node.children {
-                let name = c
-                    .projection
-                    .tool_call
-                    .as_ref()
-                    .and_then(|t| t.tool_name.as_deref());
-                if name != Some("report_intent") {
-                    continue;
-                }
-                let key = c.start_unix_ns.unwrap_or(c.span_pk as i128);
-                if key > best_key {
-                    best_key = key;
-                    best = Some(c);
-                }
-            }
-            if let Some(child) = best {
-                if let Some(detail) = app.cached_span_detail(&child.trace_id, &child.span_id) {
-                    if let Some(attrs_v) = &detail.span.attributes {
-                        if let Some(args) = attrs::parse_tool_call_arguments(attrs_v) {
-                            if let Some(intent) = chips::report_intent_title(&args) {
-                                out.insert(node.span_id.clone(), intent);
-                            }
-                        }
-                    }
-                }
-            }
-            for c in &node.children {
-                walk(c, app, out);
-            }
-        }
-        for r in tree {
-            walk(r, self, &mut out);
-        }
-        out
-    }
-
     fn scenario_type_options() -> Vec<String> {
         ScenarioType::all()
             .iter()
@@ -2669,50 +1477,6 @@ impl App {
         }
     }
 
-    /// Popover overlay for the `s` (session) and `k` (kind) keys.
-    fn draw_spans_popover(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
-        let Some(st) = self.spans_state.get(col_id) else {
-            return;
-        };
-        let Some(which) = st.popover else { return };
-        match which {
-            SpansPopover::Session => {
-                let sessions = self.cached_sessions();
-                let options: Vec<String> = sessions
-                    .iter()
-                    .map(|s| {
-                        let id8: String = s.conversation_id.chars().take(8).collect();
-                        let model = s.latest_model.as_deref().unwrap_or("—");
-                        format!("{id8}  {model}")
-                    })
-                    .collect();
-                SelectPopover {
-                    title: "Session",
-                    options: &options,
-                    cursor: st.session_picker.cursor,
-                }
-                .render(area, buf);
-            }
-            SpansPopover::Kind => {
-                let options: Vec<String> = [
-                    "chat",
-                    "execute_tool",
-                    "external_tool",
-                    "invoke_agent",
-                    "other",
-                ]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
-                SelectPopover {
-                    title: "Kind filter (Delete to clear)",
-                    options: &options,
-                    cursor: st.kind_picker.cursor,
-                }
-                .render(area, buf);
-            }
-        }
-    }
 }
 
 /// Run the event loop until quit. Caller is responsible for `ratatui::init`
@@ -2796,11 +1560,10 @@ pub async fn event_loop(
 
             _ = cache_changed.notified() => {
                 // A background fetch populated (or invalidated) a cache
-                // entry — re-run follow-mode advance so columns whose
-                // `["session-span-tree", cid]` just landed catch up to the
-                // newly-arrived latest tool span (the WS-arrival call ran
-                // against the stale tree). Idempotent for unchanged trees.
-                app.advance_follow_mode_columns();
+                // entry — re-run on_cache_changed on every scenario so
+                // follow-mode columns can catch up to the freshly-arrived
+                // span tree. Idempotent for unchanged trees.
+                app.dispatch_cache_changed();
                 dirty = true;
             }
         }
@@ -3072,7 +1835,7 @@ mod tests {
 
     use crate::tui::cache::FetchedRecord;
     use crate::tui::model::*;
-    use crate::tui::scenarios::spans::{SpansPopover, SpansState};
+    use crate::tui::scenarios::spans::SpansPopover;
 
     fn mk_span_node(
         id: &str,
@@ -3298,6 +2061,7 @@ mod tests {
         app.workspace.columns.clear();
         app.workspace
             .add_column(crate::tui::workspace::ScenarioType::Spans);
+        app.sync_scenarios_with_workspace();
         app.focus = Focus::Column(0);
         app.last_focused_column = Some(0);
         app
@@ -3310,6 +2074,7 @@ mod tests {
             .add_column(crate::tui::workspace::ScenarioType::ToolDetail);
         app.workspace
             .add_column(crate::tui::workspace::ScenarioType::Spans);
+        app.sync_scenarios_with_workspace();
         app.focus = Focus::Column(0);
         app.last_focused_column = Some(0);
         app
@@ -3626,9 +2391,7 @@ mod tests {
         seed_session_tree(&app, "cid-1", tree);
         // Engage follow mode manually.
         let col_id = app.workspace.columns[0].id.clone();
-        app.spans_state
-            .entry(col_id.clone())
-            .or_insert_with(SpansState::new)
+        app.spans_scenario_mut(&col_id).unwrap().state_mut()
             .follow_mode = true;
         // Drive a spans-touching WS envelope (replaces the old Tick drive).
         app.on_ws_envelope(WsEnvelope {
@@ -3637,7 +2400,7 @@ mod tests {
             payload: json!({}),
         });
         // Latest tool span is "tool-b" (end_ns=200) at flat index 2.
-        let st = app.spans_state.get(&col_id).unwrap();
+        let st = app.spans_scenario(&col_id).unwrap().state();
         assert_eq!(st.cursor, 2);
         assert_eq!(st.focused_span_id.as_deref(), Some("tool-b"));
     }
@@ -3664,9 +2427,7 @@ mod tests {
         seed_session_tree(&app, "cid-1", tree_v1);
 
         let col_id = app.workspace.columns[0].id.clone();
-        app.spans_state
-            .entry(col_id.clone())
-            .or_insert_with(SpansState::new)
+        app.spans_scenario_mut(&col_id).unwrap().state_mut()
             .follow_mode = true;
 
         // Initial WS envelope advances cursor onto tool-a (the only tool).
@@ -3675,7 +2436,7 @@ mod tests {
             entity: crate::tui::model::WsEntity::Span,
             payload: json!({}),
         });
-        assert_eq!(app.spans_state.get(&col_id).unwrap().focused_span_id.as_deref(), Some("tool-a"));
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().focused_span_id.as_deref(), Some("tool-a"));
 
         // Production race: the cache invalidates and a fresh tree
         // containing tool-b lands later, after the WS envelope's
@@ -3691,7 +2452,7 @@ mod tests {
 
         // Cache-changed wakeup. Must re-run follow-mode advance.
         app.advance_follow_mode_columns();
-        let st = app.spans_state.get(&col_id).unwrap();
+        let st = app.spans_scenario(&col_id).unwrap().state();
         assert_eq!(
             st.focused_span_id.as_deref(),
             Some("tool-b"),
@@ -3715,7 +2476,7 @@ mod tests {
         ];
         seed_session_tree(&app, "cid-1", tree);
         let col_id = app.workspace.columns[0].id.clone();
-        let s = app.spans_state.entry(col_id).or_insert_with(SpansState::new);
+        let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
         s.search.set_text("hit");
         s.last_search_emitted = "hit".to_string();
         seed_search(&app, "cid-1", "hit", vec!["hit-span"]);
@@ -3772,25 +2533,24 @@ mod tests {
         let col_id = app.workspace.columns[0].id.clone();
         // No session in config → traces mode. Initial cursor = 0.
         assert_eq!(
-            app.spans_state
-                .get(&col_id)
-                .map(|s| s.traces_cursor)
+            app.spans_scenario(&col_id)
+                .map(|s| s.state().traces_cursor)
                 .unwrap_or(0),
             0
         );
         let _ = app.handle_key(press(KeyCode::Down)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 1);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().traces_cursor, 1);
         let _ = app.handle_key(press(KeyCode::Down)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 2);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().traces_cursor, 2);
         // Clamps at last row.
         let _ = app.handle_key(press(KeyCode::Down)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 2);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().traces_cursor, 2);
         // Up wraps no further than 0.
         let _ = app.handle_key(press(KeyCode::Up)).unwrap();
         let _ = app.handle_key(press(KeyCode::Up)).unwrap();
         let _ = app.handle_key(press(KeyCode::Up)).unwrap();
         let _ = app.handle_key(press(KeyCode::Up)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 0);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().traces_cursor, 0);
     }
 
     /// LLR: `TUI Spans traces list mode` — "`Enter` is reserved for Phase 6
@@ -3902,7 +2662,7 @@ mod tests {
         let _ = app.handle_key(k).unwrap();
         let col_id = app.workspace.columns[0].id.clone();
         assert_eq!(
-            app.spans_state.get(&col_id).unwrap().popover,
+            app.spans_scenario(&col_id).unwrap().state().popover,
             Some(SpansPopover::Session)
         );
         let text = render_buf_text(&mut app, 120, 20);
@@ -3927,7 +2687,7 @@ mod tests {
         let _ = app.handle_key(k).unwrap();
         let col_id = app.workspace.columns[0].id.clone();
         assert_eq!(
-            app.spans_state.get(&col_id).unwrap().popover,
+            app.spans_scenario(&col_id).unwrap().state().popover,
             Some(SpansPopover::Kind)
         );
         // Delete clears the filter.
@@ -3942,7 +2702,7 @@ mod tests {
             .config
             .get("kind_filter")
             .is_none());
-        assert!(app.spans_state.get(&col_id).unwrap().popover.is_none());
+        assert!(app.spans_scenario(&col_id).unwrap().state().popover.is_none());
     }
 
     // ---- Phase 2: Context Growth Widget wiring ----
@@ -4124,7 +2884,7 @@ mod tests {
         // Selection is routed synchronously through spans_pick — cursor
         // must have moved to the flat index of span "b" (index 1).
         let col_id = app.workspace.columns[0].id.clone();
-        let st = app.spans_state.get(&col_id).unwrap();
+        let st = app.spans_scenario(&col_id).unwrap().state();
         assert_eq!(st.cursor, 1);
         assert_eq!(st.focused_span_id.as_deref(), Some("b"));
     }
@@ -4190,16 +2950,13 @@ mod tests {
         let mut app = one_spans_column_app();
         let col_id = app.workspace.columns[0].id.clone();
         {
-            let s = app
-                .spans_state
-                .entry(col_id.clone())
-                .or_insert_with(SpansState::new);
+            let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
             s.search_active = true;
             s.search.set_text("hello");
             s.last_search_emitted = "hello".to_string();
         }
         let _ = app.handle_key(press(KeyCode::Delete)).unwrap();
-        let s = app.spans_state.get(&col_id).unwrap();
+        let s = app.spans_scenario(&col_id).unwrap().state();
         assert!(!s.search_active, "Delete must exit search-input mode");
         assert_eq!(s.search.text(), "", "Delete must clear the query");
         assert_eq!(
@@ -4215,16 +2972,13 @@ mod tests {
         let mut app = one_spans_column_app();
         let col_id = app.workspace.columns[0].id.clone();
         {
-            let s = app
-                .spans_state
-                .entry(col_id.clone())
-                .or_insert_with(SpansState::new);
+            let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
             s.search_active = true;
             s.search.set_text("hello");
             s.last_search_emitted = "hello".to_string();
         }
         let _ = app.handle_key(press(KeyCode::Esc)).unwrap();
-        let s = app.spans_state.get(&col_id).unwrap();
+        let s = app.spans_scenario(&col_id).unwrap().state();
         assert!(!s.search_active, "Esc must exit search-input mode");
         assert_eq!(s.search.text(), "hello", "Esc must preserve the query");
     }
@@ -4251,10 +3005,7 @@ mod tests {
         // Seed the column state to mirror the active-search precondition.
         let col_id = app.workspace.columns[0].id.clone();
         {
-            let s = app
-                .spans_state
-                .entry(col_id.clone())
-                .or_insert_with(SpansState::new);
+            let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
             s.search.set_text("q");
             s.last_search_emitted = "q".to_string();
             // Park the cursor between the two hits (idx 1 = "b").
@@ -4263,17 +3014,17 @@ mod tests {
 
         // Enter advances to the next match after cursor=1 → c (idx 2).
         let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 2);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().cursor, 2);
 
         // Enter again wraps past d/e back to a (idx 0).
         let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 0);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().cursor, 0);
 
         // Shift+Enter goes prev — from a, wraps to c (idx 2).
         let _ = app
             .handle_key(key_mod(KeyCode::Enter, KeyModifiers::SHIFT))
             .unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 2);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().cursor, 2);
     }
 
     /// When the cursor is already on a hit, Enter must skip it (vim `n`
@@ -4293,16 +3044,13 @@ mod tests {
         seed_search(&app, "cid-1", "q", vec!["a", "c"]);
         let col_id = app.workspace.columns[0].id.clone();
         {
-            let s = app
-                .spans_state
-                .entry(col_id.clone())
-                .or_insert_with(SpansState::new);
+            let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
             s.search.set_text("q");
             s.cursor = 0; // already on hit "a"
         }
         let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
         assert_eq!(
-            app.spans_state.get(&col_id).unwrap().cursor,
+            app.spans_scenario(&col_id).unwrap().state().cursor,
             2,
             "Enter on a hit must skip current and advance to next hit",
         );
@@ -4327,14 +3075,11 @@ mod tests {
         seed_session_tree(&app, "cid-1", tree);
         let col_id = app.workspace.columns[0].id.clone();
         {
-            let s = app
-                .spans_state
-                .entry(col_id.clone())
-                .or_insert_with(SpansState::new);
+            let s = app.spans_scenario_mut(&col_id).unwrap().state_mut();
             s.cursor = 0;
         }
         let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
-        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 0);
+        assert_eq!(app.spans_scenario(&col_id).unwrap().state().cursor, 0);
     }
 
     /// LLR: `TUI Tool detail key-dispatch precedence within column` —
@@ -4384,13 +3129,11 @@ mod tests {
     fn precedence_q_during_active_spans_search_does_not_quit() {
         let mut app = one_spans_column_app();
         let col_id = app.workspace.columns[0].id.clone();
-        app.spans_state
-            .entry(col_id.clone())
-            .or_insert_with(SpansState::new)
+        app.spans_scenario_mut(&col_id).unwrap().state_mut()
             .search_active = true;
         let quit = app.handle_key(press(KeyCode::Char('q'))).unwrap();
         assert!(!quit, "q must not quit while search input has focus");
-        let s = app.spans_state.get(&col_id).unwrap();
+        let s = app.spans_scenario(&col_id).unwrap().state();
         assert!(s.search.text().contains('q'), "q must reach search input");
     }
 
@@ -4419,9 +3162,7 @@ mod tests {
         app.focus = Focus::Widget;
         app.context_widget.bar_cursor = Some(0);
         let col_id = app.workspace.columns[0].id.clone();
-        let col_cursor_before = app
-            .spans_state
-            .get(&col_id)
+        let col_cursor_before = app.spans_scenario(&col_id).map(|s| s.state())
             .map(|s| s.cursor)
             .unwrap_or(0);
         let _ = app.handle_key(press(KeyCode::Right)).unwrap();
@@ -4430,9 +3171,7 @@ mod tests {
             Some(1),
             "widget layer must consume Right before column"
         );
-        let col_cursor_after = app
-            .spans_state
-            .get(&col_id)
+        let col_cursor_after = app.spans_scenario(&col_id).map(|s| s.state())
             .map(|s| s.cursor)
             .unwrap_or(0);
         assert_eq!(

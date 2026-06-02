@@ -925,6 +925,9 @@ impl ChatDetailScenario {
 }
 
 impl crate::tui::scenarios::Scenario for ChatDetailScenario {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+
     fn draw(
         &mut self,
         ctx: &mut crate::tui::scenarios::Ctx<'_>,
