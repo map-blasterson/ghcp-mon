@@ -142,6 +142,63 @@ pub fn tool_description_label(args: &Value) -> Option<String> {
     Some(s.to_string())
 }
 
+/// Length cap for the chat row's inline content preview (chars, not
+/// bytes — Unicode-safe). Trailing `…` is appended when truncation
+/// happens so the row width budget is `CHAT_PREVIEW_LEN + 1`.
+pub const CHAT_PREVIEW_LEN: usize = 24;
+
+/// Inline content preview for a Chat-kind span row. Looks at the chat's
+/// captured messages and returns the first text it can show, normalised to
+/// a single line and truncated to [`CHAT_PREVIEW_LEN`] chars. Preference
+/// order: the assistant's reply (last text part across
+/// `gen_ai.output.messages`), then the most recent input message's text
+/// part (typically the user prompt). Returns `None` when nothing
+/// previewable exists (e.g. tool-call-only chats, no captured content).
+pub fn chat_text_preview(attrs: &Value) -> Option<String> {
+    use crate::tui::scenarios::chat_detail::messages::{
+        parse_input_messages, parse_output_messages, Part,
+    };
+
+    let pick_text = |msgs: &[crate::tui::scenarios::chat_detail::messages::Message]| -> Option<String> {
+        for m in msgs {
+            for p in &m.parts {
+                if let Part::Text { content, .. } = p {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let raw = pick_text(&parse_output_messages(attrs))
+        .or_else(|| {
+            // Fall back to the LAST input message — the freshest user
+            // prompt — rather than the first (which on a multi-turn
+            // session is the long stale system primer).
+            let mut msgs = parse_input_messages(attrs);
+            msgs.reverse();
+            pick_text(&msgs)
+        })?;
+
+    // Collapse all internal whitespace runs to single spaces — the row is
+    // one cell tall so any embedded newline would otherwise blow the
+    // budget and corrupt the layout downstream.
+    let single_line: String =
+        raw.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if single_line.is_empty() {
+        return None;
+    }
+    let truncated: String = single_line.chars().take(CHAT_PREVIEW_LEN).collect();
+    if single_line.chars().count() > CHAT_PREVIEW_LEN {
+        Some(format!("{truncated}…"))
+    } else {
+        Some(truncated)
+    }
+}
+
 /// Per `Spans target badge shows file basename or URL domain`.
 pub fn target_chips(kind: Option<ToolKind>, args: &Value) -> Vec<String> {
     if !args.is_object() || args.is_array() {
@@ -396,5 +453,74 @@ mod tests {
     fn diff_stat_other_kinds_zero() {
         assert_eq!(diff_stat(ToolKind::Read, &json!({})), (0, 0));
         assert_eq!(diff_stat(ToolKind::Shell, &json!({})), (0, 0));
+    }
+
+    #[test]
+    fn chat_text_preview_prefers_output_message_text() {
+        let attrs = json!({
+            "gen_ai.input.messages": [
+                {"role": "user", "parts": [{"type": "text", "content": "ask"}]}
+            ],
+            "gen_ai.output.messages": [
+                {"role": "assistant", "parts": [{"type": "text", "content": "Hello there"}]}
+            ],
+        });
+        assert_eq!(chat_text_preview(&attrs).as_deref(), Some("Hello there"));
+    }
+
+    #[test]
+    fn chat_text_preview_falls_back_to_last_input_when_no_output() {
+        let attrs = json!({
+            "gen_ai.input.messages": [
+                {"role": "system", "parts": [{"type": "text", "content": "stale primer"}]},
+                {"role": "user", "parts": [{"type": "text", "content": "fresh question"}]}
+            ],
+            "gen_ai.output.messages": [],
+        });
+        // Falls back to the LAST input message, not the first stale system primer.
+        assert_eq!(chat_text_preview(&attrs).as_deref(), Some("fresh question"));
+    }
+
+    #[test]
+    fn chat_text_preview_truncates_with_ellipsis() {
+        // 30 chars > CHAT_PREVIEW_LEN (24) → truncated + "…"
+        let long = "a".repeat(30);
+        let attrs = json!({
+            "gen_ai.output.messages": [
+                {"role": "assistant", "parts": [{"type": "text", "content": long}]}
+            ],
+        });
+        let p = chat_text_preview(&attrs).unwrap();
+        assert!(p.ends_with('…'));
+        assert_eq!(p.chars().count(), CHAT_PREVIEW_LEN + 1);
+    }
+
+    #[test]
+    fn chat_text_preview_collapses_internal_whitespace() {
+        let attrs = json!({
+            "gen_ai.output.messages": [
+                {"role": "assistant", "parts": [{"type": "text", "content": "  hi\n\n there\tworld  "}]}
+            ],
+        });
+        // No embedded newline / tab — the row is one cell tall.
+        assert_eq!(chat_text_preview(&attrs).as_deref(), Some("hi there world"));
+    }
+
+    #[test]
+    fn chat_text_preview_none_for_tool_call_only() {
+        let attrs = json!({
+            "gen_ai.output.messages": [
+                {"role": "assistant", "parts": [{"type": "tool_call", "id": "x", "name": "y"}]}
+            ],
+        });
+        assert!(chat_text_preview(&attrs).is_none());
+    }
+
+    #[test]
+    fn chat_text_preview_none_for_empty_attrs() {
+        assert!(chat_text_preview(&json!({})).is_none());
+        assert!(chat_text_preview(&json!({
+            "gen_ai.input.messages": [], "gen_ai.output.messages": []
+        })).is_none());
     }
 }

@@ -31,7 +31,14 @@ fn display_name(node: &SpanNode) -> String {
     // a noisy duplicate ("execute_tool bash", "gpt-4 - bash", "bash") that
     // the user already sees in the hash-coloured tool-name chip. Suppress
     // the name entirely on tool rows.
-    if node.is_tool_row() {
+    //
+    // Chat rows: same logic — the kind badge already says "chat" and the
+    // span name is almost always literally "chat" (or the model name,
+    // which is already shown elsewhere). The interesting per-row content
+    // is the message-text preview, passed in via the `description` slot.
+    if node.is_tool_row()
+        || matches!(node.kind_class, crate::tui::model::KindClass::Chat)
+    {
         return String::new();
     }
     node.name.clone()

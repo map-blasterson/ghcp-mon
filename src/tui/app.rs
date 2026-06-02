@@ -2393,6 +2393,21 @@ impl App {
         node: &crate::tui::model::SpanNode,
     ) -> (Vec<(String, Color)>, Option<String>) {
         let mut out: Vec<(String, Color)> = Vec::new();
+
+        // Chat rows: no chips, but surface the first ~20 chars of the
+        // chat's captured text in the description slot so the user can
+        // tell turns apart at a glance.
+        if matches!(node.kind_class, KindClass::Chat) {
+            let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id)
+            else {
+                return (out, None);
+            };
+            let Some(attrs_v) = &detail.span.attributes else {
+                return (out, None);
+            };
+            return (out, chips::chat_text_preview(attrs_v));
+        }
+
         if !node.is_tool_row() {
             return (out, None);
         }
@@ -3375,6 +3390,84 @@ mod tests {
         assert!(text.contains("DOTHETHING"), "missing intent in:\n{text}");
     }
 
+    /// Regression for bug "chat lines show redundant `[chat] chat`":
+    /// the kind badge already says `chat`; the row name is empty for
+    /// chat-kind spans. The freed space hosts the first ~20 chars of
+    /// the chat's captured text (assistant reply preferred, then most
+    /// recent input message).
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_row_suppresses_chat_name_and_shows_text_preview() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "chat-span",
+            KindClass::Chat,
+            None,
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+
+        // Manually seed the chat span detail (existing seed_span_detail
+        // hardcodes kind_class=ExecuteTool, which would mis-flag the
+        // node). We use the same FetchedRecord shape it uses.
+        let span = crate::tui::model::SpanFull {
+            span_pk: 1,
+            trace_id: "trace-1".into(),
+            span_id: "chat-span".into(),
+            parent_span_id: None,
+            name: "chat".into(),
+            kind: Some(1),
+            kind_class: KindClass::Chat,
+            start_unix_ns: Some(100),
+            end_unix_ns: Some(200),
+            duration_ns: Some(100),
+            status_message: None,
+            ingestion_state: "complete".into(),
+            scope_name: None,
+            scope_version: None,
+            attributes: Some(serde_json::json!({
+                "gen_ai.output.messages": [
+                    {"role": "assistant", "parts": [
+                        {"type": "text", "content": "Hello there friend"}
+                    ]}
+                ]
+            })),
+            resource: None,
+        };
+        let detail = SpanDetail {
+            span,
+            events: vec![],
+            parent: None,
+            children: vec![],
+            projection: SpanProjection::default(),
+        };
+        app.rt.cache.put(FetchedRecord {
+            key: crate::tui::cache::qkey(["span", "trace-1", "chat-span"]),
+            generation: 1,
+            value: serde_json::to_value(detail).unwrap(),
+            stale_after: std::time::Duration::from_secs(60),
+        });
+
+        let text = render_buf_text(&mut app, 120, 20);
+        // The kind badge prints "chat" exactly once on the chat row.
+        // After the fix the row name no longer adds a second redundant
+        // "chat" — i.e., we must NOT see "chat  chat" (badge + name)
+        // anywhere on the rendered surface. We allow the badge itself
+        // (`chat`) plus its trailing-space-padded ` chat ` form.
+        assert!(
+            !text.contains("chat  chat"),
+            "redundant 'chat' name printed alongside [chat] badge:\n{text}"
+        );
+        // And the preview text shows up.
+        assert!(
+            text.contains("Hello there friend"),
+            "chat preview missing in:\n{text}"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn follow_mode_advances_cursor_to_latest_tool_span_on_ws_envelope() {
         use serde_json::json;
@@ -3469,11 +3562,13 @@ mod tests {
         app.workspace.columns[0]
             .config
             .insert("session".into(), toml::Value::String("cid-1".into()));
-        // Use Chat-kind nodes so the row name renders (tool-kind names are
-        // now suppressed because chips carry the tool identity).
+        // Use InvokeAgent-kind nodes so the row name renders. ExecuteTool /
+        // ExternalTool names are suppressed because chips carry the tool
+        // identity; Chat names are also suppressed (the kind badge already
+        // says "chat" and the description slot holds the text preview).
         let tree = vec![
-            mk_span_node("hit-span", KindClass::Chat, None, 100, vec![]),
-            mk_span_node("miss-span", KindClass::Chat, None, 200, vec![]),
+            mk_span_node("hit-span", KindClass::InvokeAgent, None, 100, vec![]),
+            mk_span_node("miss-span", KindClass::InvokeAgent, None, 200, vec![]),
         ];
         seed_session_tree(&app, "cid-1", tree);
         let col_id = app.workspace.columns[0].id.clone();
