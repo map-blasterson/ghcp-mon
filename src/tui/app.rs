@@ -1662,9 +1662,81 @@ impl App {
 
     fn append_column(&mut self, scenario_type: ScenarioType) {
         self.workspace.add_column(scenario_type);
-        self.focus_column(self.workspace.columns.len() - 1);
+        let new_idx = self.workspace.columns.len() - 1;
+        Self::inherit_propagated_state(new_idx, &mut self.workspace.columns);
+        self.focus_column(new_idx);
         self.sync_scenarios_with_workspace();
         let _ = persist::save(&self.workspace);
+    }
+
+    /// Cross-column state that lives in `Column.config` — `session`,
+    /// `selected_*`, `search_query` — is only ever written by runtime
+    /// events (picking a session, picking a span, typing a search). A
+    /// column added *after* one of those events would otherwise miss the
+    /// already-broadcast value entirely; the user would have to re-pick
+    /// the session/span/search to refill it. Mirror each `propagate_*`
+    /// allow-list and copy any existing value into the new column's
+    /// config.
+    ///
+    /// Keep this in sync with:
+    /// * [`crate::tui::scenarios::live_sessions::propagate_session`]
+    /// * [`crate::tui::scenarios::spans::propagate_selection`]
+    /// * [`crate::tui::scenarios::spans::propagate_search`]
+    fn inherit_propagated_state(
+        new_idx: usize,
+        columns: &mut [crate::tui::workspace::Column],
+    ) {
+        if new_idx >= columns.len() {
+            return;
+        }
+        let new_type = columns[new_idx].scenario_type;
+
+        // First-non-empty lookup for a given config key across all OTHER
+        // columns. Returns the cloned value (toml::Value is small / Arc'd
+        // internally for strings — clone is cheap).
+        let pick = |key: &str, columns: &[crate::tui::workspace::Column]| -> Option<toml::Value> {
+            columns
+                .iter()
+                .enumerate()
+                .find_map(|(i, c)| {
+                    if i == new_idx {
+                        None
+                    } else {
+                        c.config.get(key).cloned()
+                    }
+                })
+        };
+
+        // `session` — propagation set: Spans | ChatDetail | FileTouches.
+        if matches!(
+            new_type,
+            ScenarioType::Spans | ScenarioType::ChatDetail | ScenarioType::FileTouches
+        ) {
+            if let Some(v) = pick("session", columns) {
+                columns[new_idx].config.insert("session".into(), v);
+            }
+        }
+
+        // `selected_*` — propagation set for the generic allow-list path
+        // in propagate_selection: Spans | ToolDetail. ChatDetail also
+        // receives these via its own routing, so include it too.
+        if matches!(
+            new_type,
+            ScenarioType::Spans | ScenarioType::ToolDetail | ScenarioType::ChatDetail
+        ) {
+            for key in ["selected_trace_id", "selected_span_id", "selected_tool_call_id"] {
+                if let Some(v) = pick(key, columns) {
+                    columns[new_idx].config.insert(key.into(), v);
+                }
+            }
+        }
+
+        // `search_query` — propagation set: ChatDetail | ToolDetail.
+        if matches!(new_type, ScenarioType::ChatDetail | ScenarioType::ToolDetail) {
+            if let Some(v) = pick("search_query", columns) {
+                columns[new_idx].config.insert("search_query".into(), v);
+            }
+        }
     }
 
     fn move_focused_column(&mut self, delta: i32) {
@@ -2677,6 +2749,78 @@ mod tests {
         assert_eq!(app.workspace.columns.len(), 1);
         assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::LiveSessions);
         assert_eq!(app.focus.column_idx(), Some(0));
+    }
+
+    /// Regression for bug "FileTouches opens empty until session is
+    /// re-selected": columns added AFTER session propagation already ran
+    /// must inherit the active `session` from any sibling column whose
+    /// type also participates in session propagation.
+    #[test]
+    fn append_column_inherits_active_session_and_selection() {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.focus = Focus::None;
+        app.last_focused_column = None;
+
+        // Simulate "session already picked": an existing Spans column
+        // carries the active session + selection + search.
+        app.append_column(ScenarioType::Spans);
+        let spans_idx = 0;
+        app.workspace.columns[spans_idx]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        app.workspace.columns[spans_idx]
+            .config
+            .insert("selected_trace_id".into(), toml::Value::String("trace-x".into()));
+        app.workspace.columns[spans_idx]
+            .config
+            .insert("selected_span_id".into(), toml::Value::String("span-x".into()));
+        app.workspace.columns[spans_idx]
+            .config
+            .insert("search_query".into(), toml::Value::String("foo".into()));
+
+        // Append a FileTouches column. It must inherit `session`.
+        app.append_column(ScenarioType::FileTouches);
+        let ft = &app.workspace.columns[1];
+        assert_eq!(ft.scenario_type, ScenarioType::FileTouches);
+        assert_eq!(ft.config.get("session").and_then(|v| v.as_str()), Some("cid-1"));
+
+        // Append a ChatDetail column. It must inherit `session`,
+        // `selected_*`, and `search_query`.
+        app.append_column(ScenarioType::ChatDetail);
+        let cd = &app.workspace.columns[2];
+        assert_eq!(cd.scenario_type, ScenarioType::ChatDetail);
+        assert_eq!(cd.config.get("session").and_then(|v| v.as_str()), Some("cid-1"));
+        assert_eq!(
+            cd.config.get("selected_trace_id").and_then(|v| v.as_str()),
+            Some("trace-x")
+        );
+        assert_eq!(
+            cd.config.get("selected_span_id").and_then(|v| v.as_str()),
+            Some("span-x")
+        );
+        assert_eq!(cd.config.get("search_query").and_then(|v| v.as_str()), Some("foo"));
+
+        // Append a ToolDetail column. Inherits `selected_*` + `search_query`
+        // but NOT `session` (not in its propagation set).
+        app.append_column(ScenarioType::ToolDetail);
+        let td = &app.workspace.columns[3];
+        assert_eq!(td.scenario_type, ScenarioType::ToolDetail);
+        assert!(td.config.get("session").is_none(), "ToolDetail must not inherit session");
+        assert_eq!(
+            td.config.get("selected_trace_id").and_then(|v| v.as_str()),
+            Some("trace-x")
+        );
+        assert_eq!(td.config.get("search_query").and_then(|v| v.as_str()), Some("foo"));
+
+        // Append a LiveSessions column. Inherits nothing — not in any
+        // propagation set.
+        app.append_column(ScenarioType::LiveSessions);
+        let ls = &app.workspace.columns[4];
+        assert_eq!(ls.scenario_type, ScenarioType::LiveSessions);
+        assert!(ls.config.get("session").is_none());
+        assert!(ls.config.get("selected_trace_id").is_none());
+        assert!(ls.config.get("search_query").is_none());
     }
 
     #[test]
