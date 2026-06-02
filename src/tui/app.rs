@@ -79,6 +79,15 @@ impl Focus {
     }
 }
 
+/// Per-layer key-dispatch outcome (Phase 10 KeyRouter). `Pass` means the
+/// layer didn't claim the key and the next layer should try; `Consumed`
+/// means the key is handled and dispatch stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dispatch {
+    Pass,
+    Consumed,
+}
+
 /// Top-level app state.
 pub struct App {
     pub workspace: Workspace,
@@ -260,7 +269,82 @@ impl App {
     }
 
     fn handle_key(&mut self, k: crossterm::event::KeyEvent) -> Result<bool> {
-        // Precedence layer 2: log overlay (modal).
+        // Single ordered walk through the precedence layers declared by the
+        // `TUI key-dispatch precedence text-input > modal > widget > column > global`
+        // LLR. Each layer returns `Dispatch::Consumed` (stop) or
+        // `Dispatch::Pass` (try the next layer). Quitting is only ever
+        // signalled by the global layer.
+        use Dispatch::*;
+        if let Consumed = self.layer_text_input(k) {
+            return Ok(false);
+        }
+        if let Consumed = self.layer_modal(k) {
+            return Ok(false);
+        }
+        if let Consumed = self.layer_widget(k) {
+            return Ok(false);
+        }
+        if let Consumed = self.layer_column(k) {
+            return Ok(false);
+        }
+        self.layer_global(k)
+    }
+
+    /// Layer 1 — text-input mode. Currently the only text-input target is
+    /// the Spans column's search box (`/`-activated). Per
+    /// `TUI Spans search input edit semantics`: printable characters and
+    /// arrows go to the input verbatim; `Esc` exits to column-focused mode.
+    fn layer_text_input(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
+        let Some(i) = self.focus.column_idx() else {
+            return Dispatch::Pass;
+        };
+        let col_id = self.workspace.columns[i].id.clone();
+        if self.workspace.columns[i].scenario_type != ScenarioType::Spans {
+            return Dispatch::Pass;
+        }
+        let active = self
+            .spans_state
+            .get(&col_id)
+            .map(|s| s.search_active)
+            .unwrap_or(false);
+        if !active {
+            return Dispatch::Pass;
+        }
+        // Esc exits search-input mode (does not propagate further).
+        if matches!(k.code, KeyCode::Esc) {
+            if let Some(s) = self.spans_state.get_mut(&col_id) {
+                s.search_active = false;
+            }
+            return Dispatch::Consumed;
+        }
+        let mut emitted: Option<String> = None;
+        if let Some(s) = self.spans_state.get_mut(&col_id) {
+            if s.search.handle_key(k) {
+                if s.search.take_changed() {
+                    let t = s.search.text().to_string();
+                    if t != s.last_search_emitted {
+                        s.last_search_emitted = t.clone();
+                        emitted = Some(t);
+                    }
+                }
+                if let Some(query) = emitted {
+                    propagate_search(&mut self.workspace.columns, &query);
+                    let _ = persist::save(&self.workspace);
+                    self.kick_search_debounce(&col_id, query);
+                }
+                return Dispatch::Consumed;
+            }
+        }
+        Dispatch::Pass
+    }
+
+    /// Layer 2 — modal overlays: the `?` log overlay, the confirm-delete
+    /// modal, and column-scoped popovers (Spans `s` / `k`). Per the
+    /// `Key-Dispatch Policy` HLR: "debug overlay (?), confirm dialogs,
+    /// etc. consume matching keys." Non-matching keys are swallowed by the
+    /// modal (no fall-through) to avoid e.g. `q` quitting while a delete
+    /// confirmation is open.
+    fn layer_modal(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
         if self.log_overlay_visible {
             match k.code {
                 KeyCode::Char('?') | KeyCode::Esc => {
@@ -268,10 +352,8 @@ impl App {
                 }
                 _ => {}
             }
-            return Ok(false);
+            return Dispatch::Consumed;
         }
-
-        // Precedence layer 2: confirm modal.
         if self.confirm_modal.open {
             if let Some(confirmed) = self.confirm_modal.handle_key(k) {
                 if confirmed {
@@ -282,10 +364,8 @@ impl App {
                     self.pending_delete = None;
                 }
             }
-            return Ok(false);
+            return Dispatch::Consumed;
         }
-
-        // Precedence layer 2 (continued): Spans popover (session / kind).
         if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
             let popover = self
@@ -294,84 +374,56 @@ impl App {
                 .and_then(|s| s.popover);
             if let Some(pk) = popover {
                 if self.handle_spans_popover_key(i, &col_id, pk, k) {
-                    return Ok(false);
+                    return Dispatch::Consumed;
                 }
             }
         }
+        Dispatch::Pass
+    }
 
-        // Precedence layer 1: text-input mode (Spans column search).
-        if let Some(i) = self.focus.column_idx() {
-            let col_id = self.workspace.columns[i].id.clone();
-            let st = self.workspace.columns[i].scenario_type;
-            if st == ScenarioType::Spans {
-                let active = self
-                    .spans_state
-                    .get(&col_id)
-                    .map(|s| s.search_active)
-                    .unwrap_or(false);
-                if active {
-                    // Esc exits search-input mode.
-                    if matches!(k.code, KeyCode::Esc) {
-                        if let Some(s) = self.spans_state.get_mut(&col_id) {
-                            s.search_active = false;
-                        }
-                        return Ok(false);
-                    }
-                    let mut emitted: Option<String> = None;
-                    if let Some(s) = self.spans_state.get_mut(&col_id) {
-                        if s.search.handle_key(k) {
-                            if s.search.take_changed() {
-                                let t = s.search.text().to_string();
-                                if t != s.last_search_emitted {
-                                    s.last_search_emitted = t.clone();
-                                    emitted = Some(t);
-                                }
-                            }
-                            if let Some(query) = emitted {
-                                propagate_search(&mut self.workspace.columns, &query);
-                                let _ = persist::save(&self.workspace);
-                                // Server-side search with 300 ms debounce.
-                                self.kick_search_debounce(&col_id, query);
-                            }
-                            return Ok(false);
-                        }
-                    }
-                }
-            }
+    /// Layer 3 — widget-local (Context Growth Widget focused). Per
+    /// `TUI Context widget keyboard bar cursor navigation` +
+    /// `TUI Context widget participates in Tab focus cycle`.
+    fn layer_widget(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
+        if !self.focus.is_widget() {
+            return Dispatch::Pass;
         }
-
-        // Precedence layer 3: widget-local (Context Growth Widget focused).
-        if self.focus.is_widget() {
-            match k.code {
-                KeyCode::Left => {
-                    self.widget_move_cursor(-1);
-                    return Ok(false);
-                }
-                KeyCode::Right => {
-                    self.widget_move_cursor(1);
-                    return Ok(false);
-                }
-                KeyCode::Enter => {
-                    self.widget_select_current();
-                    return Ok(false);
-                }
-                KeyCode::Esc => {
-                    self.release_widget();
-                    return Ok(false);
-                }
-                // Any other key falls through to the global layer.
-                _ => {}
+        match k.code {
+            KeyCode::Left => {
+                self.widget_move_cursor(-1);
+                Dispatch::Consumed
             }
-        }
-
-        // Precedence layer 4: column scenario keys.
-        if let Some(i) = self.focus.column_idx() {
-            if self.scenario_handle_key(i, k) {
-                return Ok(false);
+            KeyCode::Right => {
+                self.widget_move_cursor(1);
+                Dispatch::Consumed
             }
+            KeyCode::Enter => {
+                self.widget_select_current();
+                Dispatch::Consumed
+            }
+            KeyCode::Esc => {
+                self.release_widget();
+                Dispatch::Consumed
+            }
+            // Any other key falls through to the global layer.
+            _ => Dispatch::Pass,
         }
+    }
 
-        // Precedence layer 5: global / workspace.
+    /// Layer 4 — focused column's scenario handler.
+    fn layer_column(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
+        let Some(i) = self.focus.column_idx() else {
+            return Dispatch::Pass;
+        };
+        if self.scenario_handle_key(i, k) {
+            Dispatch::Consumed
+        } else {
+            Dispatch::Pass
+        }
+    }
+
+    /// Layer 5 — global / workspace bindings. Returns `Ok(true)` to quit.
+    fn layer_global(&mut self, k: crossterm::event::KeyEvent) -> Result<bool> {
         match (k.code, k.modifiers) {
             (KeyCode::Char('q'), m) if !m.contains(KeyModifiers::SHIFT) => {
                 return Ok(true);
@@ -379,13 +431,13 @@ impl App {
             (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return Ok(true);
             }
-            // Phase 2: `c` toggles the Context Growth Widget visibility.
+            // `c` toggles the Context Growth Widget visibility.
             (KeyCode::Char('c'), m)
                 if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
             {
                 self.toggle_context_widget();
             }
-            // Phase 2: Alt+↑/↓ resize widget by 1 row; +Shift by 5 rows.
+            // Alt+↑/↓ resize widget by 1 row; +Shift by 5 rows.
             (KeyCode::Up, m) if m.contains(KeyModifiers::ALT) => {
                 let step = if m.contains(KeyModifiers::SHIFT) { 5 } else { 1 };
                 self.adjust_widget_height(step);
