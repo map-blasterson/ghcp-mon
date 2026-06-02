@@ -61,9 +61,6 @@ enum Cmd {
         /// Server base URL. Trailing `/` is stripped. Only http/https accepted.
         #[arg(long, default_value = "http://127.0.0.1:4319")]
         server: String,
-        /// Enable crossterm mouse capture at startup. Toggle at runtime with `M`.
-        #[arg(long)]
-        mouse: bool,
     },
 }
 
@@ -171,9 +168,9 @@ async fn main() -> anyhow::Result<()> {
             };
             let _ = count;
         }
-        Cmd::Attach { server, mouse } => {
+        Cmd::Attach { server } => {
             let log_buffer = log_buffer_opt.expect("log buffer initialized for Attach");
-            tui::run(&server, mouse, log_buffer).await?;
+            tui::run(&server, log_buffer).await?;
         }
     }
     Ok(())

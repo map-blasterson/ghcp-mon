@@ -23,12 +23,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, EventStream, KeyCode, KeyEventKind, KeyModifiers,
+    EventStream, KeyCode, KeyEventKind, KeyModifiers,
 };
-use ratatui::crossterm::execute;
 use serde_json::Value;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::tui::api::ApiClient;
 use crate::tui::cache::{
@@ -141,7 +140,6 @@ pub struct App {
     pub last_focused_column: Option<usize>,
     pub log_overlay_visible: bool,
     pub keymap_overlay_visible: bool,
-    pub mouse_enabled: bool,
     pub app_popover: Option<AppPopover>,
     pub add_column_picker: SelectState,
     pub status: WsStatus,
@@ -171,7 +169,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(api: ApiClient, ws: WsBus, log_buffer: LogBuffer, mouse_enabled: bool) -> Self {
+    pub fn new(api: ApiClient, ws: WsBus, log_buffer: LogBuffer) -> Self {
         let workspace = persist::load();
         let focus = if workspace.columns.is_empty() {
             Focus::None
@@ -193,7 +191,6 @@ impl App {
             last_focused_column,
             log_overlay_visible: false,
             keymap_overlay_visible: false,
-            mouse_enabled,
             app_popover: None,
             add_column_picker: SelectState::default(),
             scenarios: HashMap::new(),
@@ -724,9 +721,6 @@ impl App {
             (KeyCode::Char('~'), _) => {
                 self.log_overlay_visible = !self.log_overlay_visible;
             }
-            (KeyCode::Char('M'), _) => {
-                self.toggle_mouse();
-            }
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
             (KeyCode::Char('a'), _) => self.open_add_column_popover(),
@@ -776,7 +770,6 @@ impl App {
             Self::keymap_entry("Tab / Shift-Tab", "cycle focus"),
             Self::keymap_entry("c", "toggle Context Growth Widget"),
             Self::keymap_entry("Alt+↑ / Alt+↓", "resize Context Growth Widget"),
-            Self::keymap_entry("M", "toggle mouse capture"),
             Self::keymap_entry("?", "toggle keymap overlay"),
             Self::keymap_entry("~", "toggle log overlay"),
             Self::keymap_entry("q", "quit"),
@@ -1239,17 +1232,6 @@ impl App {
         let _ = persist::save(&self.workspace);
     }
 
-    fn toggle_mouse(&mut self) {
-        self.mouse_enabled = !self.mouse_enabled;
-        let mut out = std::io::stdout();
-        if self.mouse_enabled {
-            let _ = execute!(out, EnableMouseCapture);
-        } else {
-            let _ = execute!(out, DisableMouseCapture);
-        }
-        info!(enabled = self.mouse_enabled, "mouse capture toggled");
-    }
-
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) -> DrawOutcome {
         // span_detail_memo is generation-keyed; it self-invalidates on
         // cache changes, so we no longer clear it per frame.
@@ -1332,8 +1314,7 @@ impl App {
         frame.render_widget(status, dot_area);
 
         let hints = format!(
-            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
-            mouse = if self.mouse_enabled { "on" } else { "off" },
+            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Tab:focus │ ?:logs │ q:quit",
         );
         let p = Paragraph::new(Span::styled(hints, Style::default().fg(Color::White)));
         let rest = Rect::new(area.x + 2, area.y, area.width - 2, 1);
@@ -1623,7 +1604,7 @@ mod tests {
     fn make_app() -> App {
         let api = ApiClient::new("http://127.0.0.1:4319".into());
         let ws = WsBus::new("ws://127.0.0.1:4319/ws/events".into());
-        let mut app = App::new(api, ws, LogBuffer::new(), false);
+        let mut app = App::new(api, ws, LogBuffer::new());
         // The Context Growth Widget defaults to visible in production; hide it
         // in the shared test harness so workspace-rendering tests are not
         // squeezed by the bottom strip. Widget tests re-enable it explicitly.

@@ -1,4 +1,4 @@
-//! TUI subcommand entry point. `pub async fn run(server, mouse)` is invoked
+//! TUI subcommand entry point. `pub async fn run(server)` is invoked
 //! by `main.rs` after the tracing subscriber is installed.
 //!
 //! Submodules:
@@ -15,8 +15,6 @@
 //! - [`ws`] — WebSocket bus singleton.
 
 use anyhow::Result;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use ratatui::crossterm::execute;
 
 pub mod api;
 pub mod app;
@@ -33,7 +31,7 @@ pub mod ws;
 pub use widgets::log_overlay::LogBuffer;
 
 /// TUI entry point. Reachable from `main.rs` under the `Attach` subcommand.
-pub async fn run(server: &str, mouse: bool, log_buffer: LogBuffer) -> Result<()> {
+pub async fn run(server: &str, log_buffer: LogBuffer) -> Result<()> {
     let (rest_base, ws_url) = ws::normalize_server(server)?;
     tracing::info!(rest_base = %rest_base, ws_url = %ws_url, "tui starting");
 
@@ -49,11 +47,8 @@ pub async fn run(server: &str, mouse: bool, log_buffer: LogBuffer) -> Result<()>
     }));
 
     let mut terminal = ratatui::try_init()?;
-    if mouse {
-        let _ = execute!(std::io::stdout(), EnableMouseCapture);
-    }
 
-    let mut app = app::App::new(api, ws.clone(), log_buffer, mouse);
+    let mut app = app::App::new(api, ws.clone(), log_buffer);
     if let Ok(sz) = terminal.size() {
         app.term_size = (sz.width, sz.height);
     }
@@ -61,9 +56,6 @@ pub async fn run(server: &str, mouse: bool, log_buffer: LogBuffer) -> Result<()>
     let result = app::event_loop(&mut terminal, &mut app).await;
 
     // Clean teardown.
-    if app.mouse_enabled {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    }
     ratatui::restore();
 
     // Persist on exit.
