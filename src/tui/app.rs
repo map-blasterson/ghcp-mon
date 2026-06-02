@@ -43,6 +43,7 @@ use crate::tui::widgets::context_growth::{
 };
 use crate::tui::widgets::kind_badge::kind_label;
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
+use crate::tui::widgets::select::{SelectPopover, SelectState};
 use crate::tui::widgets::spans_tree_row::SpansTreeRow;
 use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
@@ -87,6 +88,12 @@ pub enum Dispatch {
     Consumed,
 }
 
+/// App-level modal popovers that are not scoped to a scenario column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPopover {
+    AddColumn,
+}
+
 /// Long-lived platform handles owned by the App. The "runtime" layer:
 /// outbound IO (REST `api`, WS bus, log buffer) plus the shared in-process
 /// caches that scenarios read through. Mostly read-only from scenario
@@ -119,7 +126,8 @@ pub struct App {
     pub last_focused_column: Option<usize>,
     pub log_overlay_visible: bool,
     pub mouse_enabled: bool,
-    pub add_column_cursor: usize,
+    pub app_popover: Option<AppPopover>,
+    pub add_column_picker: SelectState,
     pub status: WsStatus,
     pub last_ws_event: Option<String>,
     /// Per-column scenario state (keyed by column id).
@@ -171,7 +179,8 @@ impl App {
             last_focused_column,
             log_overlay_visible: false,
             mouse_enabled,
-            add_column_cursor: 0,
+            app_popover: None,
+            add_column_picker: SelectState::default(),
             last_ws_event: None,
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
@@ -355,8 +364,8 @@ impl App {
     }
 
     /// Layer 2 — modal overlays: the `?` log overlay, the confirm-delete
-    /// modal, and column-scoped popovers (Spans `s` / `k`). Per the
-    /// `Key-Dispatch Policy` HLR: "debug overlay (?), confirm dialogs,
+    /// modal, app-level popovers, and column-scoped popovers (Spans `s` / `k`).
+    /// Per the `Key-Dispatch Policy` HLR: "debug overlay (?), confirm dialogs,
     /// etc. consume matching keys." Non-matching keys are swallowed by the
     /// modal (no fall-through) to avoid e.g. `q` quitting while a delete
     /// confirmation is open.
@@ -382,6 +391,10 @@ impl App {
             }
             return Dispatch::Consumed;
         }
+        if let Some(popover) = self.app_popover {
+            self.handle_app_popover_key(popover, k);
+            return Dispatch::Consumed;
+        }
         if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
             let popover = self
@@ -395,6 +408,33 @@ impl App {
             }
         }
         Dispatch::Pass
+    }
+
+    /// App-level popover key dispatch. Non-matching keys are swallowed while
+    /// the popover is open.
+    fn handle_app_popover_key(
+        &mut self,
+        which: AppPopover,
+        k: crossterm::event::KeyEvent,
+    ) {
+        match which {
+            AppPopover::AddColumn => {
+                let max = ScenarioType::all().len();
+                match k.code {
+                    KeyCode::Esc => self.close_app_popover(),
+                    KeyCode::Up => self.add_column_picker.move_cursor(-1, max),
+                    KeyCode::Down => self.add_column_picker.move_cursor(1, max),
+                    KeyCode::Enter => {
+                        let cursor = self.add_column_picker.cursor;
+                        self.close_app_popover();
+                        if let Some(&scenario_type) = ScenarioType::all().get(cursor) {
+                            self.append_column(scenario_type);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Layer 3 — widget-local (Context Growth Widget focused). Per
@@ -470,7 +510,7 @@ impl App {
             }
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
-            (KeyCode::Char('a'), _) => self.append_column(),
+            (KeyCode::Char('a'), _) => self.open_add_column_popover(),
             (KeyCode::Char('x'), _) => self.remove_focused_column(),
             _ => {}
         }
@@ -1347,14 +1387,19 @@ impl App {
         }
     }
 
-    fn append_column(&mut self) {
-        let all = ScenarioType::all();
-        let st = all[self.add_column_cursor % all.len()];
-        self.add_column_cursor = (self.add_column_cursor + 1) % all.len();
-        self.workspace.add_column(st);
-        if matches!(self.focus, Focus::None) {
-            self.focus_column(self.workspace.columns.len() - 1);
-        }
+    fn open_add_column_popover(&mut self) {
+        self.add_column_picker.open(0);
+        self.app_popover = Some(AppPopover::AddColumn);
+    }
+
+    fn close_app_popover(&mut self) {
+        self.add_column_picker.close();
+        self.app_popover = None;
+    }
+
+    fn append_column(&mut self, scenario_type: ScenarioType) {
+        self.workspace.add_column(scenario_type);
+        self.focus_column(self.workspace.columns.len() - 1);
         let _ = persist::save(&self.workspace);
     }
 
@@ -1433,6 +1478,9 @@ impl App {
             };
             frame.render_widget(view, area);
         }
+        if self.app_popover.is_some() {
+            self.draw_app_popover(area, frame.buffer_mut());
+        }
     }
 
     /// Paint the Context Growth Widget strip (or its collapsed bar) at the
@@ -1472,10 +1520,8 @@ impl App {
         let title = status.title().to_string();
         frame.render_widget(status, dot_area);
 
-        let next_st = ScenarioType::all()[self.add_column_cursor];
         let hints = format!(
-            " ghcp-mon attach │ {title} │ a:add {add} │ x:rm │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
-            add = next_st.default_title(),
+            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
             mouse = if self.mouse_enabled { "on" } else { "off" },
         );
         let p = Paragraph::new(Span::styled(hints, Style::default().fg(Color::White)));
@@ -2288,13 +2334,37 @@ impl App {
         out
     }
 
+    fn scenario_type_options() -> Vec<String> {
+        ScenarioType::all()
+            .iter()
+            .map(|st| st.default_title().to_string())
+            .collect()
+    }
+
+    /// App-level popover overlay for global workspace actions.
+    fn draw_app_popover(&mut self, area: Rect, buf: &mut Buffer) {
+        let Some(popover) = self.app_popover else {
+            return;
+        };
+        match popover {
+            AppPopover::AddColumn => {
+                let options = Self::scenario_type_options();
+                SelectPopover {
+                    title: "Add column",
+                    options: &options,
+                    cursor: self.add_column_picker.cursor,
+                }
+                .render(area, buf);
+            }
+        }
+    }
+
     /// Popover overlay for the `s` (session) and `k` (kind) keys.
     fn draw_spans_popover(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
         let Some(st) = self.spans_state.get(col_id) else {
             return;
         };
         let Some(which) = st.popover else { return };
-        use crate::tui::widgets::select::SelectPopover;
         match which {
             SpansPopover::Session => {
                 let sessions = self.cached_sessions();
@@ -2399,18 +2469,40 @@ mod tests {
     }
 
     #[test]
-    fn append_column_cycles_scenario_types() {
+    fn append_column_focuses_appended_column() {
         let mut app = make_app();
         app.workspace.columns.clear();
         app.focus = Focus::None;
-        let n0 = app.workspace.columns.len();
-        app.append_column();
-        app.append_column();
-        assert_eq!(app.workspace.columns.len(), n0 + 2);
-        assert_ne!(
-            app.workspace.columns[n0].scenario_type,
-            app.workspace.columns[n0 + 1].scenario_type
-        );
+        app.last_focused_column = None;
+
+        app.append_column(ScenarioType::LiveSessions);
+
+        assert_eq!(app.workspace.columns.len(), 1);
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::LiveSessions);
+        assert_eq!(app.focus.column_idx(), Some(0));
+    }
+
+    #[test]
+    fn pressing_a_opens_add_column_popover_and_enter_adds_selected_scenario() {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.focus = Focus::None;
+        app.last_focused_column = None;
+
+        let _ = app.handle_key(press(KeyCode::Char('a'))).unwrap();
+        assert_eq!(app.app_popover, Some(AppPopover::AddColumn));
+        assert!(app.add_column_picker.open);
+        let text = render_buf_text(&mut app, 80, 12);
+        assert!(text.contains("Add column"), "popover not rendered:\n{text}");
+
+        let _ = app.handle_key(press(KeyCode::Down)).unwrap();
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.workspace.columns.len(), 1);
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::Spans);
+        assert_eq!(app.focus.column_idx(), Some(0));
+        assert_eq!(app.app_popover, None);
+        assert!(!app.add_column_picker.open);
     }
 
     #[test]
