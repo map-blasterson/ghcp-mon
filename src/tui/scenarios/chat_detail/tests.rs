@@ -720,3 +720,113 @@ fn decode_prim_id_round_trip() {
     let nid = NodeId::from("root/input");
     assert!(decode_prim_id(&nid).is_none());
 }
+
+#[test]
+fn search_query_auto_expands_matching_part_body_in_render() {
+    // When a search query has a match inside a Part::Text body, the part
+    // row must auto-open and the matched line must appear in the rendered
+    // buffer (without any user keystrokes).
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hello DEEPNEEDLE world"}]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    let mut state = ChatDetailState::default();
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 120, 20),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            Some("DEEPNEEDLE"),
+            None,
+            Some(&detail),
+            None,
+            true,
+        );
+    })
+    .unwrap();
+    let s = buf_to_string(term.backend().buffer());
+    assert!(
+        s.contains("DEEPNEEDLE"),
+        "search match must be visible after auto-expand, got:\n{s}",
+    );
+}
+
+#[test]
+fn clearing_search_restores_user_expand_state_for_both_nodes_and_prims() {
+    // Snapshot/restore lifecycle: a fresh search must NOT leak its auto-
+    // expansions back into the user's expansion state once the search
+    // clears.
+    let attrs = json!({
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"hello DEEPNEEDLE world"}]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs));
+    let mut state = ChatDetailState::default();
+    // Render once WITHOUT a search to capture baseline.
+    let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 120, 20),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            None,
+            None,
+            Some(&detail),
+            None,
+            true,
+        );
+    })
+    .unwrap();
+    let baseline_expanded = state.expanded.clone();
+    let baseline_prims = state.expanded_prims.clone();
+
+    // Render with a search → expansions accumulate.
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 120, 20),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            Some("DEEPNEEDLE"),
+            None,
+            Some(&detail),
+            None,
+            true,
+        );
+    })
+    .unwrap();
+    assert!(
+        state.expanded.len() > baseline_expanded.len(),
+        "search should add to expanded",
+    );
+
+    // Clear the search → expansions roll back to baseline.
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 120, 20),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            Some(""),
+            None,
+            Some(&detail),
+            None,
+            true,
+        );
+    })
+    .unwrap();
+    assert_eq!(
+        state.expanded, baseline_expanded,
+        "clearing search must restore the pre-search expanded set",
+    );
+    assert_eq!(
+        state.expanded_prims, baseline_prims,
+        "clearing search must restore the pre-search expanded_prims set",
+    );
+}

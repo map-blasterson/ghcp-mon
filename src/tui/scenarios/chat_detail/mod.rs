@@ -96,6 +96,11 @@ pub struct ChatDetailState {
     /// When non-empty, holds the `expanded` snapshot taken at the moment the
     /// active search began. Restored when search clears.
     pub search_expanded_snapshot: Option<HashSet<NodeId>>,
+    /// Parallel snapshot for `expanded_prims` — taken/restored on the same
+    /// search-lifecycle transitions as `search_expanded_snapshot`, so the
+    /// search-driven primitive auto-opens do not leak into user state once
+    /// the query clears.
+    pub search_expanded_prims_snapshot: Option<HashSet<(NodeId, usize)>>,
     /// Last column-level search query observed; drives snapshot lifecycle.
     pub last_search_query: String,
     /// Row cursor within the rendered body (0-based among visible rows).
@@ -246,13 +251,19 @@ fn render_full(
     if q_changed {
         match (state.last_search_query.is_empty(), q.is_empty()) {
             (true, false) => {
-                // Snapshot user state and apply search-expand.
+                // Snapshot user state and apply search-expand. Both the
+                // node-level and primitive-level snapshots are taken on
+                // the same transition so they restore atomically.
                 state.search_expanded_snapshot = Some(state.expanded.clone());
+                state.search_expanded_prims_snapshot = Some(state.expanded_prims.clone());
             }
             (false, true) => {
-                // Restore.
+                // Restore both.
                 if let Some(snap) = state.search_expanded_snapshot.take() {
                     state.expanded = snap;
+                }
+                if let Some(snap) = state.search_expanded_prims_snapshot.take() {
+                    state.expanded_prims = snap;
                 }
             }
             _ => {}
@@ -263,6 +274,10 @@ fn render_full(
         let add = search_expand::search_expanded(&tree, q, mode);
         for id in add {
             state.expanded.insert(id);
+        }
+        let add_prims = search_expand::search_expanded_prims(&tree, q);
+        for p in add_prims {
+            state.expanded_prims.insert(p);
         }
     }
 
