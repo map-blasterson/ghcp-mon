@@ -44,6 +44,7 @@ use crate::tui::widgets::context_growth::{
 use crate::tui::widgets::keymap_overlay::KeymapOverlay;
 use crate::tui::widgets::kind_badge::kind_label;
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
+use crate::tui::widgets::select::{SelectPopover, SelectState};
 use crate::tui::widgets::spans_tree_row::SpansTreeRow;
 use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
@@ -88,6 +89,12 @@ pub enum Dispatch {
     Consumed,
 }
 
+/// App-level modal popovers that are not scoped to a scenario column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPopover {
+    AddColumn,
+}
+
 /// Long-lived platform handles owned by the App. The "runtime" layer:
 /// outbound IO (REST `api`, WS bus, log buffer) plus the shared in-process
 /// caches that scenarios read through. Mostly read-only from scenario
@@ -121,7 +128,8 @@ pub struct App {
     pub log_overlay_visible: bool,
     pub keymap_overlay_visible: bool,
     pub mouse_enabled: bool,
-    pub add_column_cursor: usize,
+    pub app_popover: Option<AppPopover>,
+    pub add_column_picker: SelectState,
     pub status: WsStatus,
     pub last_ws_event: Option<String>,
     /// Per-column scenario state (keyed by column id).
@@ -174,7 +182,8 @@ impl App {
             log_overlay_visible: false,
             keymap_overlay_visible: false,
             mouse_enabled,
-            add_column_cursor: 0,
+            app_popover: None,
+            add_column_picker: SelectState::default(),
             last_ws_event: None,
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
@@ -358,10 +367,11 @@ impl App {
     }
 
     /// Layer 2 — modal overlays: the keymap overlay, log overlay, the
-    /// confirm-delete modal, and column-scoped popovers (Spans `s` / `k`). Per
-    /// the `Key-Dispatch Policy` HLR: modal overlays consume matching keys.
-    /// Non-matching keys are swallowed by the modal (no fall-through) to avoid
-    /// e.g. `q` quitting while a delete confirmation is open.
+    /// confirm-delete modal, app-level popovers, and column-scoped popovers
+    /// (Spans `s` / `k`). Per the `Key-Dispatch Policy` HLR: modal overlays
+    /// consume matching keys. Non-matching keys are swallowed by the modal
+    /// (no fall-through) to avoid e.g. `q` quitting while a delete
+    /// confirmation is open.
     fn layer_modal(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
         if self.keymap_overlay_visible {
             match k.code {
@@ -393,6 +403,10 @@ impl App {
             }
             return Dispatch::Consumed;
         }
+        if let Some(popover) = self.app_popover {
+            self.handle_app_popover_key(popover, k);
+            return Dispatch::Consumed;
+        }
         if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
             let popover = self
@@ -406,6 +420,33 @@ impl App {
             }
         }
         Dispatch::Pass
+    }
+
+    /// App-level popover key dispatch. Non-matching keys are swallowed while
+    /// the popover is open.
+    fn handle_app_popover_key(
+        &mut self,
+        which: AppPopover,
+        k: crossterm::event::KeyEvent,
+    ) {
+        match which {
+            AppPopover::AddColumn => {
+                let max = ScenarioType::all().len();
+                match k.code {
+                    KeyCode::Esc => self.close_app_popover(),
+                    KeyCode::Up => self.add_column_picker.move_cursor(-1, max),
+                    KeyCode::Down => self.add_column_picker.move_cursor(1, max),
+                    KeyCode::Enter => {
+                        let cursor = self.add_column_picker.cursor;
+                        self.close_app_popover();
+                        if let Some(&scenario_type) = ScenarioType::all().get(cursor) {
+                            self.append_column(scenario_type);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Layer 3 — widget-local (Context Growth Widget focused). Per
@@ -442,6 +483,22 @@ impl App {
         let Some(i) = self.focus.column_idx() else {
             return Dispatch::Pass;
         };
+        let shift_only = k.modifiers.contains(KeyModifiers::SHIFT)
+            && !k.modifiers.contains(KeyModifiers::ALT)
+            && !k.modifiers.contains(KeyModifiers::CONTROL);
+        if shift_only {
+            match k.code {
+                KeyCode::Left => {
+                    self.move_focused_column(-1);
+                    return Dispatch::Consumed;
+                }
+                KeyCode::Right => {
+                    self.move_focused_column(1);
+                    return Dispatch::Consumed;
+                }
+                _ => {}
+            }
+        }
         if self.scenario_handle_key(i, k) {
             Dispatch::Consumed
         } else {
@@ -484,7 +541,7 @@ impl App {
             }
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
-            (KeyCode::Char('a'), _) => self.append_column(),
+            (KeyCode::Char('a'), _) => self.open_add_column_popover(),
             (KeyCode::Char('x'), _) => self.remove_focused_column(),
             _ => {}
         }
@@ -1495,14 +1552,36 @@ impl App {
         }
     }
 
-    fn append_column(&mut self) {
-        let all = ScenarioType::all();
-        let st = all[self.add_column_cursor % all.len()];
-        self.add_column_cursor = (self.add_column_cursor + 1) % all.len();
-        self.workspace.add_column(st);
-        if matches!(self.focus, Focus::None) {
-            self.focus_column(self.workspace.columns.len() - 1);
+    fn open_add_column_popover(&mut self) {
+        self.add_column_picker.open(0);
+        self.app_popover = Some(AppPopover::AddColumn);
+    }
+
+    fn close_app_popover(&mut self) {
+        self.add_column_picker.close();
+        self.app_popover = None;
+    }
+
+    fn append_column(&mut self, scenario_type: ScenarioType) {
+        self.workspace.add_column(scenario_type);
+        self.focus_column(self.workspace.columns.len() - 1);
+        let _ = persist::save(&self.workspace);
+    }
+
+    fn move_focused_column(&mut self, delta: i32) {
+        let Some(from) = self.focus.column_idx() else {
+            return;
+        };
+        let n = self.workspace.columns.len();
+        if from >= n || n == 0 {
+            return;
         }
+        let to = ((from as i32) + delta).clamp(0, n as i32 - 1) as usize;
+        if to == from {
+            return;
+        }
+        self.workspace.move_column(from, delta);
+        self.focus_column(to);
         let _ = persist::save(&self.workspace);
     }
 
@@ -1585,6 +1664,9 @@ impl App {
             };
             frame.render_widget(view, area);
         }
+        if self.app_popover.is_some() {
+            self.draw_app_popover(area, frame.buffer_mut());
+        }
     }
 
     /// Paint the Context Growth Widget strip (or its collapsed bar) at the
@@ -1624,10 +1706,8 @@ impl App {
         let title = status.title().to_string();
         frame.render_widget(status, dot_area);
 
-        let next_st = ScenarioType::all()[self.add_column_cursor];
         let hints = format!(
-            " ghcp-mon attach │ {title} │ a:add {add} │ x:rm │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
-            add = next_st.default_title(),
+            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
             mouse = if self.mouse_enabled { "on" } else { "off" },
         );
         let p = Paragraph::new(Span::styled(hints, Style::default().fg(Color::White)));
@@ -2442,13 +2522,37 @@ impl App {
         out
     }
 
+    fn scenario_type_options() -> Vec<String> {
+        ScenarioType::all()
+            .iter()
+            .map(|st| st.default_title().to_string())
+            .collect()
+    }
+
+    /// App-level popover overlay for global workspace actions.
+    fn draw_app_popover(&mut self, area: Rect, buf: &mut Buffer) {
+        let Some(popover) = self.app_popover else {
+            return;
+        };
+        match popover {
+            AppPopover::AddColumn => {
+                let options = Self::scenario_type_options();
+                SelectPopover {
+                    title: "Add column",
+                    options: &options,
+                    cursor: self.add_column_picker.cursor,
+                }
+                .render(area, buf);
+            }
+        }
+    }
+
     /// Popover overlay for the `s` (session) and `k` (kind) keys.
     fn draw_spans_popover(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
         let Some(st) = self.spans_state.get(col_id) else {
             return;
         };
         let Some(which) = st.popover else { return };
-        use crate::tui::widgets::select::SelectPopover;
         match which {
             SpansPopover::Session => {
                 let sessions = self.cached_sessions();
@@ -2553,18 +2657,66 @@ mod tests {
     }
 
     #[test]
-    fn append_column_cycles_scenario_types() {
+    fn append_column_focuses_appended_column() {
         let mut app = make_app();
         app.workspace.columns.clear();
         app.focus = Focus::None;
-        let n0 = app.workspace.columns.len();
-        app.append_column();
-        app.append_column();
-        assert_eq!(app.workspace.columns.len(), n0 + 2);
-        assert_ne!(
-            app.workspace.columns[n0].scenario_type,
-            app.workspace.columns[n0 + 1].scenario_type
-        );
+        app.last_focused_column = None;
+
+        app.append_column(ScenarioType::LiveSessions);
+
+        assert_eq!(app.workspace.columns.len(), 1);
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::LiveSessions);
+        assert_eq!(app.focus.column_idx(), Some(0));
+    }
+
+    #[test]
+    fn pressing_a_opens_add_column_popover_and_enter_adds_selected_scenario() {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.focus = Focus::None;
+        app.last_focused_column = None;
+
+        let _ = app.handle_key(press(KeyCode::Char('a'))).unwrap();
+        assert_eq!(app.app_popover, Some(AppPopover::AddColumn));
+        assert!(app.add_column_picker.open);
+        let text = render_buf_text(&mut app, 80, 12);
+        assert!(text.contains("Add column"), "popover not rendered:\n{text}");
+
+        let _ = app.handle_key(press(KeyCode::Down)).unwrap();
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.workspace.columns.len(), 1);
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::Spans);
+        assert_eq!(app.focus.column_idx(), Some(0));
+        assert_eq!(app.app_popover, None);
+        assert!(!app.add_column_picker.open);
+    }
+
+    #[test]
+    fn shift_arrows_move_focused_column_and_focus_follows() {
+        let mut app = make_app();
+        app.workspace = Workspace::seeded_default();
+        app.workspace.context_widget_visible = false;
+        app.focus_column(2);
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Left, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[1].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(1));
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Left, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(0));
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Right, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[1].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(1));
     }
 
     #[test]
@@ -3542,10 +3694,17 @@ mod tests {
     // the refactor is free to fix them.
 
     fn press(code: KeyCode) -> crossterm::event::KeyEvent {
-        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        key_mod(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
         KeyEvent {
             code,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
