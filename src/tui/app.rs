@@ -431,42 +431,38 @@ impl App {
         k: crossterm::event::KeyEvent,
     ) -> bool {
         let sessions = self.cached_sessions();
-        let max = sessions.len();
         let state = self.live_sessions_state.entry(col_id.to_string()).or_default();
-        match k.code {
-            KeyCode::Down => {
-                state.move_cursor(1, max);
-                true
+        let (consumed, effects) = crate::tui::scenarios::live_sessions::handle_key(
+            k, state, &sessions, col_idx,
+        );
+        self.apply_effects(effects);
+        consumed
+    }
+
+    /// Apply a batch of [`ScenarioEffect`]s emitted by a scenario handler.
+    /// Called after the per-scenario borrow ends, so each effect is free to
+    /// touch `&mut self.workspace`, the confirm modal, the hovered-chat
+    /// pubsub, etc.
+    fn apply_effects(&mut self, effects: Vec<crate::tui::scenarios::ScenarioEffect>) {
+        for e in effects {
+            self.apply_effect(e);
+        }
+    }
+
+    fn apply_effect(&mut self, e: crate::tui::scenarios::ScenarioEffect) {
+        use crate::tui::scenarios::ScenarioEffect;
+        match e {
+            ScenarioEffect::PropagateSession { origin_col_idx, cid } => {
+                propagate_session(&mut self.workspace.columns, &cid, origin_col_idx);
             }
-            KeyCode::Up => {
-                state.move_cursor(-1, max);
-                true
+            ScenarioEffect::ConfirmDeleteSession { cid } => {
+                let (title, prompt) = delete_prompt(&cid);
+                self.confirm_modal.open(title, prompt);
+                self.pending_delete = Some(cid);
             }
-            KeyCode::Home => {
-                state.jump_top();
-                true
+            ScenarioEffect::PersistWorkspace => {
+                let _ = persist::save(&self.workspace);
             }
-            KeyCode::End => {
-                state.jump_bottom(max);
-                true
-            }
-            KeyCode::Enter => {
-                if let Some(s) = sessions.get(state.cursor) {
-                    let cid = s.conversation_id.clone();
-                    propagate_session(&mut self.workspace.columns, &cid, col_idx);
-                    let _ = persist::save(&self.workspace);
-                }
-                true
-            }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                if let Some(s) = sessions.get(state.cursor) {
-                    let (title, prompt) = delete_prompt(&s.conversation_id);
-                    self.confirm_modal.open(title, prompt);
-                    self.pending_delete = Some(s.conversation_id.clone());
-                }
-                true
-            }
-            _ => false,
         }
     }
 

@@ -114,6 +114,61 @@ pub fn delete_prompt(cid: &str) -> (String, String) {
     )
 }
 
+/// Handle one key event in a Live Sessions column. Pure: takes the
+/// scenario state, the cached sessions list, and the originating column
+/// index; returns whether the key was consumed plus a list of
+/// [`crate::tui::scenarios::ScenarioEffect`]s for [`crate::tui::app::App`]
+/// to apply after the borrow ends.
+pub fn handle_key(
+    k: ratatui::crossterm::event::KeyEvent,
+    state: &mut LiveSessionsState,
+    sessions: &[SessionSummary],
+    origin_col_idx: usize,
+) -> (bool, Vec<crate::tui::scenarios::ScenarioEffect>) {
+    use crate::tui::scenarios::ScenarioEffect;
+    use ratatui::crossterm::event::KeyCode;
+    let max = sessions.len();
+    match k.code {
+        KeyCode::Down => {
+            state.move_cursor(1, max);
+            (true, vec![])
+        }
+        KeyCode::Up => {
+            state.move_cursor(-1, max);
+            (true, vec![])
+        }
+        KeyCode::Home => {
+            state.jump_top();
+            (true, vec![])
+        }
+        KeyCode::End => {
+            state.jump_bottom(max);
+            (true, vec![])
+        }
+        KeyCode::Enter => {
+            let mut effects = Vec::new();
+            if let Some(s) = sessions.get(state.cursor) {
+                effects.push(ScenarioEffect::PropagateSession {
+                    origin_col_idx,
+                    cid: s.conversation_id.clone(),
+                });
+                effects.push(ScenarioEffect::PersistWorkspace);
+            }
+            (true, effects)
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            let mut effects = Vec::new();
+            if let Some(s) = sessions.get(state.cursor) {
+                effects.push(ScenarioEffect::ConfirmDeleteSession {
+                    cid: s.conversation_id.clone(),
+                });
+            }
+            (true, effects)
+        }
+        _ => (false, vec![]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
