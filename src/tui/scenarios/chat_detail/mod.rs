@@ -75,6 +75,10 @@ pub const LONG_PRIM_THRESHOLD: usize = 200;
 /// Per-column chat-detail scenario state. Owned by [`crate::tui::app::App`].
 #[derive(Debug, Clone, Default)]
 pub struct ChatDetailState {
+    /// DELTA / FULL mode chip (toggled by `m`). Seeded from the column
+    /// config's `chat_mode` on first access; subsequent toggles do not
+    /// write back to config — that's existing behavior, not changed here.
+    pub mode: ChatMode,
     /// User+search expansion union actually rendered.
     pub expanded: HashSet<NodeId>,
     /// Toggled by `Space` on a primitive key row; keyed by (node, primitive
@@ -138,7 +142,6 @@ pub fn render(
     selection: Option<(&str, &str)>,
     search_query: Option<&str>,
     selected_tool_call_id: Option<&str>,
-    mode: ChatMode,
     detail: Option<&SpanDetail>,
     prior_chat_attrs: Option<&Value>,
     _focused: bool,
@@ -161,7 +164,6 @@ pub fn render(
                     state,
                     search_query,
                     selected_tool_call_id,
-                    mode,
                     d,
                     prior_chat_attrs,
                 );
@@ -182,17 +184,16 @@ fn empty_lines(text: &str) -> Vec<Line<'static>> {
 }
 
 /// Full render path for a chat-kind span.
-#[allow(clippy::too_many_arguments)]
 fn render_full(
     area: Rect,
     buf: &mut Buffer,
     state: &mut ChatDetailState,
     search_query: Option<&str>,
     selected_tool_call_id: Option<&str>,
-    mode: ChatMode,
     detail: &SpanDetail,
     prior_chat_attrs: Option<&Value>,
 ) {
+    let mode = state.mode;
     let cur_attrs = detail.span.attributes.clone().unwrap_or(Value::Null);
     let current = ChatContent::from_attrs(&cur_attrs);
 
@@ -727,11 +728,10 @@ fn color_for_node(node: &TreeNode) -> Color {
 pub fn handle_key(
     key: KeyEvent,
     state: &mut ChatDetailState,
-    mode: &mut ChatMode,
 ) -> bool {
     match (key.code, key.modifiers) {
         (KeyCode::Char('m'), m) if !m.contains(KeyModifiers::CONTROL) => {
-            *mode = mode.toggled();
+            state.mode = state.mode.toggled();
             true
         }
         (KeyCode::Up, _) => {

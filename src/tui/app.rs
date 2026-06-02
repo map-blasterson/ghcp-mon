@@ -77,11 +77,6 @@ pub struct App {
     pub tool_detail_state: RefCell<HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>>,
     /// Per-column chat-detail scenario state.
     pub chat_detail_state: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>>,
-    /// Per-column chat-detail mode (DELTA / FULL). RefCell because `m` toggles
-    /// it from `draw` indirectly (through the rendered state map) but the
-    /// authoritative value lives here so `handle_key` can mutate it before
-    /// the next draw.
-    pub chat_detail_mode: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::tree::ChatMode>>,
     /// Per-column file-touches scenario state.
     pub file_touches_state: RefCell<HashMap<String, crate::tui::scenarios::file_touches::FileTouchesState>>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
@@ -124,7 +119,6 @@ impl App {
             spans_state: HashMap::new(),
             tool_detail_state: RefCell::new(HashMap::new()),
             chat_detail_state: RefCell::new(HashMap::new()),
-            chat_detail_mode: RefCell::new(HashMap::new()),
             file_touches_state: RefCell::new(HashMap::new()),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
@@ -364,7 +358,7 @@ impl App {
             ScenarioType::LiveSessions => self.live_sessions_key(col_idx, &col_id, k),
             ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
             ScenarioType::ToolDetail => self.tool_detail_key(&col_id, k),
-            ScenarioType::ChatDetail => self.chat_detail_key(&col_id, k),
+            ScenarioType::ChatDetail => self.chat_detail_key(col_idx, &col_id, k),
             ScenarioType::FileTouches => self.file_touches_key(&col_id, k),
             _ => false,
         }
@@ -1509,66 +1503,41 @@ impl App {
         };
         let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
 
-        // Resolve mode from per-column override or from config.
+        // Seed state.mode from cfg's `chat_mode` on first access for this
+        // column. Subsequent `m` toggles mutate `state.mode` directly.
         let cfg_mode = cfg.get("chat_mode").and_then(|v| v.as_str());
-        let mut mode_map = self.chat_detail_mode.borrow_mut();
-        let mode = *mode_map
-            .entry(col_id.to_string())
-            .or_insert_with(|| ChatMode::from_config_str(cfg_mode));
+        let mut map = self.chat_detail_state.borrow_mut();
+        let state = map.entry(col_id.to_string()).or_insert_with(|| {
+            crate::tui::scenarios::chat_detail::ChatDetailState {
+                mode: ChatMode::from_config_str(cfg_mode),
+                ..Default::default()
+            }
+        });
 
         // DELTA prior-chat-span lookup walks the COMPLETE cached
         // `session-span-tree` (per the cache contract). Conversation id
         // comes from the current span's projection.
-        let prior_attrs: Option<Value> = match (&detail, mode) {
-            (Some(d), ChatMode::Delta) => {
-                let cid = d
-                    .projection
-                    .chat_turn
-                    .as_ref()
-                    .and_then(|c| c.conversation_id.clone());
-                let cid = match cid {
-                    Some(c) => c,
-                    None => return self.finish_chat_detail_render(
-                        area, buf, col_id, selection, search_query,
-                        selected_tool_call_id, mode, detail.as_ref(), None, focused,
-                    ),
-                };
-                let tree = self.cached_session_span_tree_by_cid(&cid);
-                let prior = tree.find_prior_chat(
-                    d.span.span_pk,
-                    d.span.end_unix_ns,
-                    d.span.start_unix_ns,
-                );
-                prior.and_then(|node| {
-                    self.cached_span_detail(&node.trace_id, &node.span_id)
-                        .and_then(|sd| sd.span.attributes)
-                })
-            }
+        let prior_attrs: Option<Value> = match (&detail, state.mode) {
+            (Some(d), ChatMode::Delta) => d
+                .projection
+                .chat_turn
+                .as_ref()
+                .and_then(|c| c.conversation_id.clone())
+                .and_then(|cid| {
+                    let tree = self.cached_session_span_tree_by_cid(&cid);
+                    tree.find_prior_chat(
+                        d.span.span_pk,
+                        d.span.end_unix_ns,
+                        d.span.start_unix_ns,
+                    )
+                    .and_then(|node| {
+                        self.cached_span_detail(&node.trace_id, &node.span_id)
+                            .and_then(|sd| sd.span.attributes)
+                    })
+                }),
             _ => None,
         };
 
-        self.finish_chat_detail_render(
-            area, buf, col_id, selection, search_query,
-            selected_tool_call_id, mode, detail.as_ref(), prior_attrs.as_ref(), focused,
-        );
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn finish_chat_detail_render(
-        &self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_id: &str,
-        selection: Option<(&str, &str)>,
-        search_query: Option<&str>,
-        selected_tool_call_id: Option<&str>,
-        mode: crate::tui::scenarios::chat_detail::tree::ChatMode,
-        detail: Option<&crate::tui::model::SpanDetail>,
-        prior_attrs: Option<&Value>,
-        focused: bool,
-    ) {
-        let mut map = self.chat_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::chat_detail::render(
             area,
             buf,
@@ -1576,22 +1545,37 @@ impl App {
             selection,
             search_query,
             selected_tool_call_id,
-            mode,
-            detail,
-            prior_attrs,
+            detail.as_ref(),
+            prior_attrs.as_ref(),
             focused,
         );
     }
 
-    /// Dispatch a key to a `ChatDetail` column.
-    fn chat_detail_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
+    /// Dispatch a key to a `ChatDetail` column. The mode lives on the
+    /// scenario state itself — the `m` key toggle reads and writes
+    /// `state.mode` inside [`crate::tui::scenarios::chat_detail::handle_key`].
+    fn chat_detail_key(
+        &mut self,
+        col_idx: usize,
+        col_id: &str,
+        k: crossterm::event::KeyEvent,
+    ) -> bool {
+        use crate::tui::scenarios::chat_detail::tree::ChatMode;
+        // Seed state.mode from cfg on first access so a key arriving before
+        // the first render still respects the column's `chat_mode` config.
+        let cfg_mode = self.workspace.columns[col_idx]
+            .config
+            .get("chat_mode")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let mut map = self.chat_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
-        let mut mode_map = self.chat_detail_mode.borrow_mut();
-        let mode_entry = mode_map.entry(col_id.to_string()).or_insert(
-            crate::tui::scenarios::chat_detail::tree::ChatMode::Delta,
-        );
-        crate::tui::scenarios::chat_detail::handle_key(k, state, mode_entry)
+        let state = map.entry(col_id.to_string()).or_insert_with(|| {
+            crate::tui::scenarios::chat_detail::ChatDetailState {
+                mode: ChatMode::from_config_str(cfg_mode.as_deref()),
+                ..Default::default()
+            }
+        });
+        crate::tui::scenarios::chat_detail::handle_key(k, state)
     }
 
     /// Render a `FileTouches` column. Resolves the configured session, walks

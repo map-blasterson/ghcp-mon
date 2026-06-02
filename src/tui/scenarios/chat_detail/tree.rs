@@ -57,6 +57,12 @@ pub enum ChatMode {
     Full,
 }
 
+impl Default for ChatMode {
+    fn default() -> Self {
+        ChatMode::Delta
+    }
+}
+
 impl ChatMode {
     pub fn from_config_str(s: Option<&str>) -> Self {
         match s {

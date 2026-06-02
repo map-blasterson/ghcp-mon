@@ -63,7 +63,6 @@ fn empty_state_for_non_chat_span() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Delta,
             Some(&detail),
             None,
             true,
@@ -86,7 +85,6 @@ fn empty_state_when_no_selection() {
             None,
             None,
             None,
-            ChatMode::Delta,
             None,
             None,
             true,
@@ -112,7 +110,6 @@ fn header_shows_delta_mode_chip_by_default() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Delta,
             Some(&detail),
             None,
             true,
@@ -125,7 +122,6 @@ fn header_shows_delta_mode_chip_by_default() {
 
 #[test]
 fn m_key_toggles_mode() {
-    let mut mode = ChatMode::Delta;
     let mut st = ChatDetailState::default();
     let consumed = handle_key(
         ratatui::crossterm::event::KeyEvent::new(
@@ -133,19 +129,17 @@ fn m_key_toggles_mode() {
             ratatui::crossterm::event::KeyModifiers::empty(),
         ),
         &mut st,
-        &mut mode,
     );
     assert!(consumed);
-    assert_eq!(mode, ChatMode::Full);
+    assert_eq!(st.mode, ChatMode::Full);
     handle_key(
         ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('m'),
             ratatui::crossterm::event::KeyModifiers::empty(),
         ),
         &mut st,
-        &mut mode,
     );
-    assert_eq!(mode, ChatMode::Delta);
+    assert_eq!(st.mode, ChatMode::Delta);
 }
 
 #[test]
@@ -171,7 +165,6 @@ fn renders_four_branch_root() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -203,7 +196,6 @@ fn no_content_state_renders_hint() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -236,7 +228,6 @@ fn summary_bar_paints_distinct_colors_for_visible_segments() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -275,7 +266,6 @@ fn tool_call_arrow_appears_at_target_message_row() {
             Some(("t", "s")),
             None,
             Some("call_X"),
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -305,7 +295,6 @@ fn delta_system_unchanged_meta_visible_in_render() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Delta,
             Some(&detail),
             Some(&prior_attrs),
             true,
@@ -337,7 +326,6 @@ fn delta_system_changed_meta_and_reversed_cells() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Delta,
             Some(&detail),
             Some(&prior_attrs),
             true,
@@ -377,7 +365,6 @@ fn search_query_auto_expands_to_match() {
             Some(("t", "s")),
             Some("needle"),
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -409,7 +396,6 @@ fn search_query_clear_restores_user_expansion() {
             Some(("t", "s")),
             None,
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -427,7 +413,6 @@ fn search_query_clear_restores_user_expansion() {
             Some(("t", "s")),
             Some("needle"),
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
@@ -445,7 +430,6 @@ fn search_query_clear_restores_user_expansion() {
             Some(("t", "s")),
             Some(""),
             None,
-            ChatMode::Full,
             Some(&detail),
             None,
             true,
