@@ -166,6 +166,18 @@ pub struct App {
     /// collapses N deserializes + N deep clones into one per span per
     /// frame.
     pub frame_span_detail: HashMap<(String, String), Rc<crate::tui::model::SpanDetail>>,
+    /// When true, the next [`event_loop`] iteration MUST call
+    /// `terminal.draw`. Set by every event handler that touches visible
+    /// state. Cleared in [`event_loop`] after each draw.
+    ///
+    /// Without this gate, the 16 ms animation tick caused 62 fps full
+    /// redraws even when nothing visible had changed — each one re-walked
+    /// the session span tree, re-built `file_touches`, re-computed chips,
+    /// and spawned SWR refetches for every stale span entry. With this
+    /// gate, Tick only sets dirty on the rolling-dots step boundary
+    /// (every 4th tick ≈ 16 fps) or when a tick-time mutation
+    /// (`tick_follow_mode_advance`, reveal drain) actually changed state.
+    pub dirty: bool,
 }
 
 impl App {
@@ -208,6 +220,7 @@ impl App {
             context_widget: ContextGrowthState::default(),
             term_size: (0, 0),
             frame_span_detail: HashMap::new(),
+            dirty: true,
         }
     }
 
@@ -249,13 +262,17 @@ impl App {
                 // Drain reveal queues on every tick (per
                 // `TUI Reveal schedule advances on every tick`).
                 let now_ms = self.now_ms();
+                let mut reveal_dirty = false;
                 for s in self.spans_state.values_mut() {
-                    let _ = s.reveal.drain_due(now_ms);
+                    let revealed = s.reveal.drain_due(now_ms);
+                    if !revealed.is_empty() {
+                        reveal_dirty = true;
+                    }
                 }
                 // Follow-mode auto-advance: for every Spans column whose
                 // follow_mode is on, recompute the latest tool span and
                 // jump the cursor + propagate selection if it differs.
-                self.tick_follow_mode_advance();
+                let follow_dirty = self.tick_follow_mode_advance();
                 // Phase 2: refresh the widget's row count for cursor
                 // clamping. (Widget Enter is routed synchronously via
                 // `widget_select_current`, not polled here.)
@@ -263,16 +280,27 @@ impl App {
                     .widget_merged_context()
                     .map(|(m, _, _)| m.rows.len() as u16)
                     .unwrap_or(0);
+                // Set dirty if (a) a rolling-dots step boundary fired —
+                // any visible placeholder dots animation needs to advance,
+                // or (b) any tick-time mutation actually changed state.
+                let step_boundary = self.anim_tick
+                    % crate::tui::widgets::rolling_dots::FRAMES_PER_STEP
+                    == 0;
+                if step_boundary || reveal_dirty || follow_dirty {
+                    self.dirty = true;
+                }
             }
             AppEvent::Crossterm(crossterm::event::Event::Key(k))
                 if k.kind == crossterm::event::KeyEventKind::Press =>
             {
+                self.dirty = true;
                 if self.handle_key(k)? {
                     return Ok(true);
                 }
             }
             AppEvent::Crossterm(crossterm::event::Event::Resize(w, h)) => {
                 self.term_size = (w, h);
+                self.dirty = true;
             }
             AppEvent::Crossterm(_) => {}
             AppEvent::WsTick {
@@ -294,8 +322,15 @@ impl App {
                     "ws tick processed"
                 );
                 self.status = self.rt.ws.status();
+                // Any envelope or invalidation potentially changes what
+                // the next render would display.
+                if !envelopes.is_empty() || !dirty_prefixes.is_empty() {
+                    self.dirty = true;
+                }
             }
-            AppEvent::QueryResult { .. } => {}
+            AppEvent::QueryResult { .. } => {
+                self.dirty = true;
+            }
         }
         Ok(false)
     }
@@ -1471,7 +1506,8 @@ impl App {
     }
 
     /// Follow-mode advance hook (per `Spans follows latest tool span`).
-    fn tick_follow_mode_advance(&mut self) {
+    /// Returns true if any column's cursor / selection was advanced.
+    fn tick_follow_mode_advance(&mut self) -> bool {
         let col_ids: Vec<(usize, String)> = self
             .workspace
             .columns
@@ -1480,6 +1516,7 @@ impl App {
             .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
             .map(|(i, c)| (i, c.id.clone()))
             .collect();
+        let mut changed = false;
         for (col_idx, col_id) in col_ids {
             let follow = self
                 .spans_state
@@ -1512,6 +1549,7 @@ impl App {
                     s.cursor = new_idx;
                     s.focused_span_id = Some(sid.clone());
                 }
+                changed = true;
                 // Propagate selection — same path as Enter (but without
                 // disengaging follow-mode).
                 let node = tree.find_by_id(&sid);
@@ -1543,6 +1581,7 @@ impl App {
                 }
             }
         }
+        changed
     }
 
     fn cycle_focus(&mut self, dir: i32) {
@@ -2643,7 +2682,15 @@ pub async fn event_loop(
         if quit {
             break;
         }
-        terminal.draw(|f| app.draw(f))?;
+        // Only redraw when something visible changed. The animation tick
+        // alone does NOT dirty the frame (only the 4-tick rolling-dots
+        // step boundary does, set in `App::handle` for `AppEvent::Tick`).
+        // Without this gate, 62 fps redraws thrashed CPU and re-walked
+        // the session span tree + re-built file_touches on every tick.
+        if app.dirty {
+            terminal.draw(|f| app.draw(f))?;
+            app.dirty = false;
+        }
     }
     Ok(())
 }
