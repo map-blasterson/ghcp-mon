@@ -15,6 +15,17 @@
 //! - `TUI Context widget collapsed bar layout`
 //! - `TUI Context widget keyboard bar cursor`
 //!
+//! Bars are rendered at 3× vertical resolution using the Symbols for
+//! Legacy Computing sextant block (Unicode 13.0 — well supported in
+//! modern terminals). Per cell we compute a fractional fill height
+//! `clamp(c4 - rr, 0, 1)` and round it to one of {0, 1, 2, 3} sub-rows
+//! out of 3. Cells fully inside the stack still render as `█` and
+//! preserve the existing center-rule segment color choice; partial top-
+//! of-stack cells render the appropriate sextant glyph in the topmost-
+//! present segment's color so tiny segments (<1 cell tall — common when
+//! `token_limit ≫ tokens`) become visible instead of being center-ruled
+//! away.
+//!
 //! The pure snapshot-merge logic lives in [`merge`]; this module is the
 //! renderer plus the small render-time geometry helpers shared with the
 //! `app` key handlers so bar indices line up between draw and input.
