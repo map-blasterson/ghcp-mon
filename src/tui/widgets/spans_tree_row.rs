@@ -67,9 +67,9 @@ pub struct SpansTreeRow<'a> {
     pub chips: &'a [(String, Color)],
     pub description: Option<&'a str>,
     pub report_title: Option<&'a str>,
-    /// Animation counter (frames since startup); drives the placeholder
+    /// Wall-clock milliseconds (UNIX-epoch); drives the placeholder
     /// rolling-dots glyph cycle.
-    pub anim_tick: u64,
+    pub now_ms: u64,
 }
 
 impl Widget for SpansTreeRow<'_> {
@@ -119,7 +119,7 @@ impl Widget for SpansTreeRow<'_> {
 
         // (3) Placeholder rolling dots (3 cells).
         if self.node.ingestion_state == "placeholder" && x + 3 < right_edge {
-            let dots = rolling_dots::frame(self.anim_tick);
+            let dots = rolling_dots::frame_at(self.now_ms);
             buf.set_span(
                 x,
                 row_y,

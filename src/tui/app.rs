@@ -1,12 +1,21 @@
-//! Top-level TUI App: state, event-loop, draw. The loop obeys the
-//! drain-then-draw rule: every pending [`AppEvent`] is drained via
-//! `try_recv` before `terminal.draw` runs once.
+//! Top-level TUI App: state, event-loop, draw.
+//!
+//! The event loop is event-driven (no heartbeat tick). It [`tokio::select`]s
+//! over: the WS envelope broadcast, the WS status broadcast, a crossterm
+//! async [`EventStream`], the cache "value changed" wakeup, and a single
+//! animation wake whose deadline is the minimum of the next reveal-queue
+//! head and the next 250 ms boundary (gated on cache in-flight). Any WS
+//! envelopes that piled up during processing are drained via `try_recv`
+//! before a single `terminal.draw`. A fully idle TUI parks indefinitely.
+//!
+//! [`EventStream`]: ratatui::crossterm::event::EventStream
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
+use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -14,20 +23,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use ratatui::crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, EventStream, KeyCode, KeyEventKind, KeyModifiers,
 };
 use ratatui::crossterm::execute;
 use serde_json::Value;
-use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tracing::{debug, info, warn};
 
 use crate::tui::api::ApiClient;
-use crate::tui::cache::{FetchPolicy, QueryCache, cache_get, qkey, swr_read};
-use crate::tui::event::{
-    AppEvent, spawn_crossterm_reader, spawn_tick, spawn_ws_coalescer,
+use crate::tui::cache::{
+    FetchPolicy, QueryCache, cache_get, qkey, swr_read, ws_invalidation_prefixes,
 };
 use crate::tui::live_feed::LiveFeed;
-use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt};
+use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt, WsEnvelope, WsKind};
 use crate::tui::persist;
 use crate::tui::scenarios::live_sessions::{
     LiveSessionsState, clear_session_everywhere, delete_prompt, propagate_session, render_row,
@@ -148,9 +156,8 @@ pub struct App {
     pub confirm_modal: ConfirmModalState,
     /// Records what session id the pending confirm-delete refers to (none
     /// when no confirm is open).
+    /// when no confirm is open).
     pub pending_delete: Option<String>,
-    /// Monotonic tick counter for animations.
-    pub anim_tick: u64,
     /// Context Growth Widget keyboard-cursor state (Phase 2).
     pub context_widget: ContextGrowthState,
     /// Last known terminal size `(width, height)`. Updated on resize and at
@@ -204,7 +211,6 @@ impl App {
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
-            anim_tick: 0,
             context_widget: ContextGrowthState::default(),
             term_size: (0, 0),
             frame_span_detail: HashMap::new(),
@@ -239,65 +245,71 @@ impl App {
         };
     }
 
-    /// Process one drained event. Returns `Ok(true)` if the loop should
-    /// quit.
-    pub fn handle(&mut self, ev: AppEvent) -> Result<bool> {
-        match ev {
-            AppEvent::Quit => return Ok(true),
-            AppEvent::Tick => {
-                self.anim_tick = self.anim_tick.wrapping_add(1);
-                // Drain reveal queues on every tick (per
-                // `TUI Reveal schedule advances on every tick`).
-                let now_ms = self.now_ms();
-                for s in self.spans_state.values_mut() {
-                    let _ = s.reveal.drain_due(now_ms);
-                }
-                // Follow-mode auto-advance: for every Spans column whose
-                // follow_mode is on, recompute the latest tool span and
-                // jump the cursor + propagate selection if it differs.
-                self.tick_follow_mode_advance();
-                // Phase 2: refresh the widget's row count for cursor
-                // clamping. (Widget Enter is routed synchronously via
-                // `widget_select_current`, not polled here.)
-                self.context_widget.last_visible_rows = self
-                    .widget_merged_context()
-                    .map(|(m, _, _)| m.rows.len() as u16)
-                    .unwrap_or(0);
-            }
-            AppEvent::Crossterm(crossterm::event::Event::Key(k))
-                if k.kind == crossterm::event::KeyEventKind::Press =>
-            {
-                if self.handle_key(k)? {
-                    return Ok(true);
-                }
-            }
-            AppEvent::Crossterm(crossterm::event::Event::Resize(w, h)) => {
-                self.term_size = (w, h);
-            }
-            AppEvent::Crossterm(_) => {}
-            AppEvent::WsTick {
-                dirty_prefixes,
-                envelopes,
-            } => {
-                for env in &envelopes {
-                    self.rt.live_feed.ingest(env.clone());
-                    self.last_ws_event =
-                        Some(format!("{:?}/{:?}", env.kind, env.entity));
-                }
-                for p in &dirty_prefixes {
-                    let segs: Vec<&str> = p.iter().map(String::as_str).collect();
-                    self.rt.cache.invalidate(&segs);
-                }
-                debug!(
-                    envelopes = envelopes.len(),
-                    prefixes = dirty_prefixes.len(),
-                    "ws tick processed"
-                );
-                self.status = self.rt.ws.status();
-            }
-            AppEvent::QueryResult { .. } => {}
+    /// Apply one WebSocket envelope. Ingests into the live-feed ring,
+    /// invalidates the cache prefixes implied by the envelope's
+    /// `(kind, entity)`, advances any active follow-mode columns when the
+    /// envelope touched spans, and refreshes the widget's row-count cache.
+    pub fn on_ws_envelope(&mut self, env: WsEnvelope) {
+        let kind = env.kind;
+        let entity = env.entity;
+        self.last_ws_event = Some(format!("{:?}/{:?}", kind, entity));
+        self.rt.live_feed.ingest(env);
+        for p in ws_invalidation_prefixes(kind, entity) {
+            self.rt.cache.invalidate(p);
         }
-        Ok(false)
+        // Spans-touching envelopes drive the bits of state that used to be
+        // refreshed unconditionally on every 16 ms heartbeat tick.
+        let touches_spans = matches!(kind, WsKind::Span | WsKind::Derived | WsKind::Trace);
+        if touches_spans {
+            self.advance_follow_mode_columns();
+            self.context_widget.last_visible_rows = self
+                .widget_merged_context()
+                .map(|(m, _, _)| m.rows.len() as u16)
+                .unwrap_or(0);
+        }
+        debug!(?kind, ?entity, "ws envelope processed");
+    }
+
+    /// Drain due reveal-queue entries on every Spans column. Called by the
+    /// event loop when its animation deadline fires.
+    pub fn tick_anim(&mut self) {
+        let now_ms = self.now_ms();
+        for s in self.spans_state.values_mut() {
+            let _ = s.reveal.drain_due(now_ms);
+        }
+    }
+
+    /// Earliest wall-clock deadline at which the event loop must wake to
+    /// advance an animation, or `None` if nothing is animating. Combines:
+    ///
+    /// * the earliest pending entry across all per-column reveal queues;
+    /// * the next 250 ms rolling-dots boundary, but only while the cache
+    ///   has at least one in-flight fetch (otherwise there is no spinner
+    ///   that needs animating).
+    pub fn next_anim_deadline_ms(&self) -> Option<u64> {
+        let mut earliest: Option<u64> = None;
+        for s in self.spans_state.values() {
+            if let Some(&(_, at)) = s.reveal.queue.first() {
+                earliest = Some(earliest.map_or(at, |e| e.min(at)));
+            }
+        }
+        if self.rt.cache.has_any_in_flight() {
+            let now = self.now_ms();
+            let next_quarter =
+                ((now / crate::tui::widgets::rolling_dots::FRAME_STEP_MS) + 1)
+                    * crate::tui::widgets::rolling_dots::FRAME_STEP_MS;
+            earliest = Some(earliest.map_or(next_quarter, |e| e.min(next_quarter)));
+        }
+        earliest
+    }
+
+    /// For every Spans column with `follow_mode` engaged, advance the
+    /// cursor to the latest tool span and propagate selection. Idempotent
+    /// when no new latest tool span exists. Pulled out of the old per-tick
+    /// loop and invoked from [`Self::on_ws_envelope`] for spans-touching
+    /// envelopes.
+    pub(crate) fn advance_follow_mode_columns(&mut self) {
+        self.tick_follow_mode_advance();
     }
 
     fn now_ms(&self) -> u64 {
@@ -2151,7 +2163,7 @@ impl App {
         // Render tree.
         let tree = self.cached_session_tree(col_idx);
         if tree.is_empty() {
-            let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
+            let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
             let line = Line::from(vec![
                 Span::styled(
                     "loading spans".to_string(),
@@ -2218,7 +2230,7 @@ impl App {
                 chips: &chips,
                 description: description.as_deref(),
                 report_title: report_title.as_deref(),
-                anim_tick: self.anim_tick,
+                now_ms: self.now_ms(),
             }
             .render(row_area, buf);
         }
@@ -2239,7 +2251,7 @@ impl App {
         let default = SpansState::default();
         let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default);
         if traces.is_empty() {
-            let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
+            let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
             let line = Line::from(vec![
                 Span::styled(
                     "loading traces".to_string(),
@@ -2617,48 +2629,128 @@ impl App {
 
 /// Run the event loop until quit. Caller is responsible for `ratatui::init`
 /// and the panic-hook guard.
+///
+/// Architecture: one `tokio::select!` over four event sources plus an
+/// optional animation deadline. The loop owns `ws_rx`, `status_rx`, the
+/// crossterm `EventStream`, and an owned `Arc<Notify>` cloned from the
+/// query cache (background fetch completions ping it). After the first
+/// branch resolves, any extra messages that arrived during processing are
+/// drained via `try_recv` so a burst of envelopes still produces a single
+/// `terminal.draw`. A fully idle TUI parks indefinitely.
 pub async fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    mut rx: mpsc::Receiver<AppEvent>,
 ) -> Result<()> {
+    let mut ws_rx = app.rt.ws.subscribe();
+    let mut status_rx = app.rt.ws.on_status();
+    let mut keys = EventStream::new();
+    let cache_changed = app.rt.cache.changed_handle();
+
+    // Paint once before parking.
+    terminal.draw(|f| app.draw(f))?;
+
     loop {
-        // Block until at least one event arrives, then drain everything
-        // else before drawing.
-        let first = match rx.recv().await {
-            Some(e) => e,
-            None => break,
-        };
-        let mut quit = app.handle(first)?;
-        while !quit {
-            match rx.try_recv() {
-                Ok(e) => quit = app.handle(e)?,
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    quit = true;
+        let mut dirty = false;
+        let mut quit = false;
+
+        tokio::select! {
+            biased;
+
+            _ = sleep_until_anim(app.next_anim_deadline_ms(), app.now_ms()) => {
+                app.tick_anim();
+                dirty = true;
+            }
+
+            ev = ws_rx.recv() => match ev {
+                Ok(env) => { app.on_ws_envelope(env); dirty = true; }
+                Err(RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "ws receiver lagged");
+                }
+                Err(RecvError::Closed) => break,
+            },
+
+            st = status_rx.recv() => match st {
+                Ok(s) => { app.status = s; dirty = true; }
+                Err(RecvError::Lagged(_)) => {
+                    // Re-sync from the bus on lag.
+                    let s = app.rt.ws.status();
+                    if app.status != s { app.status = s; dirty = true; }
+                }
+                Err(RecvError::Closed) => {}
+            },
+
+            key_ev = keys.next() => match key_ev {
+                Some(Ok(crossterm::event::Event::Key(k)))
+                    if k.kind == KeyEventKind::Press =>
+                {
+                    quit = app.handle_key(k)?;
+                    dirty = true;
+                }
+                Some(Ok(crossterm::event::Event::Resize(w, h))) => {
+                    app.term_size = (w, h);
+                    dirty = true;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    warn!(error = %e, "crossterm event stream error");
                     break;
                 }
+                None => break,
+            },
+
+            _ = cache_changed.notified() => {
+                // Some background fetch populated (or invalidated) a cache
+                // entry visible to the renderer; just request a redraw.
+                dirty = true;
             }
         }
+
         if quit {
             break;
         }
-        terminal.draw(|f| app.draw(f))?;
+
+        // Drain any other WS envelopes that arrived during processing so
+        // bursts collapse into a single draw.
+        loop {
+            match ws_rx.try_recv() {
+                Ok(env) => { app.on_ws_envelope(env); dirty = true; }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Lagged(n)) => {
+                    warn!(lagged = n, "ws receiver lagged during drain");
+                }
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+        loop {
+            match status_rx.try_recv() {
+                Ok(s) => { app.status = s; dirty = true; }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Lagged(_)) => {
+                    let s = app.rt.ws.status();
+                    if app.status != s { app.status = s; dirty = true; }
+                }
+                Err(TryRecvError::Closed) => break,
+            }
+        }
+
+        if dirty {
+            terminal.draw(|f| app.draw(f))?;
+        }
     }
     Ok(())
 }
 
-/// Spawn all the background event sources (ws coalescer, crossterm reader,
-/// animation tick). The caller wires the resulting receiver into
-/// [`event_loop`].
-pub fn spawn_event_sources(
-    ws: &WsBus,
-) -> (mpsc::Sender<AppEvent>, mpsc::Receiver<AppEvent>) {
-    let (tx, rx) = crate::tui::event::channel();
-    spawn_ws_coalescer(ws.subscribe(), tx.clone());
-    spawn_crossterm_reader(tx.clone());
-    spawn_tick(tx.clone());
-    (tx, rx)
+/// Sleep until `at_ms` wall-clock millisecond, or park forever if `None`.
+/// `now_ms` is sampled by the caller to avoid two `SystemTime::now()` calls
+/// per iteration.
+async fn sleep_until_anim(at_ms: Option<u64>, now_ms: u64) {
+    match at_ms {
+        Some(target) => {
+            let delay = target.saturating_sub(now_ms);
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Make App::draw render into a buffer for unit-testing (no full terminal).
@@ -2765,22 +2857,20 @@ mod tests {
         );
     }
 
-    /// The drain-then-draw rule: many WS ticks should not trigger one draw
-    /// per event. We can't observe draws directly here, but we *can* observe
-    /// that `handle` does not return quit and that the event queue can be
-    /// emptied in one go.
-    #[test]
-    fn handle_processes_many_ws_ticks() {
+    /// Many WS envelopes in a row must remain side-effect-clean (no panics,
+    /// monotonic last_ws_event update, idempotent cache invalidation).
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_processes_many_ws_envelopes() {
+        use serde_json::json;
         let mut app = make_app();
         for _ in 0..50 {
-            let r = app
-                .handle(AppEvent::WsTick {
-                    dirty_prefixes: vec![],
-                    envelopes: vec![],
-                })
-                .unwrap();
-            assert!(!r);
+            app.on_ws_envelope(WsEnvelope {
+                kind: WsKind::Span,
+                entity: crate::tui::model::WsEntity::Span,
+                payload: json!({}),
+            });
         }
+        assert!(app.last_ws_event.is_some());
     }
 
     /// Allow Duration unused-warning suppression: tests may evolve.
@@ -3227,7 +3317,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn follow_mode_advances_cursor_to_latest_tool_span_on_tick() {
+    async fn follow_mode_advances_cursor_to_latest_tool_span_on_ws_envelope() {
+        use serde_json::json;
         let mut app = one_spans_column_app();
         app.workspace.columns[0]
             .config
@@ -3244,8 +3335,12 @@ mod tests {
             .entry(col_id.clone())
             .or_insert_with(SpansState::new)
             .follow_mode = true;
-        // Drive one Tick.
-        let _ = app.handle(AppEvent::Tick).unwrap();
+        // Drive a spans-touching WS envelope (replaces the old Tick drive).
+        app.on_ws_envelope(WsEnvelope {
+            kind: WsKind::Span,
+            entity: crate::tui::model::WsEntity::Span,
+            payload: json!({}),
+        });
         // Latest tool span is "tool-b" (end_ns=200) at flat index 2.
         let st = app.spans_state.get(&col_id).unwrap();
         assert_eq!(st.cursor, 2);
@@ -3877,16 +3972,14 @@ mod tests {
     #[test]
     fn ctrl_c_event_quits_on_first_handle_call() {
         let mut app = one_spans_column_app();
-        use ratatui::crossterm::event::{
-            Event, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
-        };
+        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let k = KeyEvent {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
-        let quit = app.handle(AppEvent::Crossterm(Event::Key(k))).unwrap();
+        let quit = app.handle_key(k).unwrap();
         assert!(quit, "Ctrl-C event must stop the event loop immediately");
     }
 

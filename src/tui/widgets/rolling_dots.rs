@@ -1,9 +1,12 @@
 //! Animated rolling-dots indicator. 4-frame cycle (`   ` / `.  ` / `.. ` /
-//! `...`) advanced once every `FRAMES_PER_STEP` ticks (≈ 250 ms at 16 ms
-//! ticks).
+//! `...`) advanced once every [`FRAME_STEP_MS`] of wall-clock time
+//! (≈ 250 ms).
 //!
 //! Implements `Placeholder ingestion state shown with rolling dots` (TUI
-//! variant) and `TUI Spans rolling dots animation cadence`.
+//! variant) and `TUI Spans rolling dots animation cadence`. The cadence is
+//! derived from wall-clock so the event loop does not need a heartbeat
+//! tick to drive it — the loop instead schedules a redraw at the next
+//! [`FRAME_STEP_MS`] boundary whenever a spinner is on screen.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,11 +14,12 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
-pub const FRAMES_PER_STEP: u64 = 4;
+/// Wall-clock cadence of one dot-frame step.
+pub const FRAME_STEP_MS: u64 = 250;
 
-/// Return the 3-character frame for a given tick counter.
-pub fn frame(tick: u64) -> &'static str {
-    match (tick / FRAMES_PER_STEP) % 4 {
+/// Return the 3-character frame for a given wall-clock millisecond reading.
+pub fn frame_at(now_ms: u64) -> &'static str {
+    match (now_ms / FRAME_STEP_MS) % 4 {
         0 => "   ",
         1 => ".  ",
         2 => ".. ",
@@ -24,7 +28,7 @@ pub fn frame(tick: u64) -> &'static str {
 }
 
 pub struct RollingDots {
-    pub tick: u64,
+    pub now_ms: u64,
 }
 
 impl Widget for RollingDots {
@@ -32,7 +36,7 @@ impl Widget for RollingDots {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let txt = frame(self.tick);
+        let txt = frame_at(self.now_ms);
         let span = Span::styled(txt, Style::default().fg(Color::Yellow));
         buf.set_span(area.x, area.y, &span, area.width);
     }
@@ -44,10 +48,10 @@ mod tests {
 
     #[test]
     fn cycles_through_four_frames() {
-        assert_eq!(frame(0), "   ");
-        assert_eq!(frame(FRAMES_PER_STEP), ".  ");
-        assert_eq!(frame(FRAMES_PER_STEP * 2), ".. ");
-        assert_eq!(frame(FRAMES_PER_STEP * 3), "...");
-        assert_eq!(frame(FRAMES_PER_STEP * 4), "   ");
+        assert_eq!(frame_at(0), "   ");
+        assert_eq!(frame_at(FRAME_STEP_MS), ".  ");
+        assert_eq!(frame_at(FRAME_STEP_MS * 2), ".. ");
+        assert_eq!(frame_at(FRAME_STEP_MS * 3), "...");
+        assert_eq!(frame_at(FRAME_STEP_MS * 4), "   ");
     }
 }

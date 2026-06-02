@@ -5,7 +5,6 @@
 //! - [`api`] — async REST client.
 //! - [`app`] — top-level state + draw + event loop.
 //! - [`cache`] — query cache (TanStack-Query analog).
-//! - [`event`] — bounded mpsc + coalesced WS-tick.
 //! - [`format`] — fmt_ns, fmt_clock, hash_color (FNV-1a → terminal RGB).
 //! - [`live_feed`] — per-(kind,entity) ring buffer.
 //! - [`model`] — serde port of `web/src/api/types.ts`.
@@ -23,7 +22,6 @@ use ratatui::crossterm::execute;
 pub mod api;
 pub mod app;
 pub mod cache;
-pub mod event;
 pub mod format;
 pub mod live_feed;
 pub mod model;
@@ -61,9 +59,8 @@ pub async fn run(server: &str, mouse: bool, log_buffer: LogBuffer) -> Result<()>
     if let Ok(sz) = terminal.size() {
         app.term_size = (sz.width, sz.height);
     }
-    let (_tx, rx) = app::spawn_event_sources(&ws);
 
-    let result = app::event_loop(&mut terminal, &mut app, rx).await;
+    let result = app::event_loop(&mut terminal, &mut app).await;
 
     // Clean teardown.
     if app.mouse_enabled {

@@ -23,11 +23,12 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 use crate::tui::model::{WsEntity, WsKind};
 
@@ -88,6 +89,22 @@ impl Default for Entry {
 #[derive(Default)]
 pub struct QueryCache {
     inner: RwLock<Inner>,
+    /// Wake-once signal fired whenever a background fetch completes (or an
+    /// invalidation flips a cached value to stale) so the event loop can
+    /// redraw without polling. Lossless under bursts because
+    /// [`Notify::notify_one`] stores at most one permit — many events
+    /// collapse to one wakeup that then drains everything.
+    ///
+    /// Held as `Arc` so the event loop can keep an owned handle and avoid
+    /// borrowing `&self` for the lifetime of the select-arm future.
+    changed: Arc<Notify>,
+}
+
+impl QueryCache {
+    /// Owned handle to the "cache value changed" wakeup. Cheap to clone.
+    pub fn changed_handle(&self) -> Arc<Notify> {
+        self.changed.clone()
+    }
 }
 
 #[derive(Default)]
@@ -139,30 +156,33 @@ impl QueryCache {
     /// Insert a fresh value (e.g. on `QueryResult` event).
     /// Older-generation completions are dropped per the contract.
     pub fn put(&self, rec: FetchedRecord) {
-        let mut g = self.inner.write().unwrap();
-        let entry = g.entries.entry(rec.key.clone()).or_default();
-        if rec.generation < entry.latest_gen {
-            // Older than the most-recent dispatch — discard.
-            return;
-        }
-        entry.cached = Some(CachedValue {
-            value: rec.value,
-            generation: rec.generation,
-            fetched_at: Instant::now(),
-            stale_after: rec.stale_after,
-        });
-        entry.in_flight = None;
-        // LRU bookkeeping for span keys only.
-        if rec.key.first().map(String::as_str) == Some("span") {
-            // Move-to-front by remove + push_back.
-            g.span_lru.retain(|k| k != &rec.key);
-            g.span_lru.push_back(rec.key.clone());
-            while g.span_lru.len() > SPAN_LRU_CAP {
-                if let Some(oldest) = g.span_lru.pop_front() {
-                    g.entries.remove(&oldest);
+        {
+            let mut g = self.inner.write().unwrap();
+            let entry = g.entries.entry(rec.key.clone()).or_default();
+            if rec.generation < entry.latest_gen {
+                // Older than the most-recent dispatch — discard.
+                return;
+            }
+            entry.cached = Some(CachedValue {
+                value: rec.value,
+                generation: rec.generation,
+                fetched_at: Instant::now(),
+                stale_after: rec.stale_after,
+            });
+            entry.in_flight = None;
+            // LRU bookkeeping for span keys only.
+            if rec.key.first().map(String::as_str) == Some("span") {
+                // Move-to-front by remove + push_back.
+                g.span_lru.retain(|k| k != &rec.key);
+                g.span_lru.push_back(rec.key.clone());
+                while g.span_lru.len() > SPAN_LRU_CAP {
+                    if let Some(oldest) = g.span_lru.pop_front() {
+                        g.entries.remove(&oldest);
+                    }
                 }
             }
         }
+        self.changed.notify_one();
     }
 
     /// Begin a new fetch generation for `key`. Returns the assigned
@@ -194,32 +214,48 @@ impl QueryCache {
     /// Mark an in-flight fetch as finished (used to wake duplicate waiters
     /// even when the result was discarded as stale).
     pub fn finish_fetch(&self, key: &QueryKey, value: &Value) {
-        let mut g = self.inner.write().unwrap();
-        if let Some(entry) = g.entries.get_mut(key) {
-            if let Some(tx) = entry.in_flight.take() {
-                let _ = tx.send(value.clone());
+        {
+            let mut g = self.inner.write().unwrap();
+            if let Some(entry) = g.entries.get_mut(key) {
+                if let Some(tx) = entry.in_flight.take() {
+                    let _ = tx.send(value.clone());
+                }
             }
         }
+        self.changed.notify_one();
     }
 
     /// Prefix invalidation — bump generation on every matching key and
     /// mark cached values stale so the next `peek` triggers a refetch.
     /// Returns the keys invalidated.
     pub fn invalidate(&self, prefix: &[&str]) -> Vec<QueryKey> {
-        let mut g = self.inner.write().unwrap();
-        let mut matched = Vec::new();
-        for (k, entry) in g.entries.iter_mut() {
-            if key_has_prefix(k, prefix) {
-                entry.latest_gen = entry.latest_gen.wrapping_add(1);
-                if let Some(c) = entry.cached.as_mut() {
-                    // Force-stale: set fetched_at far in the past.
-                    c.fetched_at =
-                        Instant::now() - c.stale_after.saturating_mul(2).max(c.stale_after);
+        let matched = {
+            let mut g = self.inner.write().unwrap();
+            let mut matched = Vec::new();
+            for (k, entry) in g.entries.iter_mut() {
+                if key_has_prefix(k, prefix) {
+                    entry.latest_gen = entry.latest_gen.wrapping_add(1);
+                    if let Some(c) = entry.cached.as_mut() {
+                        // Force-stale: set fetched_at far in the past.
+                        c.fetched_at =
+                            Instant::now() - c.stale_after.saturating_mul(2).max(c.stale_after);
+                    }
+                    matched.push(k.clone());
                 }
-                matched.push(k.clone());
             }
+            matched
+        };
+        if !matched.is_empty() {
+            self.changed.notify_one();
         }
         matched
+    }
+
+    /// True if any key currently has an in-flight fetch. The event loop
+    /// uses this to decide whether to schedule a spinner-animation wake.
+    pub fn has_any_in_flight(&self) -> bool {
+        let g = self.inner.read().unwrap();
+        g.entries.values().any(|e| e.in_flight.is_some())
     }
 
     /// For tests only.
