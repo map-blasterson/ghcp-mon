@@ -92,6 +92,9 @@ pub fn spawn_ws_coalescer(
 pub fn spawn_crossterm_reader(tx: mpsc::Sender<AppEvent>) {
     tokio::task::spawn_blocking(move || {
         loop {
+            if tx.is_closed() {
+                break;
+            }
             // 50 ms poll cadence keeps the task responsive to shutdown.
             match crossterm::event::poll(Duration::from_millis(50)) {
                 Ok(true) => match crossterm::event::read() {

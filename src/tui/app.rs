@@ -2512,10 +2512,10 @@ pub async fn event_loop(
                 }
             }
         }
-        terminal.draw(|f| app.draw(f))?;
         if quit {
             break;
         }
+        terminal.draw(|f| app.draw(f))?;
     }
     Ok(())
 }
@@ -3473,6 +3473,22 @@ mod tests {
         assert!(entries.iter().any(|(key, _)| key == "f"));
         assert!(entries.iter().any(|(key, _)| key == "s"));
         assert!(entries.iter().any(|(key, _)| key == "k"));
+    }
+
+    #[test]
+    fn ctrl_c_event_quits_on_first_handle_call() {
+        let mut app = one_spans_column_app();
+        use ratatui::crossterm::event::{
+            Event, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        let k = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let quit = app.handle(AppEvent::Crossterm(Event::Key(k))).unwrap();
+        assert!(quit, "Ctrl-C event must stop the event loop immediately");
     }
 
     /// LLR: `Keybinding Matrix` — Global row "`Ctrl-C` | Quit". No HLR
