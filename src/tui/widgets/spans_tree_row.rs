@@ -207,19 +207,33 @@ impl Widget for SpansTreeRow<'_> {
         }
 
         // (6) Tool description label — plain white, no chip styling, per
-        // `Spans tool description inline label`.
+        // `Spans tool description inline label`. Truncated at the column's
+        // right edge with a trailing `…` so the user can tell content was
+        // cut off (matters for chat-row text previews, which arrive at
+        // full message length).
         if let Some(desc) = self.description {
             if x + 1 < right_edge {
                 x += 1;
-                let w = (desc.chars().count() as u16)
+                let avail = right_edge.saturating_sub(x) as usize;
+                let desc_chars = desc.chars().count();
+                let painted: String = if desc_chars <= avail {
+                    desc.to_string()
+                } else if avail == 0 {
+                    String::new()
+                } else {
+                    // Reserve one cell for `…`; if that leaves zero room
+                    // for content, drop to just the ellipsis.
+                    let body_take = avail.saturating_sub(1);
+                    let mut s: String = desc.chars().take(body_take).collect();
+                    s.push('…');
+                    s
+                };
+                let w = (painted.chars().count() as u16)
                     .min(right_edge.saturating_sub(x));
                 buf.set_span(
                     x,
                     row_y,
-                    &Span::styled(
-                        desc.to_string(),
-                        Style::default().fg(Color::White),
-                    ),
+                    &Span::styled(painted, Style::default().fg(Color::White)),
                     w,
                 );
                 x += w;
@@ -244,5 +258,87 @@ impl Widget for SpansTreeRow<'_> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::model::{KindClass, SpanProjection};
+
+    fn chat_node(id: &str) -> SpanNode {
+        SpanNode {
+            span_pk: 0,
+            trace_id: "t".into(),
+            span_id: id.into(),
+            parent_span_id: None,
+            name: "chat".into(),
+            kind_class: KindClass::Chat,
+            ingestion_state: "complete".into(),
+            start_unix_ns: Some(0),
+            end_unix_ns: Some(0),
+            projection: SpanProjection::default(),
+            children: vec![],
+        }
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let mut s = String::new();
+        for x in 0..buf.area.width {
+            s.push_str(buf[(x, y)].symbol());
+        }
+        s
+    }
+
+    /// When the chat preview fits the column, paint it verbatim — no
+    /// ellipsis added.
+    #[test]
+    fn description_fits_paints_verbatim() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
+        let node = chat_node("c1");
+        let desc = "Hello there friend";
+        SpansTreeRow {
+            node: &node,
+            depth: 0,
+            focused: false,
+            collapsed: false,
+            row_bg: None,
+            row_dim: false,
+            chips: &[],
+            description: Some(desc),
+            report_title: None,
+            now_ms: 0,
+        }
+        .render(Rect::new(0, 0, 60, 1), &mut buf);
+        let line = row_text(&buf, 0);
+        assert!(line.contains("Hello there friend"), "line: {line:?}");
+        assert!(!line.contains('…'), "no ellipsis when text fits: {line:?}");
+    }
+
+    /// When the chat preview overflows the column, the renderer must
+    /// truncate AND add a trailing `…` so the user knows content was
+    /// cut off. (Bug "preview doesn't use full column width" regression.)
+    #[test]
+    fn description_overflow_truncates_with_ellipsis() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
+        let node = chat_node("c1");
+        let desc = "this is a long enough preview to overflow twenty cells";
+        SpansTreeRow {
+            node: &node,
+            depth: 0,
+            focused: false,
+            collapsed: false,
+            row_bg: None,
+            row_dim: false,
+            chips: &[],
+            description: Some(desc),
+            report_title: None,
+            now_ms: 0,
+        }
+        .render(Rect::new(0, 0, 20, 1), &mut buf);
+        let line = row_text(&buf, 0);
+        assert!(line.contains('…'), "must mark truncation: {line:?}");
+        // Original full text MUST NOT be entirely present.
+        assert!(!line.contains("twenty cells"), "should not paint past end: {line:?}");
     }
 }

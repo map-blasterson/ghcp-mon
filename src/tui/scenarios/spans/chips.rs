@@ -142,18 +142,16 @@ pub fn tool_description_label(args: &Value) -> Option<String> {
     Some(s.to_string())
 }
 
-/// Length cap for the chat row's inline content preview (chars, not
-/// bytes — Unicode-safe). Trailing `…` is appended when truncation
-/// happens so the row width budget is `CHAT_PREVIEW_LEN + 1`.
-pub const CHAT_PREVIEW_LEN: usize = 24;
-
 /// Inline content preview for a Chat-kind span row. Looks at the chat's
 /// captured messages and returns the first text it can show, normalised to
-/// a single line and truncated to [`CHAT_PREVIEW_LEN`] chars. Preference
-/// order: the assistant's reply (last text part across
-/// `gen_ai.output.messages`), then the most recent input message's text
-/// part (typically the user prompt). Returns `None` when nothing
+/// a single line. Preference order: the assistant's reply (last text part
+/// across `gen_ai.output.messages`), then the most recent input message's
+/// text part (typically the user prompt). Returns `None` when nothing
 /// previewable exists (e.g. tool-call-only chats, no captured content).
+///
+/// The Spans row renderer (see `SpansTreeRow` in `widgets/spans_tree_row.rs`)
+/// truncates to whatever fits the column width and appends `…` — this
+/// helper does no length capping of its own.
 pub fn chat_text_preview(attrs: &Value) -> Option<String> {
     use crate::tui::scenarios::chat_detail::messages::{
         parse_input_messages, parse_output_messages, Part,
@@ -189,13 +187,9 @@ pub fn chat_text_preview(attrs: &Value) -> Option<String> {
     let single_line: String =
         raw.split_whitespace().collect::<Vec<&str>>().join(" ");
     if single_line.is_empty() {
-        return None;
-    }
-    let truncated: String = single_line.chars().take(CHAT_PREVIEW_LEN).collect();
-    if single_line.chars().count() > CHAT_PREVIEW_LEN {
-        Some(format!("{truncated}…"))
+        None
     } else {
-        Some(truncated)
+        Some(single_line)
     }
 }
 
@@ -482,17 +476,19 @@ mod tests {
     }
 
     #[test]
-    fn chat_text_preview_truncates_with_ellipsis() {
-        // 30 chars > CHAT_PREVIEW_LEN (24) → truncated + "…"
-        let long = "a".repeat(30);
+    fn chat_text_preview_returns_full_text() {
+        // The renderer is the only thing that knows the column width and
+        // applies truncation+ellipsis there; the helper returns the
+        // single-line normalised text verbatim.
+        let long = "a".repeat(10_000);
         let attrs = json!({
             "gen_ai.output.messages": [
                 {"role": "assistant", "parts": [{"type": "text", "content": long}]}
             ],
         });
         let p = chat_text_preview(&attrs).unwrap();
-        assert!(p.ends_with('…'));
-        assert_eq!(p.chars().count(), CHAT_PREVIEW_LEN + 1);
+        assert_eq!(p.chars().count(), 10_000);
+        assert!(!p.contains('…'));
     }
 
     #[test]
