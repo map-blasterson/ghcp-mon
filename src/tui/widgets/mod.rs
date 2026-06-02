@@ -6,6 +6,7 @@ pub mod code_block;
 pub mod confirm_modal;
 pub mod context_growth;
 pub mod json_view;
+pub mod keymap_overlay;
 pub mod kind_badge;
 pub mod lang_from_path;
 pub mod log_overlay;

@@ -41,6 +41,7 @@ use crate::tui::widgets::context_growth::{
     ContextGrowthState, ContextGrowthWidget, MergedRows, chat_span_pks, max_current_tokens,
     merge_snapshots,
 };
+use crate::tui::widgets::keymap_overlay::KeymapOverlay;
 use crate::tui::widgets::kind_badge::kind_label;
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
 use crate::tui::widgets::spans_tree_row::SpansTreeRow;
@@ -118,6 +119,7 @@ pub struct App {
     /// while focused, or hiding the widget, returns focus to the columns."
     pub last_focused_column: Option<usize>,
     pub log_overlay_visible: bool,
+    pub keymap_overlay_visible: bool,
     pub mouse_enabled: bool,
     pub add_column_cursor: usize,
     pub status: WsStatus,
@@ -170,6 +172,7 @@ impl App {
             focus,
             last_focused_column,
             log_overlay_visible: false,
+            keymap_overlay_visible: false,
             mouse_enabled,
             add_column_cursor: 0,
             last_ws_event: None,
@@ -354,16 +357,24 @@ impl App {
         Dispatch::Pass
     }
 
-    /// Layer 2 — modal overlays: the `?` log overlay, the confirm-delete
-    /// modal, and column-scoped popovers (Spans `s` / `k`). Per the
-    /// `Key-Dispatch Policy` HLR: "debug overlay (?), confirm dialogs,
-    /// etc. consume matching keys." Non-matching keys are swallowed by the
-    /// modal (no fall-through) to avoid e.g. `q` quitting while a delete
-    /// confirmation is open.
+    /// Layer 2 — modal overlays: the keymap overlay, log overlay, the
+    /// confirm-delete modal, and column-scoped popovers (Spans `s` / `k`). Per
+    /// the `Key-Dispatch Policy` HLR: modal overlays consume matching keys.
+    /// Non-matching keys are swallowed by the modal (no fall-through) to avoid
+    /// e.g. `q` quitting while a delete confirmation is open.
     fn layer_modal(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
-        if self.log_overlay_visible {
+        if self.keymap_overlay_visible {
             match k.code {
                 KeyCode::Char('?') | KeyCode::Esc => {
+                    self.keymap_overlay_visible = false;
+                }
+                _ => {}
+            }
+            return Dispatch::Consumed;
+        }
+        if self.log_overlay_visible {
+            match k.code {
+                KeyCode::Char('~') | KeyCode::Esc => {
                     self.log_overlay_visible = false;
                 }
                 _ => {}
@@ -463,7 +474,10 @@ impl App {
                 self.adjust_widget_height(-step);
             }
             (KeyCode::Char('?'), _) => {
-                self.log_overlay_visible = true;
+                self.keymap_overlay_visible = !self.keymap_overlay_visible;
+            }
+            (KeyCode::Char('~'), _) => {
+                self.log_overlay_visible = !self.log_overlay_visible;
             }
             (KeyCode::Char('M'), _) => {
                 self.toggle_mouse();
@@ -475,6 +489,140 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn active_keymap_entries(&self) -> Vec<(String, String)> {
+        if self.spans_search_input_active() {
+            return Self::text_input_keymap();
+        }
+
+        let mut entries = Self::global_keymap();
+        match self.focus {
+            Focus::None => {}
+            Focus::Widget => entries.extend(Self::context_widget_keymap()),
+            Focus::Column(i) => {
+                if let Some(col) = self.workspace.columns.get(i) {
+                    match col.scenario_type {
+                        ScenarioType::LiveSessions => entries.extend(Self::live_sessions_keymap()),
+                        ScenarioType::Spans => entries.extend(Self::spans_keymap()),
+                        ScenarioType::ToolDetail => entries.extend(Self::tool_detail_keymap()),
+                        ScenarioType::ChatDetail => entries.extend(Self::chat_detail_keymap()),
+                        ScenarioType::FileTouches => entries.extend(Self::file_touches_keymap()),
+                        ScenarioType::RawBrowser => {}
+                    }
+                }
+            }
+        }
+        entries
+    }
+
+    fn spans_search_input_active(&self) -> bool {
+        let Some(i) = self.focus.column_idx() else {
+            return false;
+        };
+        let Some(col) = self.workspace.columns.get(i) else {
+            return false;
+        };
+        if col.scenario_type != ScenarioType::Spans {
+            return false;
+        }
+        self.spans_state
+            .get(&col.id)
+            .map(|s| s.search_active)
+            .unwrap_or(false)
+    }
+
+    fn keymap_entry(key: &str, desc: &str) -> (String, String) {
+        (key.to_string(), desc.to_string())
+    }
+
+    fn global_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("a", "append a column"),
+            Self::keymap_entry("x", "remove focused column"),
+            Self::keymap_entry("Tab / Shift-Tab", "cycle focus"),
+            Self::keymap_entry("c", "toggle Context Growth Widget"),
+            Self::keymap_entry("Alt+↑ / Alt+↓", "resize Context Growth Widget"),
+            Self::keymap_entry("M", "toggle mouse capture"),
+            Self::keymap_entry("?", "toggle keymap overlay"),
+            Self::keymap_entry("~", "toggle log overlay"),
+            Self::keymap_entry("q", "quit"),
+            Self::keymap_entry("Ctrl-C", "quit"),
+        ]
+    }
+
+    fn text_input_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("printable", "append character"),
+            Self::keymap_entry("← / →", "move cursor"),
+            Self::keymap_entry("Home / End", "jump cursor"),
+            Self::keymap_entry("Backspace", "delete character left"),
+            Self::keymap_entry("Delete", "delete character right"),
+            Self::keymap_entry("Esc", "exit search input"),
+        ]
+    }
+
+    fn context_widget_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("← / →", "move widget bar cursor"),
+            Self::keymap_entry("Enter", "select current bar"),
+            Self::keymap_entry("Esc", "release widget focus"),
+        ]
+    }
+
+    fn spans_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("↑ / ↓", "move row cursor"),
+            Self::keymap_entry("← / →", "collapse / expand focused row"),
+            Self::keymap_entry("Home / End", "jump to top / bottom"),
+            Self::keymap_entry("+ / -", "expand all / collapse all"),
+            Self::keymap_entry("Space", "toggle focused row"),
+            Self::keymap_entry("f", "toggle follow mode"),
+            Self::keymap_entry("/", "focus search input"),
+            Self::keymap_entry("s", "open session selector"),
+            Self::keymap_entry("k", "open kind filter"),
+            Self::keymap_entry("Enter", "select focused row"),
+        ]
+    }
+
+    fn live_sessions_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("↑ / ↓", "move session cursor"),
+            Self::keymap_entry("Home / End", "jump to top / bottom"),
+            Self::keymap_entry("Enter", "pick session"),
+            Self::keymap_entry("d / Delete", "delete session"),
+        ]
+    }
+
+    fn tool_detail_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("Tab / Shift-Tab", "cycle detail blocks"),
+            Self::keymap_entry("↑ / ↓", "scroll body"),
+            Self::keymap_entry("Home / End", "scroll to top / bottom"),
+            Self::keymap_entry("Space", "toggle focused panel"),
+            Self::keymap_entry("/", "activate focused block search"),
+        ]
+    }
+
+    fn chat_detail_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("↑ / ↓", "move row cursor"),
+            Self::keymap_entry("← / →", "collapse / expand focused node"),
+            Self::keymap_entry("Home / End", "jump to top / bottom"),
+            Self::keymap_entry("Space", "toggle focused node"),
+            Self::keymap_entry("m", "toggle chat detail mode"),
+            Self::keymap_entry("Tab / Shift-Tab", "cycle body focus"),
+        ]
+    }
+
+    fn file_touches_keymap() -> Vec<(String, String)> {
+        vec![
+            Self::keymap_entry("↑ / ↓", "move row cursor"),
+            Self::keymap_entry("← / →", "collapse / expand directory"),
+            Self::keymap_entry("Home / End", "jump to top / bottom"),
+            Self::keymap_entry("Space", "toggle directory"),
+            Self::keymap_entry("+ / -", "expand all / collapse all"),
+        ]
     }
 
     /// Dispatch a key to the focused column's scenario. Returns `true` if
@@ -1427,6 +1575,10 @@ impl App {
             let lines = self.rt.log_buffer.snapshot();
             frame.render_widget(LogOverlay { lines }, area);
         }
+        if self.keymap_overlay_visible {
+            let entries = self.active_keymap_entries();
+            frame.render_widget(KeymapOverlay { entries }, area);
+        }
         if self.confirm_modal.open {
             let view = ConfirmModalView {
                 state: &self.confirm_modal,
@@ -2362,10 +2514,10 @@ pub async fn event_loop(
                 }
             }
         }
-        terminal.draw(|f| app.draw(f))?;
         if quit {
             break;
         }
+        terminal.draw(|f| app.draw(f))?;
     }
     Ok(())
 }
@@ -3498,6 +3650,61 @@ mod tests {
             col_cursor_before, col_cursor_after,
             "column row cursor must not have moved"
         );
+    }
+
+    #[test]
+    fn question_opens_keymap_overlay_not_logs() {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.focus = Focus::None;
+        let quit = app.handle_key(press(KeyCode::Char('?'))).unwrap();
+        assert!(!quit);
+        assert!(app.keymap_overlay_visible, "? must open the keymap overlay");
+        assert!(!app.log_overlay_visible, "? must not open logs");
+
+        let _ = app.handle_key(press(KeyCode::Char('?'))).unwrap();
+        assert!(!app.keymap_overlay_visible, "? must close the keymap modal");
+    }
+
+    #[test]
+    fn tilde_opens_log_overlay_not_keymap() {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.focus = Focus::None;
+        let quit = app.handle_key(press(KeyCode::Char('~'))).unwrap();
+        assert!(!quit);
+        assert!(app.log_overlay_visible, "~ must open the log overlay");
+        assert!(!app.keymap_overlay_visible, "~ must not open keymap");
+
+        let _ = app.handle_key(press(KeyCode::Char('~'))).unwrap();
+        assert!(!app.log_overlay_visible, "~ must close the log modal");
+    }
+
+    #[test]
+    fn keymap_for_spans_focus_includes_global_and_spans_keys() {
+        let app = one_spans_column_app();
+        let entries = app.active_keymap_entries();
+        assert!(entries.iter().any(|(key, _)| key == "?"));
+        assert!(entries.iter().any(|(key, _)| key == "~"));
+        assert!(entries.iter().any(|(key, _)| key == "f"));
+        assert!(entries.iter().any(|(key, _)| key == "s"));
+        assert!(entries.iter().any(|(key, _)| key == "k"));
+    }
+
+    #[test]
+    fn ctrl_c_event_quits_on_first_handle_call() {
+        let mut app = one_spans_column_app();
+        use ratatui::crossterm::event::{
+            Event, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers,
+        };
+        let k = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let quit = app.handle(AppEvent::Crossterm(Event::Key(k))).unwrap();
+        assert!(quit, "Ctrl-C event must stop the event loop immediately");
     }
 
     /// LLR: `Keybinding Matrix` — Global row "`Ctrl-C` | Quit". No HLR
