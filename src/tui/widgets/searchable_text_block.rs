@@ -113,6 +113,9 @@ pub struct SearchableTextBlockState {
     pub match_index: usize,
     /// Number of matches found (recomputed on every render).
     pub match_count: usize,
+    /// Cycle delta queued by Enter/Shift+Enter before the next render has
+    /// recomputed `match_count`.
+    pending_cycle: isize,
     /// Top wrapped-row index currently visible.
     pub scroll_top: u16,
     /// Single-line edit/cursor state for the search input. Owned here (not
@@ -124,6 +127,44 @@ pub struct SearchableTextBlockState {
     /// transition and exit without needing the caller to remember the previous
     /// prop value.
     external_active: bool,
+}
+
+impl SearchableTextBlockState {
+    /// Record the latest match count and apply any queued cycle request from a
+    /// key event that arrived before render had located matches.
+    pub fn set_match_count(&mut self, match_count: usize) {
+        self.match_count = match_count;
+        if self.match_count == 0 {
+            self.match_index = 0;
+            self.pending_cycle = 0;
+            return;
+        }
+        if self.match_index >= self.match_count {
+            self.match_index = self.match_count - 1;
+        }
+        if self.pending_cycle != 0 {
+            let n = self.match_count as isize;
+            self.match_index =
+                (self.match_index as isize + self.pending_cycle).rem_euclid(n) as usize;
+            self.pending_cycle = 0;
+        }
+    }
+
+    /// Cycle to the next or previous match. If render has not computed matches
+    /// for the current query yet, queue the cycle for `set_match_count`.
+    pub fn cycle_match(&mut self, reverse: bool) {
+        let delta = if reverse { -1 } else { 1 };
+        if self.match_count > 0 {
+            let n = self.match_count as isize;
+            self.match_index = (self.match_index as isize + delta).rem_euclid(n) as usize;
+        } else if !self.query.is_empty() {
+            self.pending_cycle += delta;
+        }
+    }
+
+    fn clear_pending_cycle(&mut self) {
+        self.pending_cycle = 0;
+    }
 }
 
 // ---- Widget ----------------------------------------------------------------
@@ -190,7 +231,7 @@ impl<'a> SearchableTextBlock<'a> {
             Vec::new()
         };
 
-        state.match_count = matches.len();
+        state.set_match_count(matches.len());
 
         // Clamp the current match index and scroll it into view.
         if state.match_count > 0 {
@@ -324,6 +365,7 @@ impl<'a> SearchableTextBlock<'a> {
                     state.query = q.to_string();
                     state.input.set_text(q);
                     state.match_index = 0;
+                    state.clear_pending_cycle();
                 }
                 state.external_active = true;
             }
@@ -370,6 +412,7 @@ impl<'a> SearchableTextBlock<'a> {
                     state.input.clear();
                     state.match_index = 0;
                     state.match_count = 0;
+                    state.clear_pending_cycle();
                     true
                 } else {
                     false
@@ -387,14 +430,7 @@ impl<'a> SearchableTextBlock<'a> {
                     true
                 }
                 KeyCode::Enter => {
-                    if state.match_count > 0 {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
-                            state.match_index =
-                                (state.match_index + state.match_count - 1) % state.match_count;
-                        } else {
-                            state.match_index = (state.match_index + 1) % state.match_count;
-                        }
-                    }
+                    state.cycle_match(key.modifiers.contains(KeyModifiers::SHIFT));
                     true
                 }
                 _ => {
@@ -408,6 +444,7 @@ impl<'a> SearchableTextBlock<'a> {
                         if new_q != state.query {
                             state.query = new_q;
                             state.match_index = 0;
+                            state.clear_pending_cycle();
                         }
                     }
                     consumed
@@ -448,6 +485,7 @@ fn reset_search(state: &mut SearchableTextBlockState) {
     state.input.clear();
     state.match_index = 0;
     state.match_count = 0;
+    state.clear_pending_cycle();
     state.scroll_top = 0;
 }
 
@@ -930,6 +968,35 @@ mod tests {
             None,
         );
         assert_eq!(state.match_index, 2);
+    }
+
+    #[test]
+    fn enter_and_shift_enter_advance_and_decrement() {
+        let mut state = active_state_with_matches("a a a", "a", 40);
+        assert_eq!(state.match_index, 0);
+        SearchableTextBlock::handle_key(key(KeyCode::Enter), &mut state, None);
+        assert_eq!(state.match_index, 1);
+        SearchableTextBlock::handle_key(
+            key_mod(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut state,
+            None,
+        );
+        assert_eq!(state.match_index, 0);
+    }
+
+    #[test]
+    fn enter_before_render_cycles_after_matches_are_located() {
+        let mut state = SearchableTextBlockState {
+            phase: SearchPhase::Active,
+            query: "a".into(),
+            ..Default::default()
+        };
+        SearchableTextBlock::handle_key(key(KeyCode::Enter), &mut state, None);
+        assert_eq!(state.match_index, 0);
+        assert_eq!(state.match_count, 0);
+        render_active(&mut state, "a a a", 40, 6);
+        assert_eq!(state.match_count, 3);
+        assert_eq!(state.match_index, 1);
     }
 
     #[test]

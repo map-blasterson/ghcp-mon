@@ -353,6 +353,33 @@ fn tab_cycles_blocks_then_falls_through() {
 }
 
 #[test]
+fn focused_search_block_enter_and_shift_enter_cycle_matches() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut st = ToolDetailState::default();
+    let attrs = json!({"gen_ai.tool.call.result": "a a a"});
+    let d = native_detail("weird_tool", "function", attrs);
+    let _ = render_to(&mut st, Some(("t1", "s1")), Some("a"), Some(&d), true);
+    let idx = st
+        .focus_plan
+        .iter()
+        .position(|(_, kind)| matches!(kind, FocusKind::Search))
+        .expect("expected a searchable block");
+    st.focused_block = idx;
+    let key = st.focus_plan[idx].0.clone();
+    assert_eq!(st.text_blocks.get(&key).unwrap().match_count, 3);
+
+    assert!(handle_key(KeyEvent::from(KeyCode::Enter), &mut st));
+    assert_eq!(st.text_blocks.get(&key).unwrap().match_index, 1);
+
+    assert!(handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        &mut st
+    ));
+    assert_eq!(st.text_blocks.get(&key).unwrap().match_index, 0);
+}
+
+#[test]
 fn end_then_down_scroll_clamps() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     let mut st = ToolDetailState::default();
