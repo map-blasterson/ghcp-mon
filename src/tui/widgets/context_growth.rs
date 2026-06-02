@@ -24,6 +24,7 @@ pub mod merge;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::pixel::SEXTANTS;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -47,6 +48,26 @@ pub const OUTPUT: Color = Color::Rgb(0xfb, 0x92, 0x3c);
 pub const REASONING: Color = Color::Rgb(0xfd, 0xe0, 0x47);
 /// Limit line / hover underbar — yellow.
 pub const LIMIT_YELLOW: Color = Color::Rgb(0xfd, 0xe0, 0x47);
+
+/// Number of sub-pixel rows per character cell. Sextant chars give a 2×3
+/// pixel grid per cell — we exploit the vertical axis only (bars are
+/// 1 cell wide), so the effective vertical resolution is `plot_h * 3`
+/// sub-rows from baseline up to the plot top.
+pub const SUBROWS_PER_CELL: u8 = 3;
+
+/// SEXTANTS bit masks for "bottom-N sub-rows of a cell filled" where N is
+/// the index (0 = nothing, 3 = full block). Sextant bit layout in row-
+/// major order: bits 0,1 = top row, 2,3 = middle, 4,5 = bottom — so
+/// "bottom-1" sets bits 4,5 (= 0b110000 = 48) → '🬭'; "bottom-2" sets
+/// bits 2..5 (= 0b111100 = 60) → '🬹'; "bottom-3" = 0b111111 = 63 = '█'.
+const PARTIAL_FILL_BITS: [u8; 4] = [0b000000, 0b110000, 0b111100, 0b111111];
+
+/// Render one cell as a partial-fill sextant. `n_subs` is the number of
+/// sub-rows filled from the bottom of the cell, clamped to 0..=3.
+fn partial_fill_glyph(n_subs: u8) -> char {
+    let n = (n_subs as usize).min(PARTIAL_FILL_BITS.len() - 1);
+    SEXTANTS[PARTIAL_FILL_BITS[n] as usize]
+}
 
 /// Width of one bar in terminal cells.
 pub const BAR_CELL_WIDTH: u16 = 1;
@@ -215,22 +236,61 @@ impl<'a> ContextGrowthWidget<'a> {
         let c2 = cells(cache_r + fresh);
         let c3 = cells(cache_r + fresh + out);
         let c4 = cells(total);
+
+        // Topmost non-empty segment color — used when a cell straddles the
+        // stack apex so the sliver sitting above the cell's center is still
+        // painted in the correct (topmost) segment's color. Order matches
+        // the stack direction (REASONING is on top).
+        let topmost_color = if rea > 0 {
+            REASONING
+        } else if out > 0 {
+            OUTPUT
+        } else if fresh > 0 {
+            input_color
+        } else {
+            CACHE_READ
+        };
+
         for rr in 0..geom.plot_h {
-            let center = rr as f64 + 0.5;
-            let color = if center < c1 {
-                CACHE_READ
-            } else if center < c2 {
-                input_color
-            } else if center < c3 {
-                OUTPUT
-            } else if center < c4 {
-                REASONING
-            } else {
-                continue; // above the stack (clips at plot top when total > y_max).
-            };
+            // Per-cell fill height (in cell units) — clipped to this cell.
+            let fill = (c4 - rr as f64).clamp(0.0, 1.0);
+            if fill <= 0.0 {
+                break; // above the stack: all higher cells are empty too.
+            }
             let y = geom.baseline_row - rr;
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol("█").set_style(Style::default().fg(color));
+            if fill >= 1.0 - 1e-9 {
+                // Cell is fully inside the stack — pick segment color via
+                // the center rule (preserves the pre-existing colorisation
+                // of internal cells).
+                let center = rr as f64 + 0.5;
+                let color = if center < c1 {
+                    CACHE_READ
+                } else if center < c2 {
+                    input_color
+                } else if center < c3 {
+                    OUTPUT
+                } else {
+                    REASONING
+                };
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol("█").set_style(Style::default().fg(color));
+                }
+            } else {
+                // Partial top-of-stack cell — render `round(fill * 3)`
+                // sub-rows in the topmost-present segment's colour. This
+                // is the headline win: tiny stacks (total < 1 cell) and
+                // tiny apex segments (e.g. <1 cell of reasoning) become
+                // visible at 1/3 / 2/3 / 3/3-cell resolution.
+                let n_subs = (fill * SUBROWS_PER_CELL as f64).round() as u8;
+                if n_subs == 0 {
+                    continue;
+                }
+                let glyph = partial_fill_glyph(n_subs);
+                let mut s = [0u8; 4];
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol(glyph.encode_utf8(&mut s))
+                        .set_style(Style::default().fg(topmost_color));
+                }
             }
         }
     }
@@ -561,5 +621,95 @@ mod tests {
             !any_underbar,
             "cursor on oldest absolute row (off-chart) must not paint an underbar"
         );
+    }
+
+    /// A stack whose entire height is well under one cell MUST still
+    /// render — the sextant sub-pixel grid lets us show 1/3, 2/3, or 3/3
+    /// of a cell. Before the sextant work this would render nothing
+    /// (the cell's center sat above the stack top, so the old center-
+    /// rule loop `continue`'d).
+    #[test]
+    fn tiny_stack_renders_partial_sextant_at_baseline() {
+        // To force a < 1-cell stack we need y_max ≫ stack tokens. y_max
+        // is driven by max(token_limit, max_current_tokens) × 1.10.
+        // limit=100_000 ⇒ y_max=110_000. plot_h with height=14 is 12.
+        // Stack tokens = 5000 (all cache_read) ⇒ stack height =
+        // 5000 / 110_000 × 12 ≈ 0.545 cells → fill at rr=0 is 0.545 →
+        // round(0.545 × 3) = 2 → bottom-2-row sextant '🬹' in CACHE_READ.
+        // (Pass input == cache so cache_r = min(cache, input) = 5000.)
+        let data = MergedRows {
+            rows: vec![row(1, 5000, 5000, 0, 0, false, Some(100_000))],
+            max_current_tokens: 5000,
+        };
+        let state = ContextGrowthState::default();
+        let (_t, buf) = render_to_string(&data, &state, None, Some("abc"), 80, 14);
+        let geom = plot_geometry(Rect::new(0, 0, 80, 14)).unwrap();
+        let baseline_cell = &buf[(geom.plot_x0, geom.baseline_row)];
+        assert_ne!(
+            baseline_cell.symbol(),
+            "█",
+            "tiny stack must not render as a full block"
+        );
+        let glyph = baseline_cell.symbol();
+        let expected = [
+            partial_fill_glyph(1).to_string(),
+            partial_fill_glyph(2).to_string(),
+        ];
+        assert!(
+            expected.iter().any(|e| e == glyph),
+            "expected partial sextant {expected:?}, got {glyph:?}"
+        );
+        assert_eq!(baseline_cell.style().fg, Some(CACHE_READ));
+    }
+
+    /// A tiny REASONING sliver sitting on top of a tall stack MUST
+    /// render in the REASONING color at the apex — previously it was
+    /// invisible (the apex cell's center sat above the stack top so
+    /// the old loop `continue`'d that cell out).
+    #[test]
+    fn tiny_apex_segment_renders_in_topmost_color() {
+        // cache=7800 + reasoning=200 ⇒ total=8000 tokens.
+        // y_max = 1.10 × 10_000 = 11_000. plot_h = 12.
+        // c4 = 8000 / 11_000 × 12 ≈ 8.72 cells → fill at rr=8 is 0.72 →
+        // round(0.72 × 3) = 2 sub-rows in the topmost-present color
+        // (REASONING, since rea > 0).
+        // Pass input == cache to make cache_r = 7800 and fresh = 0.
+        let data = MergedRows {
+            rows: vec![row(1, 7800, 7800, 0, 200, false, Some(10_000))],
+            max_current_tokens: 8000,
+        };
+        let state = ContextGrowthState::default();
+        let (_t, buf) = render_to_string(&data, &state, None, Some("abc"), 80, 14);
+        let geom = plot_geometry(Rect::new(0, 0, 80, 14)).unwrap();
+        let apex = (0..geom.plot_h)
+            .rev()
+            .map(|rr| geom.baseline_row - rr)
+            .find(|y| buf[(geom.plot_x0, *y)].symbol() != " ")
+            .expect("at least one bar cell should render");
+        let apex_cell = &buf[(geom.plot_x0, apex)];
+        assert_ne!(
+            apex_cell.symbol(),
+            "█",
+            "apex cell of tiny-reasoning stack must be partial, not full"
+        );
+        assert_eq!(
+            apex_cell.style().fg,
+            Some(REASONING),
+            "apex sliver must be coloured as the topmost present segment"
+        );
+    }
+
+    /// `partial_fill_glyph` round-trip — guards the bit layout we
+    /// depend on (sextant bits 4,5 = bottom row, 2,3 = middle, 0,1 =
+    /// top in row-major order). If ratatui ever changes the SEXTANTS
+    /// table's bit-order convention this test will fail loudly.
+    #[test]
+    fn partial_fill_glyph_layout() {
+        assert_eq!(partial_fill_glyph(0), ' ');
+        assert_eq!(partial_fill_glyph(1), '🬭'); // bits 4,5 set
+        assert_eq!(partial_fill_glyph(2), '🬹'); // bits 2..5 set
+        assert_eq!(partial_fill_glyph(3), '█'); // all 6 bits set
+        // Out-of-range clamps to full block (last entry).
+        assert_eq!(partial_fill_glyph(99), '█');
     }
 }
