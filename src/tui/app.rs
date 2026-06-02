@@ -103,10 +103,8 @@ pub struct App {
     /// Per-column scenario state (keyed by column id).
     pub live_sessions_state: HashMap<String, LiveSessionsState>,
     pub spans_state: HashMap<String, SpansState>,
-    /// Per-column tool-detail scenario state (keyed by column id). `RefCell`
-    /// because `draw` takes `&self` but the searchable body blocks mutate
-    /// state (search phase, scroll, focus plan) during render.
-    pub tool_detail_state: RefCell<HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>>,
+    /// Per-column tool-detail scenario state (keyed by column id).
+    pub tool_detail_state: HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>,
     /// Per-column chat-detail scenario state.
     pub chat_detail_state: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>>,
     /// Per-column file-touches scenario state.
@@ -152,7 +150,7 @@ impl App {
             last_ws_event: None,
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
-            tool_detail_state: RefCell::new(HashMap::new()),
+            tool_detail_state: HashMap::new(),
             chat_detail_state: RefCell::new(HashMap::new()),
             file_touches_state: RefCell::new(HashMap::new()),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
@@ -1315,7 +1313,7 @@ impl App {
         };
         self.live_sessions_state.remove(&removed_id);
         self.spans_state.remove(&removed_id);
-        self.tool_detail_state.borrow_mut().remove(&removed_id);
+        self.tool_detail_state.remove(&removed_id);
         self.chat_detail_state.borrow_mut().remove(&removed_id);
         self.file_touches_state.borrow_mut().remove(&removed_id);
         let n = self.workspace.columns.len();
@@ -1340,7 +1338,7 @@ impl App {
         info!(enabled = self.mouse_enabled, "mouse capture toggled");
     }
 
-    pub fn draw(&self, frame: &mut ratatui::Frame<'_>) {
+    pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
         // Reserve the widget strip at the bottom: the clamped height when the
         // widget is visible, or a single collapsed bar when hidden.
@@ -1375,7 +1373,7 @@ impl App {
 
     /// Paint the Context Growth Widget strip (or its collapsed bar) at the
     /// bottom of the workspace.
-    fn draw_context_widget(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn draw_context_widget(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if area.height == 0 {
             return;
         }
@@ -1400,7 +1398,7 @@ impl App {
         widget.render(area, frame.buffer_mut(), &self.context_widget);
     }
 
-    fn draw_top_bar(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn draw_top_bar(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         // status dot in column 0, then text title + hints.
         if area.width < 4 {
             return;
@@ -1421,7 +1419,7 @@ impl App {
         frame.render_widget(p, rest);
     }
 
-    fn draw_workspace(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn draw_workspace(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if self.workspace.columns.is_empty() {
             let msg = Paragraph::new(Line::from(Span::styled(
                 "no columns. add one from the top bar.",
@@ -1451,12 +1449,32 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        for (i, col) in self.workspace.columns.iter().enumerate() {
-            let rect = cols[i];
-            let focused = self.focus.column_idx() == Some(i);
+        // Snapshot per-column dispatch data so the iteration does not
+        // borrow `self.workspace` for the duration of the per-scenario
+        // calls (which need `&mut self`).
+        let dispatches: Vec<(usize, Rect, String, String, ScenarioType,
+            crate::tui::workspace::ColumnConfig, bool)> = self
+            .workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                (
+                    i,
+                    cols[i],
+                    c.id.clone(),
+                    c.title.clone(),
+                    c.scenario_type,
+                    c.config.clone(),
+                    self.focus.column_idx() == Some(i),
+                )
+            })
+            .collect();
+
+        for (i, rect, col_id, title, st, cfg, focused) in dispatches {
             let mut block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} ", col.title));
+                .title(format!(" {title} "));
             if focused {
                 block = block.border_style(Style::default().fg(Color::Cyan));
             }
@@ -1469,28 +1487,25 @@ impl App {
                 buf.set_span(inner.x, inner.y, &span, inner.width);
                 continue;
             }
-            // Dispatch to per-scenario renderer.
-            let cfg = col.config.clone();
-            let st = col.scenario_type;
             let buf: &mut Buffer = frame.buffer_mut();
             match st {
-                ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col.id),
-                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col.id),
+                ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col_id),
+                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col_id),
                 ScenarioType::ToolDetail => {
-                    self.draw_tool_detail(inner, buf, &col.id, &cfg, focused)
+                    self.draw_tool_detail(inner, buf, &col_id, &cfg, focused)
                 }
                 ScenarioType::ChatDetail => {
-                    self.draw_chat_detail(inner, buf, &col.id, &cfg, focused)
+                    self.draw_chat_detail(inner, buf, &col_id, &cfg, focused)
                 }
                 ScenarioType::FileTouches => {
-                    self.draw_file_touches(inner, buf, &col.id, &cfg, focused)
+                    self.draw_file_touches(inner, buf, &col_id, &cfg, focused)
                 }
                 _ => render_placeholder(inner, buf, st, &cfg),
             }
         }
     }
 
-    fn draw_live_sessions(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+    fn draw_live_sessions(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
         let sessions = self.cached_sessions();
         let default = LiveSessionsState::default();
         let state: &LiveSessionsState =
@@ -1526,7 +1541,7 @@ impl App {
     /// tool-detail scenario renderer (which mutates per-column state through
     /// the `RefCell`).
     fn draw_tool_detail(
-        &self,
+        &mut self,
         area: Rect,
         buf: &mut Buffer,
         col_id: &str,
@@ -1542,8 +1557,7 @@ impl App {
         };
         let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
 
-        let mut map = self.tool_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
+        let state = self.tool_detail_state.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::tool_detail::render(
             area,
             buf,
@@ -1557,8 +1571,7 @@ impl App {
 
     /// Dispatch a key to a `ToolDetail` column's scenario state.
     fn tool_detail_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
-        let mut map = self.tool_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
+        let state = self.tool_detail_state.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::tool_detail::handle_key(k, state)
     }
 
@@ -1566,7 +1579,7 @@ impl App {
     /// query, tool-call hint, and the prior chat-span baseline (DELTA), then
     /// delegates to the chat-detail scenario renderer.
     fn draw_chat_detail(
-        &self,
+        &mut self,
         area: Rect,
         buf: &mut Buffer,
         col_id: &str,
@@ -1665,7 +1678,7 @@ impl App {
     /// span's detail through the shared `["span", ...]` cache), and delegates to
     /// the file-touches scenario renderer.
     fn draw_file_touches(
-        &self,
+        &mut self,
         area: Rect,
         buf: &mut Buffer,
         col_id: &str,
@@ -1731,9 +1744,13 @@ impl App {
         .unwrap_or_default()
     }
 
-    fn draw_spans(&self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {
+    fn draw_spans(&mut self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {
         let cfg = &self.workspace.columns[col_idx].config;
         let session = cfg.get("session").and_then(|v| v.as_str()).map(str::to_string);
+        let kind_filter: Option<String> = cfg
+            .get("kind_filter")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         // Two-row header.
         if area.height < 3 {
             return;
@@ -1751,29 +1768,38 @@ impl App {
         Paragraph::new(Span::styled(sess_label, Style::default().fg(Color::Cyan)))
             .render(h_top, buf);
 
+        // Snapshot SpansState scalars / cloned collections up front so the
+        // immutable borrow on `self.spans_state` does not collide with the
+        // `&mut self` calls (`draw_span_detail_pane`, `draw_spans_popover`,
+        // `compute_row_chips`, `compute_report_intent_titles`,
+        // `cached_search_hits`) later in this function.
+        let snap = self.spans_state.get(col_id);
+        let (cursor, follow_mode, search_active, search_text, user_collapsed) = match snap {
+            Some(s) => (
+                s.cursor,
+                s.follow_mode,
+                s.search_active,
+                s.search.text().to_string(),
+                s.user_collapsed.clone(),
+            ),
+            None => (0, false, false, String::new(), Default::default()),
+        };
+
         // Row 2: kind / search / follow / collapse hints.
-        let default_state = SpansState::default();
-        let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default_state);
-        let follow = if st.follow_mode { "[x] follow" } else { "[ ] follow" };
-        let search_label = if st.search_active {
-            format!("/ {}_", st.search.text())
-        } else if !st.search.text().is_empty() {
-            format!("/ {}", st.search.text())
+        let follow = if follow_mode { "[x] follow" } else { "[ ] follow" };
+        let search_label = if search_active {
+            format!("/ {search_text}_")
+        } else if !search_text.is_empty() {
+            format!("/ {search_text}")
         } else {
             "/  ".to_string()
         };
-        let kind_filter: Option<String> = cfg
-            .get("kind_filter")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
         let kf_label = kind_filter
             .as_deref()
             .map(|s| format!("k:{s}"))
             .unwrap_or_else(|| "k:kind".to_string());
         let hint = format!(
-            "{kf}  {search}  {follow}  +/-:expand/collapse  s:session",
-            kf = kf_label,
-            search = search_label,
+            "{kf_label}  {search_label}  {follow}  +/-:expand/collapse  s:session"
         );
         Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray)))
             .render(h_bot, buf);
@@ -1815,17 +1841,16 @@ impl App {
             self.draw_spans_popover(body_total, buf, col_id);
             return;
         }
-        let flat = tree.flatten_visible(&st.user_collapsed);
+        let flat = tree.flatten_visible(&user_collapsed);
         let visible_rows = tree_area.height as usize;
-        let start = if st.cursor >= visible_rows {
-            st.cursor + 1 - visible_rows
+        let start = if cursor >= visible_rows {
+            cursor + 1 - visible_rows
         } else {
             0
         };
-        let search_text = st.search.text();
         // Resolve search-hit set from the cache (server-side search).
         let hit_set: Option<std::collections::HashSet<String>> = if !search_text.is_empty() {
-            self.cached_search_hits(&session, search_text).map(|resp| {
+            self.cached_search_hits(&session, &search_text).map(|resp| {
                 resp.results.into_iter().map(|r| r.span_id).collect()
             })
         } else {
@@ -1843,7 +1868,7 @@ impl App {
                 continue;
             };
             let row_y = tree_area.y + i_visible as u16;
-            let focused = flat_idx == st.cursor;
+            let focused = flat_idx == cursor;
             let (row_bg, mut row_dim) = match &hit_set {
                 Some(set) if set.contains(&node.span_id) => (Some(Color::Yellow), false),
                 Some(_) => (None, true),
@@ -1855,6 +1880,9 @@ impl App {
                     row_dim = true;
                 }
             }
+            // `compute_row_chips` and the SpansTreeRow render want `node`
+            // (an immutable reference into `tree`). Borrow scoping is fine
+            // here — `tree` is a local Vec we own.
             let (chips, description) = self.compute_row_chips(node);
             let report_title = report_titles.get(&node.span_id).cloned();
             let row_area = Rect::new(tree_area.x, row_y, tree_area.width, 1);
@@ -1862,7 +1890,7 @@ impl App {
                 node,
                 depth,
                 focused,
-                collapsed: st.user_collapsed.contains(row_id),
+                collapsed: user_collapsed.contains(row_id),
                 row_bg,
                 row_dim,
                 chips: &chips,
@@ -1875,7 +1903,7 @@ impl App {
 
         // Bottom detail inspector pane.
         if detail_h >= 3 {
-            self.draw_span_detail_pane(detail_area, buf, &tree, &flat, st);
+            self.draw_span_detail_pane(detail_area, buf, &tree, &flat, cursor);
         }
 
         // Popover overlay (drawn over the body).
@@ -1884,7 +1912,7 @@ impl App {
 
     /// Render the no-session traces list. Implements `Traces list dims rows
     /// below kind filter`.
-    fn draw_traces_list(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+    fn draw_traces_list(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
         let traces = self.cached_traces();
         let default = SpansState::default();
         let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default);
@@ -1959,12 +1987,12 @@ impl App {
 
     /// Bottom span-detail inspector pane — parent, children, projection.
     fn draw_span_detail_pane(
-        &self,
+        &mut self,
         area: Rect,
         buf: &mut Buffer,
         tree: &[crate::tui::model::SpanNode],
         flat: &[String],
-        st: &SpansState,
+        cursor: usize,
     ) {
         // Border
         let block = Block::default()
@@ -1976,7 +2004,7 @@ impl App {
         if inner.height == 0 || inner.width < 8 {
             return;
         }
-        let Some(focused_id) = flat.get(st.cursor) else {
+        let Some(focused_id) = flat.get(cursor) else {
             return;
         };
         let Some(node) = tree.find_by_id(focused_id) else {
@@ -2193,7 +2221,7 @@ impl App {
     }
 
     /// Popover overlay for the `s` (session) and `k` (kind) keys.
-    fn draw_spans_popover(&self, area: Rect, buf: &mut Buffer, col_id: &str) {
+    fn draw_spans_popover(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
         let Some(st) = self.spans_state.get(col_id) else {
             return;
         };
@@ -2501,7 +2529,7 @@ mod tests {
         });
     }
 
-    fn render_buf_text(app: &App, w: u16, h: u16) -> String {
+    fn render_buf_text(app: &mut App, w: u16, h: u16) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(w, h);
@@ -2554,7 +2582,7 @@ mod tests {
                 }
             }),
         );
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         // -3 (removed) and +1 (added) chips must appear somewhere.
         assert!(text.contains("-3"), "missing -3 in:\n{text}");
         assert!(text.contains("+1"), "missing +1 in:\n{text}");
@@ -2585,7 +2613,7 @@ mod tests {
                 }
             }),
         );
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         assert!(text.contains("summarize"), "missing skill chip in:\n{text}");
         assert!(text.contains("skim docs"), "missing desc in:\n{text}");
     }
@@ -2618,7 +2646,7 @@ mod tests {
                 "gen_ai.tool.call.arguments": {"intent": "DOTHETHING"}
             }),
         );
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         assert!(text.contains("DOTHETHING"), "missing intent in:\n{text}");
     }
 
@@ -2667,7 +2695,7 @@ mod tests {
         // Render and assert the hit row name appears and the miss row is
         // present too (no hiding). Cell styling is hard to assert in plain
         // text — but the row content must be unchanged.
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         assert!(text.contains("hit-span"), "missing hit in:\n{text}");
         assert!(text.contains("miss-span"), "missing miss in:\n{text}");
     }
@@ -2766,7 +2794,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn traces_mode_renders_when_no_session() {
-        let app = one_spans_column_app();
+        let mut app = one_spans_column_app();
         // No session in config.
         seed_traces(
             &app,
@@ -2787,7 +2815,7 @@ mod tests {
                 conversation_id: None,
             }],
         );
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         assert!(text.contains("abcdef01"), "missing trace id in:\n{text}");
         assert!(text.contains("spans:7"), "missing span count in:\n{text}");
         assert!(text.contains("chat:1"), "missing chat count in:\n{text}");
@@ -2809,7 +2837,7 @@ mod tests {
         ));
         seed_session_tree(&app, "cid-1", vec![parent]);
         // Tall enough to enable the detail pane (height >= 16).
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         // Detail border title is " detail "
         assert!(text.contains("detail"), "no detail pane in:\n{text}");
         // Parent of focused root should be "—".
@@ -2850,7 +2878,7 @@ mod tests {
             app.spans_state.get(&col_id).unwrap().popover,
             Some(SpansPopover::Session)
         );
-        let text = render_buf_text(&app, 120, 20);
+        let text = render_buf_text(&mut app, 120, 20);
         // Popover header shows "Session"
         assert!(text.contains("Session"), "popover not rendered:\n{text}");
     }
