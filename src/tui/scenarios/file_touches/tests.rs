@@ -104,8 +104,8 @@ fn count_chips_color_r_blue_and_w_green_independently() {
     let buf = term.backend().buffer();
     // After clamp the focus is on the last visible row. Sweep colors per row.
     let blue = ratatui::style::Color::Rgb(0x60, 0xa5, 0xfa);
-    let green = ratatui::style::Color::Rgb(0x4a, 0xde, 0x80);
-    let yellow = ratatui::style::Color::Rgb(0xfd, 0xe0, 0x47);
+    let red = ratatui::style::Color::Rgb(0xf8, 0x71, 0x71);
+    let purple = ratatui::style::Color::Rgb(0xc0, 0x84, 0xfc);
     let row_colors: Vec<std::collections::HashSet<ratatui::style::Color>> = (0..12)
         .map(|y| {
             (0..60)
@@ -118,11 +118,11 @@ fn count_chips_color_r_blue_and_w_green_independently() {
     // w_row is index 3 but that's the LAST visible row → focused → black.
     // Don't assert on it here; the focused_row_highlight_overrides test
     // covers w-row separately.
-    // src has BOTH counts (1R 1W) → its name renders yellow AND the count
-    // chips render blue+green.
+    // src has BOTH counts (1R 1W) → its name renders purple AND the count
+    // chips render blue+red.
     assert!(
-        row_colors[src_row].contains(&yellow),
-        "src row name should be yellow (both R+W), got {:?}",
+        row_colors[src_row].contains(&purple),
+        "src row name should be purple (both R+W), got {:?}",
         row_colors[src_row],
     );
     assert!(
@@ -131,25 +131,25 @@ fn count_chips_color_r_blue_and_w_green_independently() {
         row_colors[src_row],
     );
     assert!(
-        row_colors[src_row].contains(&green),
-        "src row should contain green (W chip), got {:?}",
+        row_colors[src_row].contains(&red),
+        "src row should contain red (W chip), got {:?}",
         row_colors[src_row],
     );
-    // r.rs row should contain blue but NOT green (no W chip).
+    // r.rs row should contain blue but NOT red (no W chip).
     assert!(
         row_colors[r_row].contains(&blue),
         "r.rs row should contain blue cells (R-only), got {:?}",
         row_colors[r_row],
     );
     assert!(
-        !row_colors[r_row].contains(&green),
-        "r.rs row must NOT contain green (no W chip), got {:?}",
+        !row_colors[r_row].contains(&red),
+        "r.rs row must NOT contain red (no W chip), got {:?}",
         row_colors[r_row],
     );
     // Header row contains both R+W chips.
     assert!(
-        row_colors[0].contains(&blue) && row_colors[0].contains(&green),
-        "header row should contain both R-blue and W-green chips, got {:?}",
+        row_colors[0].contains(&blue) && row_colors[0].contains(&red),
+        "header row should contain both R-blue and W-red chips, got {:?}",
         row_colors[0],
     );
 }

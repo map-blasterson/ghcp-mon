@@ -9,13 +9,13 @@
 //!
 //! ## Layout (top → bottom)
 //! row 0: header — session marker + total `NR NW` count chips (zero values
-//! omitted; R chips blue, W chips green to match `spans::chips` intent) +
+//! omitted; R chips blue, W chips red to match `spans::chips` intent) +
 //! `[+]`/`[-]` bulk controls (rendered DIM/disabled when no directories are
 //! present).
 //! rows 1..: scrollable tree — 2 cells of indent per level, a collapse glyph
 //! (`▾`/`▸`) for directories and a blank for files, the name (colored
-//! blue/green/yellow for R-only/W-only/both), then right-aligned per-node
-//! count chips (`NR` blue, `NW` green). The focused row is highlighted with
+//! blue/red/purple for R-only/W-only/both), then right-aligned per-node
+//! count chips (`NR` blue, `NW` red). The focused row is highlighted with
 //! a cyan background that overrides the chip colors.
 //!
 //! ## Key dispatch (column layer)
@@ -58,12 +58,11 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::tui::format::fmt_compact_count;
 use tree::{build_tree, dir_paths, Touch, TouchNode, TouchTree};
 
-/// Per-row colors. These mirror the four-section palette already used by
-/// `chat_detail::color_for_node` so the file-touches column reads as part of
-/// the same visual family.
+/// Per-row colors. R = blue, W = red, both = purple — the user-requested
+/// palette for the file-touches column.
 const ROW_R_ONLY: Color = Color::Rgb(0x60, 0xa5, 0xfa); // blue
-const ROW_W_ONLY: Color = Color::Rgb(0x4a, 0xde, 0x80); // green
-const ROW_BOTH: Color = Color::Rgb(0xfd, 0xe0, 0x47); // yellow
+const ROW_W_ONLY: Color = Color::Rgb(0xf8, 0x71, 0x71); // red
+const ROW_BOTH: Color = Color::Rgb(0xc0, 0x84, 0xfc); // purple
 
 /// Color the R / W count chips. These match `spans::chips.rs`'s
 /// `-N` red / `+N` green semantic: every chip is its own color-coded glyph
