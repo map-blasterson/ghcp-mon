@@ -25,6 +25,38 @@ use crate::tui::model::SpanNode;
 use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
 use crate::tui::widgets::rolling_dots;
 
+fn display_name(node: &SpanNode) -> String {
+    let raw = node.name.trim();
+    if let Some(tool_name) = node.projected_tool_name() {
+        if raw == tool_name {
+            return String::new();
+        }
+        if let Some((head, tail)) = raw.rsplit_once(" - ") {
+            if tail.trim() == tool_name {
+                let head = head.trim();
+                return if looks_like_model_name(head) {
+                    String::new()
+                } else {
+                    head.to_string()
+                };
+            }
+        }
+    }
+    node.name.clone()
+}
+
+fn looks_like_model_name(s: &str) -> bool {
+    let s = s.to_ascii_lowercase();
+    s.starts_with("gpt")
+        || s.starts_with("claude")
+        || s.starts_with("gemini")
+        || s.starts_with("llama")
+        || s.starts_with("mistral")
+        || s.starts_with("o1")
+        || s.starts_with("o3")
+        || s.starts_with("o4")
+}
+
 /// One row of the Spans session-span-tree. `area` MUST be one row tall;
 /// rows wider than the body width truncate the name with `…` per the LLR.
 pub struct SpansTreeRow<'a> {
@@ -79,14 +111,17 @@ impl Widget for SpansTreeRow<'_> {
         }
         x += 2;
 
-        // (2) Kind badge.
-        let label = kind_label(self.node.kind_class);
-        let badge_w = (label.chars().count() as u16 + 2).min(10);
-        if x + badge_w < right_edge {
-            let badge = KindBadge::new(self.node.kind_class)
-                .with_seed(self.node.name.clone());
-            badge.render(Rect::new(x, row_y, badge_w, 1), buf);
-            x += badge_w + 1;
+        // (2) Kind badge. Tool rows use the hash-coloured tool-name chip
+        // instead, so skip the generic kind label there.
+        if !self.node.is_tool_row() {
+            let label = kind_label(self.node.kind_class);
+            let badge_w = (label.chars().count() as u16 + 2).min(10);
+            if x + badge_w < right_edge {
+                let badge = KindBadge::new(self.node.kind_class)
+                    .with_seed(self.node.name.clone());
+                badge.render(Rect::new(x, row_y, badge_w, 1), buf);
+                x += badge_w + 1;
+            }
         }
 
         // (3) Placeholder rolling dots (3 cells).
@@ -119,7 +154,7 @@ impl Widget for SpansTreeRow<'_> {
         let total_avail = right_edge.saturating_sub(x) as usize;
         let name_budget =
             total_avail.saturating_sub(chip_reserve + desc_reserve + title_reserve);
-        let mut name = self.node.name.clone();
+        let mut name = display_name(self.node);
         if name.chars().count() > name_budget {
             name = name
                 .chars()

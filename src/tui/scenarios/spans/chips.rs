@@ -5,11 +5,12 @@
 //! - `Skill name chip shows skill argument`
 //! - `Report intent title shows on parent row`
 //! - `Spans tool description inline label`
+//! - `Spans target badge shows file basename or URL domain`
 //! - `Spans diff stat badges on file mutation tools`
 
 use serde_json::Value;
 
-use crate::tui::vendor::copilot::{ToolKind, apply_patch_diff_stat};
+use crate::tui::vendor::copilot::{ToolKind, apply_patch_diff_stat, extract_apply_patch_paths};
 
 const SHELL_CHIP_TRUNCATE: usize = 24;
 const SHELL_CHIP_MAX: usize = 6;
@@ -141,6 +142,69 @@ pub fn tool_description_label(args: &Value) -> Option<String> {
     Some(s.to_string())
 }
 
+/// Per `Spans target badge shows file basename or URL domain`.
+pub fn target_chips(kind: Option<ToolKind>, args: &Value) -> Vec<String> {
+    if !args.is_object() || args.is_array() {
+        return Vec::new();
+    }
+    if let Some(path) = args
+        .get("path")
+        .or_else(|| args.get("filePath"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return vec![target_basename(path)];
+    }
+    if matches!(kind, Some(ToolKind::Patch)) {
+        let paths = extract_apply_patch_paths(args);
+        if !paths.is_empty() {
+            return paths.into_iter().map(|p| target_basename(&p)).collect();
+        }
+    }
+    args.get("url")
+        .or_else(|| args.get("target-url"))
+        .or_else(|| args.get("target_url"))
+        .and_then(Value::as_str)
+        .and_then(url_hostname)
+        .into_iter()
+        .collect()
+}
+
+fn target_basename(p: &str) -> String {
+    let is_windows = p.len() >= 3
+        && p.as_bytes()[0].is_ascii_alphabetic()
+        && p.as_bytes()[1] == b':'
+        && matches!(p.as_bytes()[2], b'\\' | b'/');
+    if is_windows {
+        p.rsplit(['\\', '/'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(p)
+            .to_string()
+    } else {
+        p.rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(p)
+            .to_string()
+    }
+}
+
+fn url_hostname(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = if let Some(end) = host_port
+        .strip_prefix('[')
+        .and_then(|s| s.find(']').map(|i| &s[..i]))
+    {
+        end
+    } else {
+        host_port.split(':').next().unwrap_or_default()
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// Per `Spans diff stat badges on file mutation tools`. Returns
 /// `(added, removed)`.
 pub fn diff_stat(kind: ToolKind, args: &Value) -> (u32, u32) {
@@ -260,6 +324,42 @@ mod tests {
         );
         assert!(tool_description_label(&json!({"description": ""})).is_none());
         assert!(tool_description_label(&json!({})).is_none());
+    }
+
+    #[test]
+    fn target_chips_path_basename() {
+        assert_eq!(
+            target_chips(Some(ToolKind::Edit), &json!({"path": "/repo/src/lib.rs"})),
+            vec!["lib.rs"]
+        );
+        assert_eq!(
+            target_chips(Some(ToolKind::Write), &json!({"filePath": "C:\\work\\main.rs"})),
+            vec!["main.rs"]
+        );
+    }
+
+    #[test]
+    fn target_chips_url_hostname() {
+        assert_eq!(
+            target_chips(None, &json!({"url": "https://example.com/a/b"})),
+            vec!["example.com"]
+        );
+        assert!(target_chips(None, &json!({"url": "not a url"})).is_empty());
+    }
+
+    #[test]
+    fn target_chips_patch_paths() {
+        let args = json!({"patch": "*** Add File: src/a.rs\n*** Update File: crates/b.rs\n"});
+        assert_eq!(
+            target_chips(Some(ToolKind::Patch), &args),
+            vec!["a.rs", "b.rs"]
+        );
+    }
+
+    #[test]
+    fn target_chips_rejects_non_object() {
+        assert!(target_chips(Some(ToolKind::Read), &json!("/repo/src/lib.rs")).is_empty());
+        assert!(target_chips(Some(ToolKind::Read), &json!([])).is_empty());
     }
 
     #[test]

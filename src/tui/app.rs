@@ -2178,14 +2178,13 @@ impl App {
         node: &crate::tui::model::SpanNode,
     ) -> (Vec<(String, Color)>, Option<String>) {
         let mut out: Vec<(String, Color)> = Vec::new();
-        // Only execute_tool spans currently get chips per the LLR family.
-        if !matches!(node.kind_class, KindClass::ExecuteTool) {
+        if !node.is_tool_row() {
             return (out, None);
         }
-        let Some(tool_call) = &node.projection.tool_call else {
-            return (out, None);
-        };
-        let tool_name = tool_call.tool_name.clone().unwrap_or_default();
+        let tool_name = node.projected_tool_name().unwrap_or_default().to_string();
+        if !tool_name.is_empty() {
+            out.push((tool_name.clone(), crate::tui::format::hash_color(&tool_name)));
+        }
         let Some(detail) = self.cached_span_detail(&node.trace_id, &node.span_id) else {
             return (out, None);
         };
@@ -2202,8 +2201,11 @@ impl App {
                 out.push((s, Color::Green));
             }
         }
-        // Diff-stat badges
         let kind_opt = crate::tui::vendor::copilot::tool_name_mapping(&tool_name);
+        for target in chips::target_chips(kind_opt, &args) {
+            out.push((target, Color::Cyan));
+        }
+        // Diff-stat badges
         if let Some(kind) = kind_opt {
             let (added, removed) = chips::diff_stat(kind, &args);
             if removed > 0 {
@@ -2474,6 +2476,17 @@ mod tests {
         end_ns: i128,
         children: Vec<SpanNode>,
     ) -> SpanNode {
+        mk_span_node_named(id, id, kind, tool_name, end_ns, children)
+    }
+
+    fn mk_span_node_named(
+        id: &str,
+        name: &str,
+        kind: KindClass,
+        tool_name: Option<&str>,
+        end_ns: i128,
+        children: Vec<SpanNode>,
+    ) -> SpanNode {
         let projection = SpanProjection {
             tool_call: tool_name.map(|n| ToolCallProjection {
                 tool_call_pk: 0,
@@ -2488,7 +2501,7 @@ mod tests {
             trace_id: "trace-1".into(),
             span_id: id.into(),
             parent_span_id: None,
-            name: id.into(),
+            name: name.into(),
             kind_class: kind,
             ingestion_state: "complete".into(),
             start_unix_ns: Some(end_ns),
@@ -2496,6 +2509,19 @@ mod tests {
             projection,
             children,
         }
+    }
+
+    fn mk_external_tool_node(id: &str, name: &str, tool_name: &str, end_ns: i128) -> SpanNode {
+        let mut node = mk_span_node_named(id, name, KindClass::ExternalTool, None, end_ns, vec![]);
+        node.projection.external_tool_call = Some(ExternalToolCallProjection {
+            ext_pk: 1,
+            call_id: Some(format!("ext-{id}")),
+            tool_name: Some(tool_name.to_string()),
+            paired_tool_call_pk: None,
+            conversation_id: None,
+            agent_run_pk: None,
+        });
+        node
     }
 
     fn seed_session_tree(app: &App, cid: &str, tree: Vec<SpanNode>) {
@@ -2597,13 +2623,16 @@ mod tests {
         });
     }
 
-    fn render_buf_text(app: &mut App, w: u16, h: u16) -> String {
+    fn render_buf(app: &mut App, w: u16, h: u16) -> Buffer {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(w, h);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| app.draw(f)).unwrap();
-        let buf = term.backend().buffer();
+        term.backend().buffer().clone()
+    }
+
+    fn buf_text(buf: &Buffer) -> String {
         let mut joined = String::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
@@ -2612,6 +2641,23 @@ mod tests {
             joined.push('\n');
         }
         joined
+    }
+
+    fn render_buf_text(app: &mut App, w: u16, h: u16) -> String {
+        let buf = render_buf(app, w, h);
+        buf_text(&buf)
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, y)].symbol());
+        }
+        row
+    }
+
+    fn row_substr_x(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
+        row_text(buf, y).find(needle).map(|x| x as u16)
     }
 
     fn one_spans_column_app() -> App {
@@ -2634,6 +2680,130 @@ mod tests {
         app.focus = Focus::Column(0);
         app.last_focused_column = Some(0);
         app
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_execute_tool_name_as_hash_chip_without_kind_or_model() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node_named(
+            "bash-span",
+            "gpt-4 - bash",
+            KindClass::ExecuteTool,
+            Some("bash"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("bash"), "missing bash tool chip in:\n{text}");
+        assert!(!row.contains("gpt-4"), "model leaked into row:\n{text}");
+        assert!(!row.contains("tool"), "generic tool kind badge leaked into row:\n{text}");
+        let x = row_substr_x(&buf, 4, "bash").expect("bash x");
+        assert_eq!(
+            buf[(x, 4)].style().bg,
+            Some(crate::tui::format::hash_color("bash"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_external_tool_name_as_hash_chip_without_kind_or_model() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_external_tool_node(
+            "external-span",
+            "claude-3 - web_fetch",
+            "web_fetch",
+            100,
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("web_fetch"), "missing external tool chip in:\n{text}");
+        assert!(!row.contains("claude-3"), "model leaked into row:\n{text}");
+        assert!(!row.contains("external"), "generic external kind badge leaked into row:\n{text}");
+        let x = row_substr_x(&buf, 4, "web_fetch").expect("web_fetch x");
+        assert_eq!(
+            buf[(x, 4)].style().bg,
+            Some(crate::tui::format::hash_color("web_fetch"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_target_path_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "edit-span",
+            KindClass::ExecuteTool,
+            Some("edit"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "edit-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "path": "/repo/src/lib.rs",
+                    "old_str": "",
+                    "new_str": ""
+                }
+            }),
+        );
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("lib.rs"), "missing target path chip in:\n{text}");
+        let x = row_substr_x(&buf, 4, "lib.rs").expect("lib.rs x");
+        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chips_render_target_url_hostname_in_tree_row() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "fetch-span",
+            KindClass::ExecuteTool,
+            Some("web_fetch"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail(
+            &app,
+            "trace-1",
+            "fetch-span",
+            serde_json::json!({
+                "gen_ai.tool.call.arguments": {
+                    "url": "https://example.com/docs/page"
+                }
+            }),
+        );
+
+        let buf = render_buf(&mut app, 120, 20);
+        let text = buf_text(&buf);
+        let row = row_text(&buf, 4);
+        assert!(row.contains("example.com"), "missing target URL chip in:\n{text}");
+        let x = row_substr_x(&buf, 4, "example.com").expect("example.com x");
+        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
     }
 
     #[tokio::test(flavor = "current_thread")]
