@@ -72,12 +72,10 @@ Active only when a `SearchableTextBlock` has focus (the **widget** precedence la
 
 ### Phase 3 additions (Tool Detail column)
 
-Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` cycle the column's focusable blocks (metadata panel, searchable bodies, JSON panels) before falling through to the global column-focus cycle.
+Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` fall through to the global column-focus cycle; there is no within-column block focus cycle.
 
 | Key             | Layer      | Mode/Scope                        | Effect                                              |
 | --------------- | ---------- | --------------------------------- | --------------------------------------------------- |
-| `Tab`           | column     | block focus < last                | focus next block (else fall through, reset to first)|
-| `Shift-Tab`     | column     | block focus > 0                   | focus previous block (else fall through)            |
 | `↑` / `↓`       | column     | any                               | scroll body up / down one line                      |
 | `Home` / `End`  | column     | any                               | scroll to top / bottom                              |
 | `Space`         | column     | focused metadata / JSON panel     | toggle panel open / closed (`▸`/`▾`)                 |
@@ -87,7 +85,7 @@ Active when a `ToolDetail` column has focus. `Tab`/`Shift-Tab` cycle the column'
 
 ### Phase 4 additions (Chat Detail column)
 
-Active when a `ChatDetail` column has focus.
+Active when a `ChatDetail` column has focus. `Tab`/`Shift-Tab` fall through to the global column-focus cycle; there is no within-column block focus cycle.
 
 | Key                | Layer  | Mode/Scope                                | Effect                                                |
 | ------------------ | ------ | ----------------------------------------- | ----------------------------------------------------- |
@@ -97,7 +95,6 @@ Active when a `ChatDetail` column has focus.
 | `Space`            | column | tree focused, primitive key row           | toggle the focused primitive's expand state           |
 | `Space`            | column | tree focused, normal row                  | toggle node expand                                    |
 | `m`                | column | always                                    | toggle `chat_mode` DELTA ↔ FULL                       |
-| `Tab` / `Shift-Tab`| column | within ChatDetail                         | cycle focus across body sub-blocks                    |
 | `Home` / `End`     | column | tree focused                              | jump to top / bottom                                  |
 
 (Widget-layer keys for SearchableTextBlock — `/`, `Enter`, `Shift+Enter`, `Esc`, printable, Backspace — remain unchanged from Phase 2.5.)

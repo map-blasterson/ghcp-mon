@@ -13,10 +13,10 @@
 //! collapsible raw-attributes JSON. Column scroll covers the whole.
 //!
 //! ## Key dispatch (column layer)
-//! `Tab`/`Shift-Tab` cycle focus across focusable blocks (metadata, searchable
-//! bodies, JSON); `↑`/`↓` scroll; `Home`/`End` jump; `Space` toggles the
-//! metadata panel or the focused JSON view; `/` activates search on the
-//! focused body block (then character/`Enter`/`Esc` keys route into it).
+//! `Tab`/`Shift-Tab` fall through to the global column-focus cycle; `↑`/`↓`
+//! scroll; `Home`/`End` jump; `Space` toggles the metadata panel or focused
+//! JSON view; `/` activates search on the focused body block (then
+//! character/`Enter`/`Esc` keys route into it).
 //!
 //! Source for (shared `frontend/llr/`):
 //! - `Tool detail requires tool call projection`
@@ -92,7 +92,7 @@ pub struct ToolDetailState {
     /// Per-searchable-block state, keyed by a stable block key.
     pub text_blocks: HashMap<String, SearchableTextBlockState>,
     /// Focus plan captured by the last render (key + kind, in block order).
-    /// Read by [`handle_key`] for `Tab` cycling and `Space`/`/` dispatch.
+    /// Read by [`handle_key`] for `Space`/`/` dispatch.
     pub focus_plan: Vec<(String, FocusKind)>,
     /// Total body line count from the last render (for scroll clamping).
     pub last_body_len: u16,
@@ -725,26 +725,7 @@ pub fn handle_key(key: KeyEvent, state: &mut ToolDetailState) -> bool {
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Tab, _) => {
-            // Cycle forward within blocks; fall through to global column cycle
-            // once past the last block.
-            let n = state.focus_plan.len();
-            if n > 0 && state.focused_block + 1 < n {
-                state.focused_block += 1;
-                true
-            } else {
-                state.focused_block = 0;
-                false
-            }
-        }
-        (KeyCode::BackTab, _) => {
-            if state.focused_block > 0 {
-                state.focused_block -= 1;
-                true
-            } else {
-                false
-            }
-        }
+        (KeyCode::Tab | KeyCode::BackTab, _) => false,
         (KeyCode::Up, _) => {
             state.scroll_top = state.scroll_top.saturating_sub(1);
             true

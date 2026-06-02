@@ -328,28 +328,42 @@ fn task_markdown_body_highlights_external_query_match() {
 // ---- key dispatch ----------------------------------------------------------
 
 #[test]
-fn tab_cycles_blocks_then_falls_through() {
+fn tab_and_backtab_fall_through_without_changing_block_focus() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
     let mut st = ToolDetailState::default();
     let attrs = json!({"gen_ai.tool.call.arguments": {"x": 1}});
     let d = native_detail("some_tool", "function", attrs);
     let _ = render_to(&mut st, Some(("t1", "s1")), None, Some(&d), true);
-    let n = st.focus_plan.len();
-    assert!(n >= 2, "expected at least metadata + json blocks");
-    let mut consumed_count = 0;
-    loop {
-        let c = handle_key(KeyEvent::from(KeyCode::Tab), &mut st);
-        if c {
-            consumed_count += 1;
-        } else {
-            break;
-        }
-        if consumed_count > 10 {
-            panic!("Tab never fell through");
-        }
-    }
-    assert_eq!(consumed_count, n - 1);
-    assert_eq!(st.focused_block, 0, "fell through resets to first block");
+    assert!(st.focus_plan.len() >= 2, "expected at least metadata + json blocks");
+    st.focused_block = 0;
+
+    assert!(!handle_key(KeyEvent::from(KeyCode::Tab), &mut st));
+    assert_eq!(st.focused_block, 0);
+
+    st.focused_block = 1;
+    assert!(!handle_key(KeyEvent::from(KeyCode::BackTab), &mut st));
+    assert_eq!(st.focused_block, 1);
+}
+
+#[test]
+fn slash_still_activates_focused_search_block() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    let mut st = ToolDetailState::default();
+    let attrs = json!({"gen_ai.tool.call.arguments": {
+        "prompt": "find the needle"
+    }});
+    let d = native_detail("task", "function", attrs);
+    let _ = render_to(&mut st, Some(("t1", "s1")), None, Some(&d), true);
+    let idx = st
+        .focus_plan
+        .iter()
+        .position(|(_, kind)| matches!(kind, FocusKind::Search))
+        .expect("expected a searchable block");
+    st.focused_block = idx;
+    let key = st.focus_plan[idx].0.clone();
+
+    assert!(handle_key(KeyEvent::from(KeyCode::Char('/')), &mut st));
+    assert_eq!(st.text_blocks.get(&key).unwrap().phase, SearchPhase::Active);
 }
 
 #[test]

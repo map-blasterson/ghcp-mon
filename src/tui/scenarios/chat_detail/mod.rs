@@ -730,6 +730,7 @@ pub fn handle_key(
     state: &mut ChatDetailState,
 ) -> bool {
     match (key.code, key.modifiers) {
+        (KeyCode::Tab | KeyCode::BackTab, _) => false,
         (KeyCode::Char('m'), m) if !m.contains(KeyModifiers::CONTROL) => {
             state.mode = state.mode.toggled();
             true

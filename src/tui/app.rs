@@ -2624,6 +2624,18 @@ mod tests {
         app
     }
 
+    fn tool_detail_then_spans_app() -> App {
+        let mut app = make_app();
+        app.workspace.columns.clear();
+        app.workspace
+            .add_column(crate::tui::workspace::ScenarioType::ToolDetail);
+        app.workspace
+            .add_column(crate::tui::workspace::ScenarioType::Spans);
+        app.focus = Focus::Column(0);
+        app.last_focused_column = Some(0);
+        app
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn chips_render_diff_stat_in_tree_row() {
         let mut app = one_spans_column_app();
@@ -3215,6 +3227,40 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    /// LLR: `TUI Tool detail key-dispatch precedence within column` —
+    /// `Tab` / `Shift-Tab` are not column-local block navigation keys; they
+    /// pass through the column layer so the global focus cycle can move
+    /// between columns.
+    #[test]
+    fn precedence_tab_in_tool_detail_column_passes_to_global_focus_cycle() {
+        use crate::tui::scenarios::tool_detail::{FocusKind, ToolDetailState};
+
+        let mut app = tool_detail_then_spans_app();
+        let col_id = app.workspace.columns[0].id.clone();
+        app.tool_detail_state.insert(
+            col_id.clone(),
+            ToolDetailState {
+                focused_block: 0,
+                focus_plan: vec![
+                    ("metadata".into(), FocusKind::Metadata),
+                    ("body".into(), FocusKind::Search),
+                ],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(app.layer_column(press(KeyCode::Tab)), Dispatch::Pass);
+        assert_eq!(
+            app.tool_detail_state.get(&col_id).unwrap().focused_block,
+            0,
+            "column layer must not advance block focus"
+        );
+
+        let quit = app.handle_key(press(KeyCode::Tab)).unwrap();
+        assert!(!quit);
+        assert_eq!(app.focus.column_idx(), Some(1));
     }
 
     /// LLR: `TUI Spans search input edit semantics` — "Printable characters
