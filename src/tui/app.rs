@@ -1300,11 +1300,24 @@ impl App {
     /// the binding is column-scoped — when widget is focused (not a column)
     /// it MUST be a no-op so the user does not accidentally destroy a column
     /// they cannot see being targeted.
+    ///
+    /// On success, scrub the removed column's id from every per-scenario
+    /// state map. With the unique-ID guarantee from
+    /// [`Workspace::add_column`] the freed id will never be reused, so a
+    /// missed scrub is undetectable today — but explicit cleanup keeps the
+    /// maps bounded and prevents future bugs if the ID minter ever changes.
     fn remove_focused_column(&mut self) {
         let Some(i) = self.focus.column_idx() else {
             return;
         };
-        self.workspace.remove_column(i);
+        let Some(removed_id) = self.workspace.remove_column(i) else {
+            return;
+        };
+        self.live_sessions_state.remove(&removed_id);
+        self.spans_state.remove(&removed_id);
+        self.tool_detail_state.borrow_mut().remove(&removed_id);
+        self.chat_detail_state.borrow_mut().remove(&removed_id);
+        self.file_touches_state.borrow_mut().remove(&removed_id);
         let n = self.workspace.columns.len();
         if n == 0 {
             self.focus = Focus::None;

@@ -66,6 +66,13 @@ pub struct Workspace {
     pub columns: Vec<Column>,
     pub context_widget_height_rows: u16,
     pub context_widget_visible: bool,
+    /// Monotonic counter used to mint per-column IDs in [`Self::add_column`].
+    /// Persisted so reloads continue from where we left off — preventing
+    /// reuse of an ID that was previously freed by [`Self::remove_column`]
+    /// (which would silently bind the new column to stale per-scenario
+    /// state in the App's per-column HashMaps).
+    #[serde(default)]
+    pub next_column_id: u64,
 }
 
 impl Default for Workspace {
@@ -113,15 +120,24 @@ impl Workspace {
             ],
             context_widget_height_rows: 15,
             context_widget_visible: true,
+            // Seeded defaults reserve IDs `live_sessions`, `spans`,
+            // `tool_detail`, `chat_detail`; further `add_column` calls mint
+            // unique IDs from this counter so they never collide.
+            next_column_id: 1,
         }
     }
 
     /// Append a column with default settings for the given scenario type.
+    /// The ID is minted from a monotonic counter and persisted, so removing
+    /// a column and adding another of the same scenario type does NOT reuse
+    /// the freed ID (which would inherit stale per-scenario state).
     pub fn add_column(&mut self, scenario_type: ScenarioType) {
+        let n = self.next_column_id;
+        self.next_column_id = self.next_column_id.wrapping_add(1);
         let id = format!(
             "{}-{}",
             scenario_type.default_title().to_lowercase().replace(' ', "_"),
-            self.columns.len() + 1
+            n
         );
         self.columns.push(Column {
             id,
@@ -132,9 +148,14 @@ impl Workspace {
         });
     }
 
-    pub fn remove_column(&mut self, index: usize) {
+    /// Remove the column at `index`. Returns the removed column's `id` so
+    /// the caller can scrub per-column state held outside the workspace
+    /// (per-scenario HashMaps on App). Returns `None` when out of bounds.
+    pub fn remove_column(&mut self, index: usize) -> Option<String> {
         if index < self.columns.len() {
-            self.columns.remove(index);
+            Some(self.columns.remove(index).id)
+        } else {
+            None
         }
     }
 
@@ -192,7 +213,23 @@ mod tests {
         assert_eq!(w.columns[4].scenario_type, ScenarioType::FileTouches);
         w.move_column(4, -2);
         assert_eq!(w.columns[2].scenario_type, ScenarioType::FileTouches);
-        w.remove_column(2);
+        let removed = w.remove_column(2);
         assert_eq!(w.columns.len(), 4);
+        assert_eq!(removed.as_deref(), Some("file_touches-1"));
+    }
+
+    /// Regression: add → remove → add of the same scenario type MUST mint
+    /// a fresh ID, never reuse the freed one. Without this, the new
+    /// column would inherit any per-scenario state in App's HashMaps that
+    /// is keyed by the old column id.
+    #[test]
+    fn add_after_remove_does_not_reuse_id() {
+        let mut w = Workspace::seeded_default();
+        w.add_column(ScenarioType::FileTouches);
+        let first_id = w.columns.last().unwrap().id.clone();
+        let _ = w.remove_column(w.columns.len() - 1);
+        w.add_column(ScenarioType::FileTouches);
+        let second_id = w.columns.last().unwrap().id.clone();
+        assert_ne!(first_id, second_id, "removed id MUST NOT be reused");
     }
 }
