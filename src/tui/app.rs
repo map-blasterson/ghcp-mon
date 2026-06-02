@@ -2584,8 +2584,12 @@ pub async fn event_loop(
             },
 
             _ = cache_changed.notified() => {
-                // Some background fetch populated (or invalidated) a cache
-                // entry visible to the renderer; just request a redraw.
+                // A background fetch populated (or invalidated) a cache
+                // entry — re-run follow-mode advance so columns whose
+                // `["session-span-tree", cid]` just landed catch up to the
+                // newly-arrived latest tool span (the WS-arrival call ran
+                // against the stale tree). Idempotent for unchanged trees.
+                app.advance_follow_mode_columns();
                 dirty = true;
             }
         }
@@ -2847,9 +2851,15 @@ mod tests {
             conversation_id: cid.into(),
             tree,
         };
+        // Match-or-exceed the cache's current latest_gen so `put` accepts
+        // the seed even after a prior `invalidate` bumped the generation.
+        // The helper is test-only; production seeds come from real
+        // fetcher completions whose generation always matches.
+        let key = crate::tui::cache::qkey(["session-span-tree", cid]);
+        let cur_gen = app.rt.cache.peek(&key).value.as_ref().map(|c| c.generation).unwrap_or(0);
         app.rt.cache.put(FetchedRecord {
-            key: crate::tui::cache::qkey(["session-span-tree", cid]),
-            generation: 1,
+            key,
+            generation: cur_gen.saturating_add(1),
             value: serde_json::to_value(resp).unwrap(),
             stale_after: std::time::Duration::from_secs(60),
         });
@@ -3250,6 +3260,63 @@ mod tests {
         let st = app.spans_state.get(&col_id).unwrap();
         assert_eq!(st.cursor, 2);
         assert_eq!(st.focused_span_id.as_deref(), Some("tool-b"));
+    }
+
+    /// Regression for bug "follow mode picks the one before the latest":
+    /// `on_ws_envelopes` invalidates the cache *and then* immediately calls
+    /// `advance_follow_mode_columns`, which reads through `swr_read` and
+    /// gets the still-stale tree (the new tool span hasn't been fetched
+    /// yet). Cursor lands one span behind. The fix is to re-run
+    /// follow-mode advance on the cache-changed wakeup once the fetch
+    /// lands.
+    #[tokio::test(flavor = "current_thread")]
+    async fn follow_mode_advances_again_after_cache_changed() {
+        use serde_json::json;
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        // Initial tree: only tool-a exists.
+        let tree_v1 = vec![
+            mk_span_node("chat-1", KindClass::Chat, None, 50, vec![]),
+            mk_span_node("tool-a", KindClass::ExecuteTool, Some("bash"), 100, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree_v1);
+
+        let col_id = app.workspace.columns[0].id.clone();
+        app.spans_state
+            .entry(col_id.clone())
+            .or_insert_with(SpansState::new)
+            .follow_mode = true;
+
+        // Initial WS envelope advances cursor onto tool-a (the only tool).
+        app.on_ws_envelope(WsEnvelope {
+            kind: WsKind::Span,
+            entity: crate::tui::model::WsEntity::Span,
+            payload: json!({}),
+        });
+        assert_eq!(app.spans_state.get(&col_id).unwrap().focused_span_id.as_deref(), Some("tool-a"));
+
+        // Production race: the cache invalidates and a fresh tree
+        // containing tool-b lands later, after the WS envelope's
+        // `advance_follow_mode_columns` already ran against the stale
+        // tree. Simulate by replacing the cached value.
+        app.rt.cache.invalidate(&["session-span-tree"]);
+        let tree_v2 = vec![
+            mk_span_node("chat-1", KindClass::Chat, None, 50, vec![]),
+            mk_span_node("tool-a", KindClass::ExecuteTool, Some("bash"), 100, vec![]),
+            mk_span_node("tool-b", KindClass::ExecuteTool, Some("bash"), 200, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree_v2);
+
+        // Cache-changed wakeup. Must re-run follow-mode advance.
+        app.advance_follow_mode_columns();
+        let st = app.spans_state.get(&col_id).unwrap();
+        assert_eq!(
+            st.focused_span_id.as_deref(),
+            Some("tool-b"),
+            "follow-mode must catch up to the newest tool span once the cache lands it"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
