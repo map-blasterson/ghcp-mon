@@ -14,5 +14,6 @@ pub mod rolling_dots;
 pub mod search_input;
 pub mod searchable_text_block;
 pub mod select;
+pub mod spans_tree_row;
 pub mod status_dot;
 pub mod summary_bar;

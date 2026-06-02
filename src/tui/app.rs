@@ -42,8 +42,9 @@ use crate::tui::widgets::context_growth::{
     ContextGrowthState, ContextGrowthWidget, MergedRows, chat_span_pks, max_current_tokens,
     merge_snapshots,
 };
-use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
+use crate::tui::widgets::kind_badge::kind_label;
 use crate::tui::widgets::log_overlay::{LogBuffer, LogOverlay};
+use crate::tui::widgets::spans_tree_row::SpansTreeRow;
 use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
 use crate::tui::ws::{WsBus, WsStatus};
@@ -1789,176 +1790,42 @@ impl App {
         // Pre-compute per-parent report_intent titles (latest direct child with
         // tool_name == "report_intent" → intent string).
         let report_titles = self.compute_report_intent_titles(&tree);
+        let kf_lower = kind_filter.as_deref().map(str::to_lowercase);
 
         for (i_visible, flat_idx) in (start..flat.len().min(start + visible_rows)).enumerate() {
             let row_id = &flat[flat_idx];
-            let (node, depth) = match tree.find_with_depth(row_id) {
-                Some((n, d)) => (Some(n), d),
-                None => (None, 0),
+            let Some((node, depth)) = tree.find_with_depth(row_id) else {
+                continue;
             };
-            let Some(node) = node else { continue };
             let row_y = tree_area.y + i_visible as u16;
             let focused = flat_idx == st.cursor;
-            let mut x = tree_area.x;
-            let indent: u16 = (depth as u16) * 2;
-            x += indent;
-            // Determine row-wide background style based on search hit / miss.
-            let (row_bg, row_dim) = match &hit_set {
+            let (row_bg, mut row_dim) = match &hit_set {
                 Some(set) if set.contains(&node.span_id) => (Some(Color::Yellow), false),
                 Some(_) => (None, true),
                 None => (None, false),
             };
-            // Collapse glyph
-            let collapsed = st.user_collapsed.contains(row_id);
-            let glyph = if node.children.is_empty() {
-                " "
-            } else if collapsed {
-                "▸"
-            } else {
-                "▾"
-            };
-            let glyph_style = if focused {
-                Style::default().bg(Color::Cyan).fg(Color::Black)
-            } else if let Some(bg) = row_bg {
-                Style::default().bg(bg).fg(Color::Black).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            buf.set_span(x, row_y, &Span::styled(glyph, glyph_style), 1);
-            x += 2;
-            // Kind badge
-            let label = kind_label(node.kind_class);
-            let badge_w = (label.chars().count() as u16 + 2).min(10);
-            if x + badge_w < tree_area.x + tree_area.width {
-                let badge = KindBadge::new(node.kind_class).with_seed(node.name.clone());
-                badge.render(Rect::new(x, row_y, badge_w, 1), buf);
-                x += badge_w + 1;
-            }
-            // Placeholder rolling dots
-            if node.ingestion_state == "placeholder"
-                && x + 3 < tree_area.x + tree_area.width
-            {
-                let dots = crate::tui::widgets::rolling_dots::frame(self.anim_tick);
-                buf.set_span(
-                    x,
-                    row_y,
-                    &Span::styled(dots.to_string(), Style::default().fg(Color::Yellow)),
-                    3,
-                );
-                x += 4;
-            }
-            // Build chip strings + optional description for this row.
-            let (chips, description) = self.compute_row_chips(node);
-            // Approximate chip width to reserve before truncating the name.
-            // Each chip costs `text.len() + 2` (padding) + 1 gap.
-            let chip_reserve: usize = chips
-                .iter()
-                .map(|(s, _)| s.chars().count() + 3)
-                .sum::<usize>()
-                .min(40);
-            let desc_reserve = description
-                .as_deref()
-                .map(|s| s.chars().count() + 1)
-                .unwrap_or(0);
-            // Report-intent title (white text appended at end of parent row).
-            let report_title = report_titles.get(&node.span_id).cloned();
-            let title_reserve = report_title
-                .as_deref()
-                .map(|s| s.chars().count() + 2)
-                .unwrap_or(0);
-
-            // Name (truncated to leave room for chips + description + title).
-            let total_avail =
-                (tree_area.x + tree_area.width).saturating_sub(x) as usize;
-            let name_budget = total_avail
-                .saturating_sub(chip_reserve + desc_reserve + title_reserve);
-            let mut name = node.name.clone();
-            let cc = name.chars().count();
-            if cc > name_budget {
-                name = name
-                    .chars()
-                    .take(name_budget.saturating_sub(1))
-                    .collect::<String>();
-                if !name.is_empty() {
-                    name.push('…');
-                }
-            }
-            let mut name_style = if focused {
-                Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else if row_bg.is_some() {
-                Style::default()
-                    .bg(Color::Yellow)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            if row_dim {
-                name_style = name_style.fg(Color::DarkGray).add_modifier(Modifier::DIM);
-            }
-            if let Some(kf) = &kind_filter {
+            if let Some(kf) = &kf_lower {
                 let cur = format!("{:?}", node.kind_class).to_lowercase();
-                if cur != kf.to_lowercase() {
-                    name_style = name_style.add_modifier(Modifier::DIM);
+                if cur != *kf {
+                    row_dim = true;
                 }
             }
-            if x < tree_area.x + tree_area.width {
-                let name_w = (name.chars().count() as u16).min(
-                    (tree_area.x + tree_area.width).saturating_sub(x),
-                );
-                buf.set_span(x, row_y, &Span::styled(name, name_style), name_w);
-                x += name_w;
+            let (chips, description) = self.compute_row_chips(node);
+            let report_title = report_titles.get(&node.span_id).cloned();
+            let row_area = Rect::new(tree_area.x, row_y, tree_area.width, 1);
+            SpansTreeRow {
+                node,
+                depth,
+                focused,
+                collapsed: st.user_collapsed.contains(row_id),
+                row_bg,
+                row_dim,
+                chips: &chips,
+                description: description.as_deref(),
+                report_title: report_title.as_deref(),
+                anim_tick: self.anim_tick,
             }
-            // Chips
-            for (text, color) in &chips {
-                if x + 1 >= tree_area.x + tree_area.width {
-                    // Out of room — append overflow marker if possible.
-                    break;
-                }
-                x += 1;
-                let chip_text = format!(" {text} ");
-                let chip_w = (chip_text.chars().count() as u16)
-                    .min((tree_area.x + tree_area.width).saturating_sub(x));
-                let chip_style = Style::default()
-                    .bg(*color)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD);
-                buf.set_span(x, row_y, &Span::styled(chip_text, chip_style), chip_w);
-                x += chip_w;
-            }
-            // Tool description label (no chip styling — white text, 1-cell
-            // left padding) per `Spans tool description inline label`.
-            if let Some(desc) = description {
-                if x + 1 < tree_area.x + tree_area.width {
-                    x += 1;
-                    let w = (desc.chars().count() as u16)
-                        .min((tree_area.x + tree_area.width).saturating_sub(x));
-                    buf.set_span(
-                        x,
-                        row_y,
-                        &Span::styled(desc, Style::default().fg(Color::White)),
-                        w,
-                    );
-                    x += w;
-                }
-            }
-            // Report-intent title (no chip styling — white text).
-            if let Some(title) = report_title {
-                if x + 1 < tree_area.x + tree_area.width {
-                    x += 1;
-                    let w = (title.chars().count() as u16)
-                        .min((tree_area.x + tree_area.width).saturating_sub(x));
-                    buf.set_span(
-                        x,
-                        row_y,
-                        &Span::styled(title, Style::default().fg(Color::White)),
-                        w,
-                    );
-                }
-            }
+            .render(row_area, buf);
         }
 
         // Bottom detail inspector pane.
