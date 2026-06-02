@@ -58,6 +58,19 @@ use crate::tui::widgets::status_dot::StatusDot;
 use crate::tui::workspace::{ScenarioType, Workspace};
 use crate::tui::ws::{WsBus, WsStatus};
 
+/// What the renderer learned during a single `App::draw` call. Returned to
+/// the event loop so it can derive its next animation deadline from
+/// ground truth — what was actually drawn — instead of an indirect oracle
+/// like cache in-flight state. Add fields as more animated affordances
+/// arrive.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DrawOutcome {
+    /// At least one [`rolling_dots`] frame was rendered this draw — either
+    /// the "loading spans/traces" line or a placeholder span row. Drives
+    /// the loop's 250 ms re-wake.
+    pub spinner_visible: bool,
+}
+
 /// Minimum cell width for a column body (per terminal-rendering-constraints
 /// LLR; analog of the web's `MIN_COL_PX = 280`).
 pub const MIN_COL: u16 = 24;
@@ -300,17 +313,23 @@ impl App {
     /// advance an animation, or `None` if nothing is animating. Combines:
     ///
     /// * the earliest pending entry across all per-column reveal queues;
-    /// * the next 250 ms rolling-dots boundary, but only while the cache
-    ///   has at least one in-flight fetch (otherwise there is no spinner
-    ///   that needs animating).
-    pub fn next_anim_deadline_ms(&self) -> Option<u64> {
+    /// * the next 250 ms rolling-dots boundary, but only while
+    ///   `spinner_visible` is true (i.e. the most recent draw actually
+    ///   rendered a [`crate::tui::widgets::rolling_dots`] frame).
+    ///
+    /// The spinner flag must come from the renderer (see [`DrawOutcome`])
+    /// rather than from cache in-flight state — placeholder span rows
+    /// animate without any fetch in flight, and empty-result fetches
+    /// terminate but still leave a "loading…" line on screen until the
+    /// next WS envelope.
+    pub fn next_anim_deadline_ms(&self, spinner_visible: bool) -> Option<u64> {
         let mut earliest: Option<u64> = None;
         for s in self.spans_state.values() {
             if let Some(&(_, at)) = s.reveal.queue.first() {
                 earliest = Some(earliest.map_or(at, |e| e.min(at)));
             }
         }
-        if self.rt.cache.has_any_in_flight() {
+        if spinner_visible {
             let now = self.now_ms();
             let next_quarter =
                 ((now / crate::tui::widgets::rolling_dots::FRAME_STEP_MS) + 1)
@@ -1718,9 +1737,10 @@ impl App {
         info!(enabled = self.mouse_enabled, "mouse capture toggled");
     }
 
-    pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
+    pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) -> DrawOutcome {
         // span_detail_memo is generation-keyed; it self-invalidates on
         // cache changes, so we no longer clear it per frame.
+        let mut outcome = DrawOutcome::default();
         let area = frame.area();
         // Reserve the widget strip at the bottom: the clamped height when the
         // widget is visible, or a single collapsed bar when hidden.
@@ -1739,7 +1759,7 @@ impl App {
             ])
             .split(area);
         self.draw_top_bar(frame, chunks[0]);
-        self.draw_workspace(frame, chunks[1]);
+        self.draw_workspace(frame, chunks[1], &mut outcome);
         self.draw_context_widget(frame, chunks[2]);
         if self.log_overlay_visible {
             let lines = self.rt.log_buffer.snapshot();
@@ -1758,6 +1778,7 @@ impl App {
         if self.app_popover.is_some() {
             self.draw_app_popover(area, frame.buffer_mut());
         }
+        outcome
     }
 
     /// Paint the Context Growth Widget strip (or its collapsed bar) at the
@@ -1806,7 +1827,12 @@ impl App {
         frame.render_widget(p, rest);
     }
 
-    fn draw_workspace(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+    fn draw_workspace(
+        &mut self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        outcome: &mut DrawOutcome,
+    ) {
         if self.workspace.columns.is_empty() {
             let msg = Paragraph::new(Line::from(Span::styled(
                 "no columns. add one from the top bar.",
@@ -1877,7 +1903,7 @@ impl App {
             let buf: &mut Buffer = frame.buffer_mut();
             match st {
                 ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col_id),
-                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col_id),
+                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col_id, outcome),
                 ScenarioType::ToolDetail => {
                     self.draw_tool_detail(inner, buf, &col_id, &cfg, focused)
                 }
@@ -2135,7 +2161,14 @@ impl App {
         .unwrap_or_default()
     }
 
-    fn draw_spans(&mut self, area: Rect, buf: &mut Buffer, col_idx: usize, col_id: &str) {
+    fn draw_spans(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_idx: usize,
+        col_id: &str,
+        outcome: &mut DrawOutcome,
+    ) {
         let cfg = &self.workspace.columns[col_idx].config;
         let session = cfg.get("session").and_then(|v| v.as_str()).map(str::to_string);
         let kind_filter: Option<String> = cfg
@@ -2197,7 +2230,7 @@ impl App {
 
         // No-session mode: render traces list.
         let Some(session) = session else {
-            self.draw_traces_list(body_total, buf, col_id);
+            self.draw_traces_list(body_total, buf, col_id, outcome);
             self.draw_spans_popover(body_total, buf, col_id);
             return;
         };
@@ -2221,6 +2254,7 @@ impl App {
         let tree = self.cached_session_tree(col_idx);
         if tree.is_empty() {
             let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
+            outcome.spinner_visible = true;
             let line = Line::from(vec![
                 Span::styled(
                     "loading spans".to_string(),
@@ -2258,6 +2292,12 @@ impl App {
             let Some((node, depth)) = tree.find_with_depth(row_id) else {
                 continue;
             };
+            if node.ingestion_state == "placeholder" {
+                // Mirror the condition in SpansTreeRow::render so the loop
+                // can schedule the next dot-frame wake without inspecting
+                // the rendered buffer.
+                outcome.spinner_visible = true;
+            }
             let row_y = tree_area.y + i_visible as u16;
             let focused = flat_idx == cursor;
             let (row_bg, mut row_dim) = match &hit_set {
@@ -2303,12 +2343,19 @@ impl App {
 
     /// Render the no-session traces list. Implements `Traces list dims rows
     /// below kind filter`.
-    fn draw_traces_list(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
+    fn draw_traces_list(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        col_id: &str,
+        outcome: &mut DrawOutcome,
+    ) {
         let traces = self.cached_traces();
         let default = SpansState::default();
         let st: &SpansState = self.spans_state.get(col_id).unwrap_or(&default);
         if traces.is_empty() {
             let dots = crate::tui::widgets::rolling_dots::frame_at(self.now_ms());
+            outcome.spinner_visible = true;
             let line = Line::from(vec![
                 Span::styled(
                     "loading traces".to_string(),
@@ -2703,9 +2750,13 @@ pub async fn event_loop(
     let mut keys = EventStream::new();
     let cache_changed = app.rt.cache.changed_handle();
     let mut ws_batch: Vec<WsEnvelope> = Vec::with_capacity(16);
+    let mut last_outcome = DrawOutcome::default();
 
-    // Paint once before parking.
-    terminal.draw(|f| app.draw(f))?;
+    // Paint once before parking; capture the renderer's outcome so the
+    // next animation deadline reflects what was actually drawn.
+    terminal.draw(|f| {
+        last_outcome = app.draw(f);
+    })?;
 
     loop {
         let mut dirty = false;
@@ -2714,7 +2765,10 @@ pub async fn event_loop(
         tokio::select! {
             biased;
 
-            _ = sleep_until_anim(app.next_anim_deadline_ms(), app.now_ms()) => {
+            _ = sleep_until_anim(
+                app.next_anim_deadline_ms(last_outcome.spinner_visible),
+                app.now_ms(),
+            ) => {
                 app.tick_anim();
                 dirty = true;
             }
@@ -2796,7 +2850,9 @@ pub async fn event_loop(
         }
 
         if dirty {
-            terminal.draw(|f| app.draw(f))?;
+            terminal.draw(|f| {
+                last_outcome = app.draw(f);
+            })?;
         }
     }
     Ok(())
@@ -2904,7 +2960,10 @@ mod tests {
         app.focus = Focus::None;
         let backend = TestBackend::new(80, 12);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| app.draw(f)).unwrap();
+        term.draw(|f| {
+            app.draw(f);
+        })
+        .unwrap();
         let buf = term.backend().buffer();
         let mut joined = String::new();
         for y in 0..buf.area.height {
@@ -3114,7 +3173,10 @@ mod tests {
         use ratatui::backend::TestBackend;
         let backend = TestBackend::new(w, h);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| app.draw(f)).unwrap();
+        term.draw(|f| {
+            app.draw(f);
+        })
+        .unwrap();
         term.backend().buffer().clone()
     }
 

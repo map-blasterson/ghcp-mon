@@ -251,13 +251,6 @@ impl QueryCache {
         matched
     }
 
-    /// True if any key currently has an in-flight fetch. The event loop
-    /// uses this to decide whether to schedule a spinner-animation wake.
-    pub fn has_any_in_flight(&self) -> bool {
-        let g = self.inner.read().unwrap();
-        g.entries.values().any(|e| e.in_flight.is_some())
-    }
-
     /// For tests only.
     #[cfg(test)]
     pub fn len(&self) -> usize {
