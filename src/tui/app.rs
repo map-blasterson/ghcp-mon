@@ -3147,7 +3147,26 @@ mod tests {
     }
 
     fn row_substr_x(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
-        row_text(buf, y).find(needle).map(|x| x as u16)
+        // The buffer's columns are CELLS; symbols can be multi-byte
+        // (the chip outlines `▏`/`▕` are 3 bytes each). `String::find`
+        // returns a *byte* offset into the joined row text — cast to
+        // a cell index it would land 2 cells past the start of any
+        // multi-byte symbol preceding the needle. Walk cell-by-cell
+        // accumulating symbol bytes and report the cell whose byte
+        // offset matches a `String::find` hit.
+        let row = row_text(buf, y);
+        let byte_off = row.find(needle)?;
+        let mut bytes = 0usize;
+        for x in 0..buf.area.width {
+            if bytes == byte_off {
+                return Some(x);
+            }
+            if bytes > byte_off {
+                return None;
+            }
+            bytes += buf[(x, y)].symbol().len();
+        }
+        None
     }
 
     fn one_spans_column_app() -> App {
@@ -3196,7 +3215,7 @@ mod tests {
         assert!(!row.contains("tool"), "generic tool kind badge leaked into row:\n{text}");
         let x = row_substr_x(&buf, 4, "bash").expect("bash x");
         assert_eq!(
-            buf[(x, 4)].style().bg,
+            buf[(x, 4)].style().fg,
             Some(crate::tui::format::hash_color("bash"))
         );
     }
@@ -3223,7 +3242,7 @@ mod tests {
         assert!(!row.contains("external"), "generic external kind badge leaked into row:\n{text}");
         let x = row_substr_x(&buf, 4, "web_fetch").expect("web_fetch x");
         assert_eq!(
-            buf[(x, 4)].style().bg,
+            buf[(x, 4)].style().fg,
             Some(crate::tui::format::hash_color("web_fetch"))
         );
     }
@@ -3260,7 +3279,7 @@ mod tests {
         let row = row_text(&buf, 4);
         assert!(row.contains("lib.rs"), "missing target path chip in:\n{text}");
         let x = row_substr_x(&buf, 4, "lib.rs").expect("lib.rs x");
-        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
+        assert_eq!(buf[(x, 4)].style().fg, Some(Color::Cyan));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3293,7 +3312,7 @@ mod tests {
         let row = row_text(&buf, 4);
         assert!(row.contains("example.com"), "missing target URL chip in:\n{text}");
         let x = row_substr_x(&buf, 4, "example.com").expect("example.com x");
-        assert_eq!(buf[(x, 4)].style().bg, Some(Color::Cyan));
+        assert_eq!(buf[(x, 4)].style().fg, Some(Color::Cyan));
     }
 
     #[tokio::test(flavor = "current_thread")]
