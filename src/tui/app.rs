@@ -69,6 +69,17 @@ pub struct DrawOutcome {
 /// LLR; analog of the web's `MIN_COL_PX = 280`).
 pub const MIN_COL: u16 = 24;
 
+/// Per-keypress delta for the Shift+Alt+←/→ column-resize binding.
+/// Column widths are layout weights (normalized against the row total),
+/// so 0.1 corresponds to roughly a 10% shift against a default 1.0 weight.
+pub const COLUMN_RESIZE_STEP: f32 = 0.1;
+
+/// Column-width weight clamp. The lower bound prevents the column from
+/// disappearing under `MIN_COL` for everyone else; the upper bound stops
+/// runaway widening when the user holds Shift+Alt+→.
+pub const COLUMN_WIDTH_MIN: f32 = 0.2;
+pub const COLUMN_WIDTH_MAX: f32 = 5.0;
+
 /// What the keyboard is currently pointed at. Replaces the previous
 /// `(focused_column: Option<usize>, widget_focused: bool)` pair, where the
 /// combination `widget_focused = true` AND `focused_column = Some(_)` was
@@ -668,10 +679,11 @@ impl App {
         let Some(i) = self.focus.column_idx() else {
             return Dispatch::Pass;
         };
-        let shift_only = k.modifiers.contains(KeyModifiers::SHIFT)
-            && !k.modifiers.contains(KeyModifiers::ALT)
-            && !k.modifiers.contains(KeyModifiers::CONTROL);
-        if shift_only {
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // Shift+← / Shift+→ — move focused column.
+        if shift && !alt && !ctrl {
             match k.code {
                 KeyCode::Left => {
                     self.move_focused_column(-1);
@@ -679,6 +691,20 @@ impl App {
                 }
                 KeyCode::Right => {
                     self.move_focused_column(1);
+                    return Dispatch::Consumed;
+                }
+                _ => {}
+            }
+        }
+        // Shift+Alt+← / Shift+Alt+→ — narrow / widen focused column.
+        if shift && alt && !ctrl {
+            match k.code {
+                KeyCode::Left => {
+                    self.resize_focused_column(-COLUMN_RESIZE_STEP);
+                    return Dispatch::Consumed;
+                }
+                KeyCode::Right => {
+                    self.resize_focused_column(COLUMN_RESIZE_STEP);
                     return Dispatch::Consumed;
                 }
                 _ => {}
@@ -768,6 +794,8 @@ impl App {
             Self::keymap_entry("a", "append a column"),
             Self::keymap_entry("x", "remove focused column"),
             Self::keymap_entry("Tab / Shift-Tab", "cycle focus"),
+            Self::keymap_entry("Shift+← / Shift+→", "move focused column"),
+            Self::keymap_entry("Shift+Alt+← / Shift+Alt+→", "narrow / widen focused column"),
             Self::keymap_entry("c", "toggle Context Growth Widget"),
             Self::keymap_entry("Alt+↑ / Alt+↓", "resize Context Growth Widget"),
             Self::keymap_entry("?", "toggle keymap overlay"),
@@ -1209,6 +1237,24 @@ impl App {
         let _ = persist::save(&self.workspace);
     }
 
+    /// Resize the focused column's layout weight by `delta`, clamped to
+    /// [`COLUMN_WIDTH_MIN`..=`COLUMN_WIDTH_MAX`]. No-op when out of focus
+    /// or when the change collapses against a clamp.
+    fn resize_focused_column(&mut self, delta: f32) {
+        let Some(i) = self.focus.column_idx() else {
+            return;
+        };
+        let Some(col) = self.workspace.columns.get_mut(i) else {
+            return;
+        };
+        let new_w = (col.width + delta).clamp(COLUMN_WIDTH_MIN, COLUMN_WIDTH_MAX);
+        if (new_w - col.width).abs() < f32::EPSILON {
+            return;
+        }
+        col.width = new_w;
+        let _ = persist::save(&self.workspace);
+    }
+
     /// `x` global key: remove the focused column. Per the `Keybinding Matrix`
     /// the binding is column-scoped — when widget is focused (not a column)
     /// it MUST be a no-op so the user does not accidentally destroy a column
@@ -1314,7 +1360,7 @@ impl App {
         frame.render_widget(status, dot_area);
 
         let hints = format!(
-            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Tab:focus │ ?:logs │ q:quit",
+            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Shift+Alt+←/→:resize │ Tab:focus │ ?:logs │ q:quit",
         );
         let p = Paragraph::new(Span::styled(hints, Style::default().fg(Color::White)));
         let rest = Rect::new(area.x + 2, area.y, area.width - 2, 1);
@@ -1745,6 +1791,72 @@ mod tests {
             .unwrap();
         assert_eq!(app.workspace.columns[1].scenario_type, ScenarioType::ToolDetail);
         assert_eq!(app.focus.column_idx(), Some(1));
+    }
+
+    #[test]
+    fn shift_alt_arrows_resize_focused_column_and_clamp() {
+        let mut app = make_app();
+        app.workspace = Workspace::seeded_default();
+        app.workspace.context_widget_visible = false;
+        app.focus_column(0); // LiveSessions, seeded width = 1.0
+        let initial = app.workspace.columns[0].width;
+
+        // One Right widens by COLUMN_RESIZE_STEP.
+        let _ = app
+            .handle_key(key_mod(
+                KeyCode::Right,
+                KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ))
+            .unwrap();
+        let after_right = app.workspace.columns[0].width;
+        assert!(
+            (after_right - (initial + COLUMN_RESIZE_STEP)).abs() < 1e-6,
+            "expected width {} after Shift+Alt+Right, got {after_right}",
+            initial + COLUMN_RESIZE_STEP
+        );
+
+        // One Left narrows by COLUMN_RESIZE_STEP (back to initial).
+        let _ = app
+            .handle_key(key_mod(
+                KeyCode::Left,
+                KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ))
+            .unwrap();
+        assert!(
+            (app.workspace.columns[0].width - initial).abs() < 1e-6,
+            "expected width {initial} after one Right + one Left, got {}",
+            app.workspace.columns[0].width
+        );
+
+        // Lower clamp: hammer Left until pinned at COLUMN_WIDTH_MIN.
+        for _ in 0..200 {
+            let _ = app
+                .handle_key(key_mod(
+                    KeyCode::Left,
+                    KeyModifiers::SHIFT | KeyModifiers::ALT,
+                ))
+                .unwrap();
+        }
+        assert!(
+            (app.workspace.columns[0].width - COLUMN_WIDTH_MIN).abs() < 1e-6,
+            "lower clamp should pin width at {COLUMN_WIDTH_MIN}, got {}",
+            app.workspace.columns[0].width
+        );
+
+        // Upper clamp: hammer Right until pinned at COLUMN_WIDTH_MAX.
+        for _ in 0..200 {
+            let _ = app
+                .handle_key(key_mod(
+                    KeyCode::Right,
+                    KeyModifiers::SHIFT | KeyModifiers::ALT,
+                ))
+                .unwrap();
+        }
+        assert!(
+            (app.workspace.columns[0].width - COLUMN_WIDTH_MAX).abs() < 1e-6,
+            "upper clamp should pin width at {COLUMN_WIDTH_MAX}, got {}",
+            app.workspace.columns[0].width
+        );
     }
 
     #[test]
