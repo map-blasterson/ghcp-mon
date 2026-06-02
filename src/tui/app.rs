@@ -87,15 +87,29 @@ pub enum Dispatch {
     Consumed,
 }
 
-/// Top-level app state.
-pub struct App {
-    pub workspace: Workspace,
+/// Long-lived platform handles owned by the App. The "runtime" layer:
+/// outbound IO (REST `api`, WS bus, log buffer) plus the shared in-process
+/// caches that scenarios read through. Mostly read-only from scenario
+/// code; methods that mutate runtime state (e.g. WS reconnect) live on the
+/// types themselves.
+///
+/// Separating this from \[`App`\]'s UI state makes the dependency direction
+/// explicit — scenarios and UI logic depend on `AppRuntime`, never the
+/// other way around — and is a precondition for the eventual scenario
+/// trait + Ctx split.
+pub struct AppRuntime {
+    pub api: ApiClient,
+    pub ws: WsBus,
     pub cache: Arc<QueryCache>,
     #[allow(dead_code)]
     pub live_feed: Arc<LiveFeed>,
-    pub api: ApiClient,
-    pub ws: WsBus,
     pub log_buffer: LogBuffer,
+}
+
+/// Top-level app state.
+pub struct App {
+    pub rt: AppRuntime,
+    pub workspace: Workspace,
     pub focus: Focus,
     /// Column index to restore focus to when widget focus is released
     /// (`Esc` on the focused widget, or the widget being hidden). Updated
@@ -142,14 +156,17 @@ impl App {
             Focus::Column(0)
         };
         let last_focused_column = focus.column_idx();
+        let status = ws.status();
         Self {
+            rt: AppRuntime {
+                api,
+                ws,
+                cache: Arc::new(QueryCache::new()),
+                live_feed: Arc::new(LiveFeed::new()),
+                log_buffer,
+            },
             workspace,
-            cache: Arc::new(QueryCache::new()),
-            live_feed: Arc::new(LiveFeed::new()),
-            api,
-            status: ws.status(),
-            ws,
-            log_buffer,
+            status,
             focus,
             last_focused_column,
             log_overlay_visible: false,
@@ -239,20 +256,20 @@ impl App {
                 envelopes,
             } => {
                 for env in &envelopes {
-                    self.live_feed.ingest(env.clone());
+                    self.rt.live_feed.ingest(env.clone());
                     self.last_ws_event =
                         Some(format!("{:?}/{:?}", env.kind, env.entity));
                 }
                 for p in &dirty_prefixes {
                     let segs: Vec<&str> = p.iter().map(String::as_str).collect();
-                    self.cache.invalidate(&segs);
+                    self.rt.cache.invalidate(&segs);
                 }
                 debug!(
                     envelopes = envelopes.len(),
                     prefixes = dirty_prefixes.len(),
                     "ws tick processed"
                 );
-                self.status = self.ws.status();
+                self.status = self.rt.ws.status();
             }
             AppEvent::QueryResult { .. } => {}
         }
@@ -586,7 +603,7 @@ impl App {
         // Key handlers MUST NOT trigger network fetches — render owns the
         // SWR lifecycle. Peek the cached traces length read-only.
         let max = swr_read::<crate::tui::model::ListTracesResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["traces"]),
             std::time::Duration::from_secs(5),
             FetchPolicy::ReadOnly,
@@ -926,8 +943,8 @@ impl App {
         else {
             return;
         };
-        let cache = self.cache.clone();
-        let api = self.api.clone();
+        let cache = self.rt.cache.clone();
+        let api = self.rt.api.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let _ = cache_get(
@@ -944,8 +961,8 @@ impl App {
     }
 
     fn do_delete_session(&mut self, cid: &str) {
-        let api = self.api.clone();
-        let cache = self.cache.clone();
+        let api = self.rt.api.clone();
+        let cache = self.rt.cache.clone();
         let id = cid.to_string();
         tokio::spawn(async move {
             let _ = api.delete_session(&id).await;
@@ -959,9 +976,9 @@ impl App {
     /// from the renderer's point of view: returns whatever is cached and
     /// triggers a refetch when stale (stale-while-revalidate).
     fn cached_sessions(&self) -> Vec<crate::tui::model::SessionSummary> {
-        let api = self.api.clone();
+        let api = self.rt.api.clone();
         swr_read::<crate::tui::model::ListSessionsResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["sessions"]),
             std::time::Duration::from_secs(5),
             FetchPolicy::Swr,
@@ -990,10 +1007,10 @@ impl App {
         &self,
         cid: &str,
     ) -> Vec<crate::tui::model::ContextSnapshot> {
-        let api = self.api.clone();
+        let api = self.rt.api.clone();
         let cid_s = cid.to_string();
         swr_read::<crate::tui::model::ListSessionContextsResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["session-contexts", cid]),
             std::time::Duration::from_secs(5),
             FetchPolicy::Swr,
@@ -1170,9 +1187,9 @@ impl App {
     /// Read-or-fetch `["traces"]` for traces-list mode (when no session is
     /// configured). Stale-while-revalidate.
     fn cached_traces(&self) -> Vec<crate::tui::model::TraceSummary> {
-        let api = self.api.clone();
+        let api = self.rt.api.clone();
         swr_read::<crate::tui::model::ListTracesResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["traces"]),
             std::time::Duration::from_secs(5),
             FetchPolicy::Swr,
@@ -1193,11 +1210,11 @@ impl App {
         trace_id: &str,
         span_id: &str,
     ) -> Option<crate::tui::model::SpanDetail> {
-        let api = self.api.clone();
+        let api = self.rt.api.clone();
         let tid = trace_id.to_string();
         let sid = span_id.to_string();
         swr_read::<crate::tui::model::SpanDetail, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["span", trace_id, span_id]),
             std::time::Duration::from_secs(30),
             FetchPolicy::Swr,
@@ -1221,7 +1238,7 @@ impl App {
             return None;
         }
         swr_read::<crate::tui::model::SearchResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["search-spans", session, q]),
             std::time::Duration::from_secs(5),
             FetchPolicy::ReadOnly,
@@ -1407,7 +1424,7 @@ impl App {
         self.draw_workspace(frame, chunks[1]);
         self.draw_context_widget(frame, chunks[2]);
         if self.log_overlay_visible {
-            let lines = self.log_buffer.snapshot();
+            let lines = self.rt.log_buffer.snapshot();
             frame.render_widget(LogOverlay { lines }, area);
         }
         if self.confirm_modal.open {
@@ -1744,7 +1761,7 @@ impl App {
                 let tree = self.cached_session_span_tree_by_cid(s);
                 // Distinguish "loading" from "no touches": the tree fetch is
                 // complete once the cache key holds a value.
-                let loaded = self.cache.peek(&qkey(["session-span-tree", s])).value.is_some();
+                let loaded = self.rt.cache.peek(&qkey(["session-span-tree", s])).value.is_some();
                 let touches = crate::tui::scenarios::file_touches::walk::extract_touches(
                     &tree,
                     |t, sp| self.cached_span_detail(t, sp),
@@ -1779,10 +1796,10 @@ impl App {
         &self,
         cid: &str,
     ) -> Vec<crate::tui::model::SpanNode> {
-        let api = self.api.clone();
+        let api = self.rt.api.clone();
         let cid_s = cid.to_string();
         swr_read::<SessionSpanTreeResponse, _, _>(
-            &self.cache,
+            &self.rt.cache,
             qkey(["session-span-tree", cid]),
             std::time::Duration::from_secs(5),
             FetchPolicy::Swr,
@@ -2486,7 +2503,7 @@ mod tests {
             conversation_id: cid.into(),
             tree,
         };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["session-span-tree", cid]),
             generation: 1,
             value: serde_json::to_value(resp).unwrap(),
@@ -2525,7 +2542,7 @@ mod tests {
             children: vec![],
             projection: SpanProjection::default(),
         };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["span", trace_id, span_id]),
             generation: 1,
             value: serde_json::to_value(detail).unwrap(),
@@ -2535,7 +2552,7 @@ mod tests {
 
     fn seed_sessions(app: &App, sessions: Vec<SessionSummary>) {
         let r = ListSessionsResponse { sessions };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["sessions"]),
             generation: 1,
             value: serde_json::to_value(r).unwrap(),
@@ -2562,7 +2579,7 @@ mod tests {
                 })
                 .collect(),
         };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["search-spans", session, q]),
             generation: 1,
             value: serde_json::to_value(resp).unwrap(),
@@ -2572,7 +2589,7 @@ mod tests {
 
     fn seed_traces(app: &App, traces: Vec<TraceSummary>) {
         let r = ListTracesResponse { traces };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["traces"]),
             generation: 1,
             value: serde_json::to_value(r).unwrap(),
@@ -2980,7 +2997,7 @@ mod tests {
             conversation_id: cid.into(),
             context_snapshots: snaps,
         };
-        app.cache.put(FetchedRecord {
+        app.rt.cache.put(FetchedRecord {
             key: crate::tui::cache::qkey(["session-contexts", cid]),
             generation: 1,
             value: serde_json::to_value(resp).unwrap(),
