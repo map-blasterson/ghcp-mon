@@ -471,6 +471,22 @@ impl App {
         let Some(i) = self.focus.column_idx() else {
             return Dispatch::Pass;
         };
+        let shift_only = k.modifiers.contains(KeyModifiers::SHIFT)
+            && !k.modifiers.contains(KeyModifiers::ALT)
+            && !k.modifiers.contains(KeyModifiers::CONTROL);
+        if shift_only {
+            match k.code {
+                KeyCode::Left => {
+                    self.move_focused_column(-1);
+                    return Dispatch::Consumed;
+                }
+                KeyCode::Right => {
+                    self.move_focused_column(1);
+                    return Dispatch::Consumed;
+                }
+                _ => {}
+            }
+        }
         if self.scenario_handle_key(i, k) {
             Dispatch::Consumed
         } else {
@@ -1403,6 +1419,23 @@ impl App {
         let _ = persist::save(&self.workspace);
     }
 
+    fn move_focused_column(&mut self, delta: i32) {
+        let Some(from) = self.focus.column_idx() else {
+            return;
+        };
+        let n = self.workspace.columns.len();
+        if from >= n || n == 0 {
+            return;
+        }
+        let to = ((from as i32) + delta).clamp(0, n as i32 - 1) as usize;
+        if to == from {
+            return;
+        }
+        self.workspace.move_column(from, delta);
+        self.focus_column(to);
+        let _ = persist::save(&self.workspace);
+    }
+
     /// `x` global key: remove the focused column. Per the `Keybinding Matrix`
     /// the binding is column-scoped — when widget is focused (not a column)
     /// it MUST be a no-op so the user does not accidentally destroy a column
@@ -1521,7 +1554,7 @@ impl App {
         frame.render_widget(status, dot_area);
 
         let hints = format!(
-            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
+            " ghcp-mon attach │ {title} │ a:add │ x:rm │ Shift+←/→:move │ Tab:focus │ M:mouse({mouse}) │ ?:logs │ q:quit",
             mouse = if self.mouse_enabled { "on" } else { "off" },
         );
         let p = Paragraph::new(Span::styled(hints, Style::default().fg(Color::White)));
@@ -2506,6 +2539,32 @@ mod tests {
     }
 
     #[test]
+    fn shift_arrows_move_focused_column_and_focus_follows() {
+        let mut app = make_app();
+        app.workspace = Workspace::seeded_default();
+        app.workspace.context_widget_visible = false;
+        app.focus_column(2);
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Left, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[1].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(1));
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Left, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[0].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(0));
+
+        let _ = app
+            .handle_key(key_mod(KeyCode::Right, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.workspace.columns[1].scenario_type, ScenarioType::ToolDetail);
+        assert_eq!(app.focus.column_idx(), Some(1));
+    }
+
+    #[test]
     fn empty_workspace_renders_hint() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -3300,10 +3359,17 @@ mod tests {
     // the refactor is free to fix them.
 
     fn press(code: KeyCode) -> crossterm::event::KeyEvent {
-        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        key_mod(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> crossterm::event::KeyEvent {
+        use ratatui::crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
         KeyEvent {
             code,
-            modifiers: KeyModifiers::NONE,
+            modifiers,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
