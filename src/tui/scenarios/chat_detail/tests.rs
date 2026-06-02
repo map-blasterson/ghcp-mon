@@ -244,6 +244,101 @@ fn summary_bar_paints_distinct_colors_for_visible_segments() {
 }
 
 #[test]
+fn summary_bar_dark_shades_unchanged_segments_in_delta_mode() {
+    // In DELTA mode with prior == current, system instructions and tool
+    // definitions get the `Unchanged` badge at the top-level frontier and
+    // should paint DARK (`▓`). Input/output messages don't carry an
+    // Unchanged badge at the section level (input falls through to per-turn
+    // delta; output isn't diffed) so they remain FULL (`█`). We assert the
+    // mixed outcome.
+    let attrs = json!({
+        "gen_ai.system_instructions": [{"type":"text","content":"sys"}],
+        "gen_ai.tool.definitions": [{"name":"ls","description":"x"}],
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"q"}]}
+        ],
+        "gen_ai.output.messages": [
+            {"role":"assistant","parts":[{"type":"text","content":"a"}]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs.clone()));
+    let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    let mut state = ChatDetailState::default(); // defaults to DELTA mode
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 80, 10),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            None,
+            None,
+            Some(&detail),
+            Some(&attrs), // prior == current → sys + tools unchanged
+            true,
+        );
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let mut dark = 0;
+    let mut full = 0;
+    for x in 0..80 {
+        match buf[(x, 1)].symbol() {
+            "▓" => dark += 1,
+            "█" => full += 1,
+            _ => {}
+        }
+    }
+    assert!(dark > 0, "expected DARK (▓) cells from sys+tools, got dark={dark} full={full}");
+    assert!(full > 0, "expected FULL (█) cells from input+output, got dark={dark} full={full}");
+}
+
+#[test]
+fn summary_bar_uses_full_glyph_in_full_mode_even_with_prior() {
+    // Same setup as the dark-shade test, but FULL mode never tags Unchanged
+    // → bar should be all FULL (`█`), no DARK.
+    let attrs = json!({
+        "gen_ai.system_instructions": [{"type":"text","content":"sys"}],
+        "gen_ai.tool.definitions": [{"name":"ls","description":"x"}],
+        "gen_ai.input.messages": [
+            {"role":"user","parts":[{"type":"text","content":"q"}]}
+        ],
+        "gen_ai.output.messages": [
+            {"role":"assistant","parts":[{"type":"text","content":"a"}]}
+        ]
+    });
+    let detail = span_with_attrs(KindClass::Chat, Some(attrs.clone()));
+    let mut term = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    let mut state = ChatDetailState::default();
+    state.mode = ChatMode::Full;
+    term.draw(|f| {
+        render(
+            Rect::new(0, 0, 80, 10),
+            f.buffer_mut(),
+            &mut state,
+            Some(("t", "s")),
+            None,
+            None,
+            Some(&detail),
+            Some(&attrs),
+            true,
+        );
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let mut dark = 0;
+    let mut full = 0;
+    for x in 0..80 {
+        match buf[(x, 1)].symbol() {
+            "▓" => dark += 1,
+            "█" => full += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(dark, 0, "FULL mode must not shade segments");
+    assert!(full > 0, "expected FULL (█) cells in FULL mode, got full={full}");
+}
+
+#[test]
 fn tool_call_arrow_appears_at_target_message_row() {
     let attrs = json!({
         "gen_ai.input.messages": [

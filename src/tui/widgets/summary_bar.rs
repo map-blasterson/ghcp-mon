@@ -26,6 +26,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::shade;
 
 /// One segment painted into the summary bar.
 #[derive(Debug, Clone)]
@@ -38,6 +39,11 @@ pub struct SummarySeg {
     /// Optional inline label painted as a 1-character abbreviation when there
     /// is room. Currently unused but reserved for future tweaks.
     pub label: Option<String>,
+    /// When true, paint the segment with the DARK shade glyph (`▓`) instead
+    /// of FULL (`█`). Used by Chat Detail in DELTA mode to visually de-
+    /// emphasize segments whose content is unchanged since the prior chat
+    /// span. The segment's `color` is preserved either way.
+    pub shaded: bool,
 }
 
 /// The renderer. Pure stateless; called per-frame.
@@ -66,13 +72,14 @@ impl<'a> SummaryBar<'a> {
         for (i, seg) in self.segments.iter().enumerate() {
             let w = widths[i];
             let style = Style::default().fg(seg.color);
+            let glyph = if seg.shaded { shade::DARK } else { shade::FULL };
             for dx in 0..w {
                 let cx = x + dx;
                 if cx >= area.x + area.width {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_symbol("█").set_style(style);
+                    cell.set_symbol(glyph).set_style(style);
                 }
             }
             x += w;
@@ -241,12 +248,14 @@ mod tests {
                 bytes: 50,
                 color: Color::Red,
                 label: None,
+                shaded: false,
             },
             SummarySeg {
                 id: "b".into(),
                 bytes: 50,
                 color: Color::Blue,
                 label: None,
+                shaded: false,
             },
         ];
         let bar = SummaryBar {
@@ -270,6 +279,7 @@ mod tests {
             bytes: 1,
             color: Color::Red,
             label: None,
+            shaded: false,
         }];
         let bar = SummaryBar {
             segments: &segs,
@@ -294,12 +304,14 @@ mod tests {
                 bytes: 50,
                 color: Color::Red,
                 label: None,
+                shaded: false,
             },
             SummarySeg {
                 id: "b".into(),
                 bytes: 50,
                 color: Color::Blue,
                 label: None,
+                shaded: false,
             },
         ];
         let bar = SummaryBar {
@@ -330,6 +342,7 @@ mod tests {
             bytes: 1,
             color: Color::Red,
             label: None,
+            shaded: false,
         }];
         let bar = SummaryBar {
             segments: &segs,
@@ -354,6 +367,7 @@ mod tests {
             bytes: 1,
             color: Color::Red,
             label: None,
+            shaded: false,
         }];
         let bar = SummaryBar {
             segments: &segs,
@@ -379,18 +393,21 @@ mod tests {
                 bytes: 50,
                 color: Color::Red,
                 label: None,
+                shaded: false,
             },
             SummarySeg {
                 id: "p/b".into(),
                 bytes: 50,
                 color: Color::Blue,
                 label: None,
+                shaded: false,
             },
             SummarySeg {
                 id: "q".into(),
                 bytes: 0,
                 color: Color::Green,
                 label: None,
+                shaded: false,
             },
         ];
         let bar = SummaryBar {
@@ -405,6 +422,40 @@ mod tests {
         for x in 0..10 {
             assert_eq!(buf[(x, 0)].symbol(), "▲", "expected arrow at x={x}");
             assert_eq!(buf[(x, 0)].fg, Color::Yellow);
+        }
+    }
+
+    #[test]
+    fn shaded_segments_use_dark_glyph_unshaded_use_full() {
+        let segs = vec![
+            SummarySeg {
+                id: "a".into(),
+                bytes: 50,
+                color: Color::Red,
+                label: None,
+                shaded: true,
+            },
+            SummarySeg {
+                id: "b".into(),
+                bytes: 50,
+                color: Color::Blue,
+                label: None,
+                shaded: false,
+            },
+        ];
+        let bar = SummaryBar { segments: &segs, hovered: None };
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        bar.render(area, &mut buf);
+        // Left half = shaded ("▓"), right half = full ("█"). Both keep their
+        // own fg color (Red on the left, Blue on the right).
+        for x in 0..5 {
+            assert_eq!(buf[(x, 0)].symbol(), "▓", "expected DARK at x={x}");
+            assert_eq!(buf[(x, 0)].fg, Color::Red);
+        }
+        for x in 5..10 {
+            assert_eq!(buf[(x, 0)].symbol(), "█", "expected FULL at x={x}");
+            assert_eq!(buf[(x, 0)].fg, Color::Blue);
         }
     }
 }

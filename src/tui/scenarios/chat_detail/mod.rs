@@ -286,6 +286,11 @@ fn render_full(
             bytes: n.bytes,
             color: color_for_node(n),
             label: None,
+            // In DELTA mode, dark-shade segments whose content is unchanged
+            // since the prior chat span. FULL mode never sets the Unchanged
+            // badge, but we still guard explicitly so the rule reads clearly.
+            shaded: mode == ChatMode::Delta
+                && matches!(n.badge, Some(NodeBadge::Unchanged)),
         })
         .collect();
 
