@@ -22,18 +22,18 @@ use crate::tui::vendor::copilot::{self, ArgConcept, ToolKind};
 /// simply skipped — the next render tick re-runs after the cache populates.
 pub fn extract_touches(
     tree: &[SpanNode],
-    detail_lookup: impl Fn(&str, &str) -> Option<SpanDetail>,
+    mut detail_lookup: impl FnMut(&str, &str) -> Option<SpanDetail>,
 ) -> Vec<Touch> {
     let mut out = Vec::new();
     for node in tree {
-        walk_node(node, &detail_lookup, &mut out);
+        walk_node(node, &mut detail_lookup, &mut out);
     }
     out
 }
 
 fn walk_node(
     node: &SpanNode,
-    detail_lookup: &impl Fn(&str, &str) -> Option<SpanDetail>,
+    detail_lookup: &mut impl FnMut(&str, &str) -> Option<SpanDetail>,
     out: &mut Vec<Touch>,
 ) {
     if node.kind_class == KindClass::ExecuteTool {

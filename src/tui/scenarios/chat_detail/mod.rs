@@ -729,6 +729,28 @@ pub fn handle_key(
     key: KeyEvent,
     state: &mut ChatDetailState,
 ) -> bool {
+    use crate::tui::widgets::searchable_text_block::{SearchPhase, SearchableTextBlock};
+    // `Enter` / `Shift+Enter` cycle search matches in the first Active
+    // searchable text block (the Spans search box propagates an external
+    // query which sets these blocks Active via the external_active latch).
+    // Per Phase 6's `TUI Chat detail focus precedence within column` LLR
+    // update, Tab no longer navigates within the column, so we don't have
+    // a per-block focused state to consult — route to the first Active
+    // block.
+    if matches!(key.code, KeyCode::Enter) {
+        let first_active = state
+            .text_blocks
+            .iter()
+            .find_map(|(k, st)| (st.phase == SearchPhase::Active).then(|| k.clone()));
+        if let Some(k) = first_active {
+            if let Some(st) = state.text_blocks.get_mut(&k) {
+                if SearchableTextBlock::handle_key(key, st, None) {
+                    return true;
+                }
+            }
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Tab | KeyCode::BackTab, _) => false,
         (KeyCode::Char('m'), m) if !m.contains(KeyModifiers::CONTROL) => {

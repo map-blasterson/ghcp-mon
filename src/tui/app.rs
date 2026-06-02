@@ -3,6 +3,7 @@
 //! `try_recv` before `terminal.draw` runs once.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -155,6 +156,16 @@ pub struct App {
     /// Last known terminal size `(width, height)`. Updated on resize and at
     /// startup; drives the widget-height `0.8 * term_h` clamp.
     pub term_size: (u16, u16),
+    /// Per-frame memo for [`Self::cached_span_detail`]. Cleared at the top
+    /// of every [`Self::draw`] call. Without it, a single frame could
+    /// re-`serde_json::from_value::<SpanDetail>` the same span N times
+    /// (once per visible row for chips, once per report_intent walk, once
+    /// per chat-detail prior lookup, once for the inspector pane) — and
+    /// SpanDetail carries the full `attributes` JSON tree, so each
+    /// deserialize is O(attribute bytes). Memoising as `Rc<SpanDetail>`
+    /// collapses N deserializes + N deep clones into one per span per
+    /// frame.
+    pub frame_span_detail: HashMap<(String, String), Rc<crate::tui::model::SpanDetail>>,
 }
 
 impl App {
@@ -196,6 +207,7 @@ impl App {
             anim_tick: 0,
             context_widget: ContextGrowthState::default(),
             term_size: (0, 0),
+            frame_span_detail: HashMap::new(),
         }
     }
 
@@ -1411,14 +1423,18 @@ impl App {
     /// (stale_after = 30 s). Returns `None` while the fetch is still in
     /// flight or if the response shape doesn't parse.
     fn cached_span_detail(
-        &self,
+        &mut self,
         trace_id: &str,
         span_id: &str,
-    ) -> Option<crate::tui::model::SpanDetail> {
+    ) -> Option<Rc<crate::tui::model::SpanDetail>> {
+        let key = (trace_id.to_string(), span_id.to_string());
+        if let Some(hit) = self.frame_span_detail.get(&key) {
+            return Some(hit.clone());
+        }
         let api = self.rt.api.clone();
         let tid = trace_id.to_string();
         let sid = span_id.to_string();
-        swr_read::<crate::tui::model::SpanDetail, _, _>(
+        let parsed = swr_read::<crate::tui::model::SpanDetail, _, _>(
             &self.rt.cache,
             qkey(["span", trace_id, span_id]),
             std::time::Duration::from_secs(30),
@@ -1427,7 +1443,10 @@ impl App {
                 let r = api.get_span(&tid, &sid).await?;
                 Ok::<Value, anyhow::Error>(serde_json::to_value(r)?)
             },
-        )
+        )?;
+        let rc = Rc::new(parsed);
+        self.frame_span_detail.insert(key, rc.clone());
+        Some(rc)
     }
 
     /// Read-only lookup of `["search-spans", session, q]`. The fetch
@@ -1630,6 +1649,9 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
+        // Clear the per-frame SpanDetail memo so every draw sees fresh
+        // cache values (the WS coalescer can invalidate between frames).
+        self.frame_span_detail.clear();
         let area = frame.area();
         // Reserve the widget strip at the bottom: the clamped height when the
         // widget is visible, or a single collapsed bar when hidden.
@@ -1860,7 +1882,7 @@ impl App {
             state,
             selection,
             search_query,
-            detail.as_ref(),
+            detail.as_deref(),
             focused,
         );
     }
@@ -1923,7 +1945,7 @@ impl App {
                     )
                     .and_then(|node| {
                         self.cached_span_detail(&node.trace_id, &node.span_id)
-                            .and_then(|sd| sd.span.attributes)
+                            .and_then(|sd| sd.span.attributes.clone())
                     })
                 }),
             _ => None,
@@ -1943,7 +1965,7 @@ impl App {
             selection,
             search_query,
             selected_tool_call_id,
-            detail.as_ref(),
+            detail.as_deref(),
             prior_attrs.as_ref(),
             focused,
         );
@@ -1996,7 +2018,7 @@ impl App {
                 let loaded = self.rt.cache.peek(&qkey(["session-span-tree", s])).value.is_some();
                 let touches = crate::tui::scenarios::file_touches::walk::extract_touches(
                     &tree,
-                    |t, sp| self.cached_span_detail(t, sp),
+                    |t, sp| self.cached_span_detail(t, sp).map(|rc| (*rc).clone()),
                 );
                 (loaded, touches)
             }
@@ -2406,7 +2428,7 @@ impl App {
     /// Returns chips + an optional plain-white description label that the
     /// renderer paints separately (no chip styling, per the LLR).
     fn compute_row_chips(
-        &self,
+        &mut self,
         node: &crate::tui::model::SpanNode,
     ) -> (Vec<(String, Color)>, Option<String>) {
         let mut out: Vec<(String, Color)> = Vec::new();
@@ -2474,13 +2496,13 @@ impl App {
     /// pick the latest by `start_unix_ns ?? span_pk`, fetch its detail and
     /// parse `args.intent`. Returns `parent.span_id -> intent`.
     fn compute_report_intent_titles(
-        &self,
+        &mut self,
         tree: &[crate::tui::model::SpanNode],
     ) -> std::collections::HashMap<String, String> {
         let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         fn walk(
             node: &crate::tui::model::SpanNode,
-            app: &App,
+            app: &mut App,
             out: &mut std::collections::HashMap<String, String>,
         ) {
             // Find latest report_intent direct child.
@@ -3236,9 +3258,11 @@ mod tests {
         app.workspace.columns[0]
             .config
             .insert("session".into(), toml::Value::String("cid-1".into()));
+        // Use Chat-kind nodes so the row name renders (tool-kind names are
+        // now suppressed because chips carry the tool identity).
         let tree = vec![
-            mk_span_node("hit-span", KindClass::ExecuteTool, Some("bash"), 100, vec![]),
-            mk_span_node("miss-span", KindClass::ExecuteTool, Some("bash"), 200, vec![]),
+            mk_span_node("hit-span", KindClass::Chat, None, 100, vec![]),
+            mk_span_node("miss-span", KindClass::Chat, None, 200, vec![]),
         ];
         seed_session_tree(&app, "cid-1", tree);
         let col_id = app.workspace.columns[0].id.clone();

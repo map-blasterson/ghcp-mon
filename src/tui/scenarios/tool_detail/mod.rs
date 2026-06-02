@@ -719,6 +719,28 @@ pub fn handle_key(key: KeyEvent, state: &mut ToolDetailState) -> bool {
         }
     }
 
+    // `Enter` / `Shift+Enter` cycle search matches. Since Tab no longer
+    // navigates within the column (per the `TUI Tool detail key-dispatch
+    // precedence within column` LLR update for bug 6), `focused_block` is
+    // typically stuck at 0 — but the column's searchable blocks become
+    // Active via the column-level `external_query` (Spans search box →
+    // detail column propagation). Route the cycle keys to the FIRST Active
+    // text block so Enter cycles work when external search drives them.
+    if matches!(key.code, KeyCode::Enter) {
+        let first_active = state.focus_plan.iter().find_map(|(k, _)| {
+            state
+                .text_blocks
+                .get(k)
+                .filter(|st| st.phase == SearchPhase::Active)
+                .map(|_| k.clone())
+        });
+        if let Some(k) = first_active {
+            if let Some(st) = state.text_blocks.get_mut(&k) {
+                return SearchableTextBlock::handle_key(key, st, ext_ref);
+            }
+        }
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Tab | KeyCode::BackTab, _) => false,
         (KeyCode::Up, _) => {

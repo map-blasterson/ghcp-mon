@@ -26,25 +26,18 @@ use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
 use crate::tui::widgets::rolling_dots;
 
 fn display_name(node: &SpanNode) -> String {
-    let raw = node.name.trim();
-    if let Some(tool_name) = node.projected_tool_name() {
-        if raw == tool_name {
-            return String::new();
-        }
-        if let Some((head, tail)) = raw.rsplit_once(" - ") {
-            if tail.trim() == tool_name {
-                let head = head.trim();
-                return if looks_like_model_name(head) {
-                    String::new()
-                } else {
-                    head.to_string()
-                };
-            }
-        }
+    // Tool rows derive their identity from chips (tool name, target file,
+    // diff stats, description) — the name field on the span is typically
+    // a noisy duplicate ("execute_tool bash", "gpt-4 - bash", "bash") that
+    // the user already sees in the hash-coloured tool-name chip. Suppress
+    // the name entirely on tool rows.
+    if node.is_tool_row() {
+        return String::new();
     }
     node.name.clone()
 }
 
+#[allow(dead_code)]
 fn looks_like_model_name(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.starts_with("gpt")

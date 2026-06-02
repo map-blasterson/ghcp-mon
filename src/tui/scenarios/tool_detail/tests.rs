@@ -393,6 +393,46 @@ fn focused_search_block_enter_and_shift_enter_cycle_matches() {
     assert_eq!(st.text_blocks.get(&key).unwrap().match_index, 0);
 }
 
+/// Regression: when `focused_block` is 0 (Tab no longer navigates within
+/// the column per the Phase 6 LLR update) but a non-zero block is the
+/// active searchable (e.g. external_query drove it Active), Enter MUST
+/// still cycle matches in that block. This is the realistic user path —
+/// the user types in the Spans search box, the query propagates to the
+/// tool-detail column, every searchable block becomes Active via the
+/// external_active latch, and Enter cycles.
+#[test]
+fn enter_cycles_first_active_block_when_focused_block_zero() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let mut st = ToolDetailState::default();
+    let attrs = json!({"gen_ai.tool.call.result": "a a a"});
+    let d = native_detail("weird_tool", "function", attrs);
+    // Use Some("a") as external_query so blocks become Active via the
+    // external_active latch.
+    let _ = render_to(&mut st, Some(("t1", "s1")), Some("a"), Some(&d), true);
+    // `focused_block` stays at 0 (the metadata panel). The active
+    // searchable block is at a non-zero index.
+    let key = st
+        .focus_plan
+        .iter()
+        .find_map(|(k, kind)| matches!(kind, FocusKind::Search).then(|| k.clone()))
+        .expect("expected a searchable block");
+    assert_eq!(st.text_blocks.get(&key).unwrap().match_count, 3);
+    let before_idx = st.text_blocks.get(&key).unwrap().match_index;
+
+    // Enter must reach the first Active block, NOT the focused block.
+    assert!(handle_key(KeyEvent::from(KeyCode::Enter), &mut st));
+    let after = st.text_blocks.get(&key).unwrap().match_index;
+    assert_ne!(after, before_idx, "Enter must advance match_index");
+
+    // Shift+Enter cycles backward.
+    assert!(handle_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+        &mut st
+    ));
+    assert_eq!(st.text_blocks.get(&key).unwrap().match_index, before_idx);
+}
+
 #[test]
 fn end_then_down_scroll_clamps() {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
