@@ -34,7 +34,6 @@ use crate::tui::api::ApiClient;
 use crate::tui::cache::{
     FetchPolicy, QueryCache, cache_get, qkey, swr_read, ws_invalidation_prefixes,
 };
-use crate::tui::live_feed::LiveFeed;
 use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt, WsEnvelope, WsKind};
 use crate::tui::persist;
 use crate::tui::scenarios::live_sessions::{
@@ -118,8 +117,6 @@ pub struct AppRuntime {
     pub api: ApiClient,
     pub ws: WsBus,
     pub cache: Arc<QueryCache>,
-    #[allow(dead_code)]
-    pub live_feed: Arc<LiveFeed>,
     pub log_buffer: LogBuffer,
 }
 
@@ -140,7 +137,6 @@ pub struct App {
     pub app_popover: Option<AppPopover>,
     pub add_column_picker: SelectState,
     pub status: WsStatus,
-    pub last_ws_event: Option<String>,
     /// Per-column scenario state (keyed by column id).
     pub live_sessions_state: HashMap<String, LiveSessionsState>,
     pub spans_state: HashMap<String, SpansState>,
@@ -156,23 +152,19 @@ pub struct App {
     pub confirm_modal: ConfirmModalState,
     /// Records what session id the pending confirm-delete refers to (none
     /// when no confirm is open).
-    /// when no confirm is open).
     pub pending_delete: Option<String>,
     /// Context Growth Widget keyboard-cursor state (Phase 2).
     pub context_widget: ContextGrowthState,
     /// Last known terminal size `(width, height)`. Updated on resize and at
     /// startup; drives the widget-height `0.8 * term_h` clamp.
     pub term_size: (u16, u16),
-    /// Per-frame memo for [`Self::cached_span_detail`]. Cleared at the top
-    /// of every [`Self::draw`] call. Without it, a single frame could
-    /// re-`serde_json::from_value::<SpanDetail>` the same span N times
-    /// (once per visible row for chips, once per report_intent walk, once
-    /// per chat-detail prior lookup, once for the inspector pane) — and
-    /// SpanDetail carries the full `attributes` JSON tree, so each
-    /// deserialize is O(attribute bytes). Memoising as `Rc<SpanDetail>`
-    /// collapses N deserializes + N deep clones into one per span per
-    /// frame.
-    pub frame_span_detail: HashMap<(String, String), Rc<crate::tui::model::SpanDetail>>,
+    /// Memo for [`Self::cached_span_detail`]. Keyed by `(trace_id, span_id)`
+    /// → `(cache_generation, Rc<SpanDetail>)`. Re-deserialized only when the
+    /// cache generation for the span key changes; survives across draws so
+    /// repeated lookups of an unchanged span (chips, report_intent walk,
+    /// inspector pane, chat-detail prior lookup) cost a single HashMap hit.
+    pub span_detail_memo:
+        HashMap<(String, String), (u64, Rc<crate::tui::model::SpanDetail>)>,
 }
 
 impl App {
@@ -190,7 +182,6 @@ impl App {
                 api,
                 ws,
                 cache: Arc::new(QueryCache::new()),
-                live_feed: Arc::new(LiveFeed::new()),
                 log_buffer,
             },
             workspace,
@@ -202,7 +193,6 @@ impl App {
             mouse_enabled,
             app_popover: None,
             add_column_picker: SelectState::default(),
-            last_ws_event: None,
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
             tool_detail_state: HashMap::new(),
@@ -213,7 +203,7 @@ impl App {
             pending_delete: None,
             context_widget: ContextGrowthState::default(),
             term_size: (0, 0),
-            frame_span_detail: HashMap::new(),
+            span_detail_memo: HashMap::new(),
         }
     }
 
@@ -245,21 +235,43 @@ impl App {
         };
     }
 
-    /// Apply one WebSocket envelope. Ingests into the live-feed ring,
-    /// invalidates the cache prefixes implied by the envelope's
-    /// `(kind, entity)`, advances any active follow-mode columns when the
-    /// envelope touched spans, and refreshes the widget's row-count cache.
+    /// Apply one WebSocket envelope (convenience wrapper around
+    /// [`Self::on_ws_envelopes`]). The event loop calls the batch form
+    /// directly so a burst of N envelopes triggers at most one cache scan
+    /// per dirtied prefix and one follow-mode advance.
     pub fn on_ws_envelope(&mut self, env: WsEnvelope) {
-        let kind = env.kind;
-        let entity = env.entity;
-        self.last_ws_event = Some(format!("{:?}/{:?}", kind, entity));
-        self.rt.live_feed.ingest(env);
-        for p in ws_invalidation_prefixes(kind, entity) {
+        self.on_ws_envelopes(std::iter::once(env));
+    }
+
+    /// Apply a batch of WebSocket envelopes. Collects the union of
+    /// invalidation prefixes (so repeats collapse), then invalidates the
+    /// cache and — if any envelope touched spans — advances any active
+    /// follow-mode columns and refreshes the widget's row count.
+    pub fn on_ws_envelopes<I>(&mut self, envs: I)
+    where
+        I: IntoIterator<Item = WsEnvelope>,
+    {
+        use std::collections::HashSet;
+        let mut prefixes: HashSet<&'static [&'static str]> = HashSet::new();
+        let mut touches_spans = false;
+        let mut count = 0usize;
+        for env in envs {
+            count += 1;
+            for p in ws_invalidation_prefixes(env.kind, env.entity) {
+                prefixes.insert(p);
+            }
+            if matches!(env.kind, WsKind::Span | WsKind::Derived | WsKind::Trace) {
+                touches_spans = true;
+            }
+            // env intentionally dropped here — no live_feed clone, no
+            // last_ws_event format!() per envelope.
+        }
+        if count == 0 {
+            return;
+        }
+        for p in &prefixes {
             self.rt.cache.invalidate(p);
         }
-        // Spans-touching envelopes drive the bits of state that used to be
-        // refreshed unconditionally on every 16 ms heartbeat tick.
-        let touches_spans = matches!(kind, WsKind::Span | WsKind::Derived | WsKind::Trace);
         if touches_spans {
             self.advance_follow_mode_columns();
             self.context_widget.last_visible_rows = self
@@ -267,7 +279,12 @@ impl App {
                 .map(|(m, _, _)| m.rows.len() as u16)
                 .unwrap_or(0);
         }
-        debug!(?kind, ?entity, "ws envelope processed");
+        debug!(
+            envelopes = count,
+            prefixes = prefixes.len(),
+            spans = touches_spans,
+            "ws batch processed"
+        );
     }
 
     /// Drain due reveal-queue entries on every Spans column. Called by the
@@ -1434,21 +1451,43 @@ impl App {
     /// Read-or-fetch a single span's detail under `["span", trace_id, span_id]`
     /// (stale_after = 30 s). Returns `None` while the fetch is still in
     /// flight or if the response shape doesn't parse.
+    /// Read the SpanDetail for `(trace_id, span_id)` through the query
+    /// cache, memoising the deserialized value keyed by the cache entry's
+    /// `generation`. Re-deserializes only when the cache entry changes
+    /// (background fetch completion or WS invalidation). Survives across
+    /// draws — see `span_detail_memo` on [`App`].
     fn cached_span_detail(
         &mut self,
         trace_id: &str,
         span_id: &str,
     ) -> Option<Rc<crate::tui::model::SpanDetail>> {
-        let key = (trace_id.to_string(), span_id.to_string());
-        if let Some(hit) = self.frame_span_detail.get(&key) {
-            return Some(hit.clone());
+        let memo_key = (trace_id.to_string(), span_id.to_string());
+        let cache_key = qkey(["span", trace_id, span_id]);
+
+        // Memo hit when our stored generation matches the cache's current
+        // generation. Stale-or-absent cache value → fall through and let
+        // swr_read decide whether to refetch.
+        let current_gen = self
+            .rt
+            .cache
+            .peek(&cache_key)
+            .value
+            .as_ref()
+            .map(|c| c.generation);
+        if let (Some(g), Some((memo_g, rc))) =
+            (current_gen, self.span_detail_memo.get(&memo_key))
+        {
+            if *memo_g == g {
+                return Some(rc.clone());
+            }
         }
+
         let api = self.rt.api.clone();
         let tid = trace_id.to_string();
         let sid = span_id.to_string();
         let parsed = swr_read::<crate::tui::model::SpanDetail, _, _>(
             &self.rt.cache,
-            qkey(["span", trace_id, span_id]),
+            cache_key.clone(),
             std::time::Duration::from_secs(30),
             FetchPolicy::Swr,
             move || async move {
@@ -1457,7 +1496,26 @@ impl App {
             },
         )?;
         let rc = Rc::new(parsed);
-        self.frame_span_detail.insert(key, rc.clone());
+        // Re-peek post-`swr_read`; if a background fetch has already raced
+        // ahead the generation may have bumped — store whatever the cache
+        // now reports so the next lookup is a clean memo hit.
+        let stored_gen = self
+            .rt
+            .cache
+            .peek(&cache_key)
+            .value
+            .as_ref()
+            .map(|c| c.generation)
+            .unwrap_or(0);
+        self.span_detail_memo.insert(memo_key, (stored_gen, rc.clone()));
+
+        // Bound the memo loosely so it can't grow without limit on long
+        // sessions. SPAN_LRU_CAP (1024) matches the cache's own span-key
+        // cap; when we cross 2× that, drop everything and let lookups
+        // repopulate. Coarse but predictable.
+        if self.span_detail_memo.len() > 2 * crate::tui::cache::SPAN_LRU_CAP {
+            self.span_detail_memo.clear();
+        }
         Some(rc)
     }
 
@@ -1661,9 +1719,8 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut ratatui::Frame<'_>) {
-        // Clear the per-frame SpanDetail memo so every draw sees fresh
-        // cache values (the WS coalescer can invalidate between frames).
-        self.frame_span_detail.clear();
+        // span_detail_memo is generation-keyed; it self-invalidates on
+        // cache changes, so we no longer clear it per frame.
         let area = frame.area();
         // Reserve the widget strip at the bottom: the clamped height when the
         // widget is visible, or a single collapsed bar when hidden.
@@ -2645,6 +2702,7 @@ pub async fn event_loop(
     let mut status_rx = app.rt.ws.on_status();
     let mut keys = EventStream::new();
     let cache_changed = app.rt.cache.changed_handle();
+    let mut ws_batch: Vec<WsEnvelope> = Vec::with_capacity(16);
 
     // Paint once before parking.
     terminal.draw(|f| app.draw(f))?;
@@ -2662,7 +2720,7 @@ pub async fn event_loop(
             }
 
             ev = ws_rx.recv() => match ev {
-                Ok(env) => { app.on_ws_envelope(env); dirty = true; }
+                Ok(env) => { ws_batch.push(env); }
                 Err(RecvError::Lagged(n)) => {
                     warn!(lagged = n, "ws receiver lagged");
                 }
@@ -2710,16 +2768,20 @@ pub async fn event_loop(
         }
 
         // Drain any other WS envelopes that arrived during processing so
-        // bursts collapse into a single draw.
+        // bursts collapse into a single batched invalidation + draw.
         loop {
             match ws_rx.try_recv() {
-                Ok(env) => { app.on_ws_envelope(env); dirty = true; }
+                Ok(env) => { ws_batch.push(env); }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(n)) => {
                     warn!(lagged = n, "ws receiver lagged during drain");
                 }
                 Err(TryRecvError::Closed) => break,
             }
+        }
+        if !ws_batch.is_empty() {
+            app.on_ws_envelopes(ws_batch.drain(..));
+            dirty = true;
         }
         loop {
             match status_rx.try_recv() {
@@ -2858,19 +2920,27 @@ mod tests {
     }
 
     /// Many WS envelopes in a row must remain side-effect-clean (no panics,
-    /// monotonic last_ws_event update, idempotent cache invalidation).
+    /// idempotent cache invalidation).
     #[tokio::test(flavor = "current_thread")]
     async fn handle_processes_many_ws_envelopes() {
         use serde_json::json;
         let mut app = make_app();
-        for _ in 0..50 {
+        // Batch form (production path): one call collapses N envelopes
+        // into one cache scan per dirtied prefix.
+        let envs = (0..50).map(|_| WsEnvelope {
+            kind: WsKind::Span,
+            entity: crate::tui::model::WsEntity::Span,
+            payload: json!({}),
+        });
+        app.on_ws_envelopes(envs);
+        // Single-envelope convenience form must also remain idempotent.
+        for _ in 0..10 {
             app.on_ws_envelope(WsEnvelope {
-                kind: WsKind::Span,
-                entity: crate::tui::model::WsEntity::Span,
+                kind: WsKind::Metric,
+                entity: crate::tui::model::WsEntity::Metric,
                 payload: json!({}),
             });
         }
-        assert!(app.last_ws_event.is_some());
     }
 
     /// Allow Duration unused-warning suppression: tests may evolve.

@@ -6,7 +6,6 @@
 //! - [`app`] — top-level state + draw + event loop.
 //! - [`cache`] — query cache (TanStack-Query analog).
 //! - [`format`] — fmt_ns, fmt_clock, hash_color (FNV-1a → terminal RGB).
-//! - [`live_feed`] — per-(kind,entity) ring buffer.
 //! - [`model`] — serde port of `web/src/api/types.ts`.
 //! - [`persist`] — TOML workspace load/save + migrate-drop.
 //! - [`scenarios`] — Phase 0 placeholders.
@@ -23,7 +22,6 @@ pub mod api;
 pub mod app;
 pub mod cache;
 pub mod format;
-pub mod live_feed;
 pub mod model;
 pub mod persist;
 pub mod scenarios;
