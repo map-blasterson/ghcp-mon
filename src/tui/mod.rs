@@ -8,7 +8,7 @@
 //! - [`format`] — fmt_ns, fmt_clock, hash_color (FNV-1a → terminal RGB).
 //! - [`model`] — serde port of `web/src/api/types.ts`.
 //! - [`persist`] — TOML workspace load/save + migrate-drop.
-//! - [`scenarios`] — Phase 0 placeholders.
+//! - [`scenarios`] — per-column scenario renderers + the `Scenario` trait.
 //! - [`vendor`] — Copilot tool-call adapter.
 //! - [`widgets`] — status dot, kind badge, log overlay.
 //! - [`workspace`] — Columns / context-widget state.

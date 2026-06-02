@@ -336,7 +336,7 @@ impl App {
             self.rt.cache.invalidate(p);
         }
         if touches_spans {
-            self.advance_follow_mode_columns();
+            self.dispatch_ws_batch(crate::tui::scenarios::WsBatchMeta { touches_spans: true });
             self.context_widget.last_visible_rows = self
                 .widget_merged_context()
                 .map(|(m, _, _)| m.rows.len() as u16)
@@ -409,14 +409,6 @@ impl App {
             earliest = Some(earliest.map_or(next_quarter, |e| e.min(next_quarter)));
         }
         earliest
-    }
-
-    /// For every column whose scenario engages follow-mode advance,
-    /// dispatch `on_ws_batch` with `touches_spans=true`. Pulled out of
-    /// the old per-tick loop and invoked from [`Self::on_ws_envelopes`]
-    /// for spans-touching envelopes.
-    pub(crate) fn advance_follow_mode_columns(&mut self) {
-        self.dispatch_ws_batch(crate::tui::scenarios::WsBatchMeta { touches_spans: true });
     }
 
     /// Dispatch `on_ws_batch` to every scenario in workspace order.
@@ -2406,12 +2398,14 @@ mod tests {
     }
 
     /// Regression for bug "follow mode picks the one before the latest":
-    /// `on_ws_envelopes` invalidates the cache *and then* immediately calls
-    /// `advance_follow_mode_columns`, which reads through `swr_read` and
-    /// gets the still-stale tree (the new tool span hasn't been fetched
-    /// yet). Cursor lands one span behind. The fix is to re-run
-    /// follow-mode advance on the cache-changed wakeup once the fetch
-    /// lands.
+    /// `on_ws_envelopes` invalidates the cache *and then* immediately
+    /// dispatches `on_ws_batch`, which reads through `swr_read` and gets
+    /// the still-stale tree (the new tool span hasn't been fetched
+    /// yet). Cursor lands one span behind. The fix is for the
+    /// `cache_changed` arm of the event loop to call
+    /// `dispatch_cache_changed`, which re-runs `on_cache_changed` on
+    /// every scenario — Spans then re-advances follow-mode against the
+    /// freshly-arrived tree.
     #[tokio::test(flavor = "current_thread")]
     async fn follow_mode_advances_again_after_cache_changed() {
         use serde_json::json;
@@ -2440,8 +2434,8 @@ mod tests {
 
         // Production race: the cache invalidates and a fresh tree
         // containing tool-b lands later, after the WS envelope's
-        // `advance_follow_mode_columns` already ran against the stale
-        // tree. Simulate by replacing the cached value.
+        // `on_ws_batch` dispatch already ran against the stale tree.
+        // Simulate by replacing the cached value.
         app.rt.cache.invalidate(&["session-span-tree"]);
         let tree_v2 = vec![
             mk_span_node("chat-1", KindClass::Chat, None, 50, vec![]),
@@ -2450,8 +2444,10 @@ mod tests {
         ];
         seed_session_tree(&app, "cid-1", tree_v2);
 
-        // Cache-changed wakeup. Must re-run follow-mode advance.
-        app.advance_follow_mode_columns();
+        // Cache-changed wakeup. Must re-run follow-mode advance via
+        // the `on_cache_changed` hook (production: `event_loop`'s
+        // `cache_changed.notified()` arm calls `dispatch_cache_changed`).
+        app.dispatch_cache_changed();
         let st = app.spans_scenario(&col_id).unwrap().state();
         assert_eq!(
             st.focused_span_id.as_deref(),

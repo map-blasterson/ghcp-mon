@@ -124,16 +124,6 @@ impl SpansScenario {
             .map(str::to_string)
     }
 
-    /// Sync session-switch reset bookkeeping (deferred — see scenario
-    /// invariants). Not called from any hook today to preserve the
-    /// pre-migration behaviour where per-column state survives session
-    /// changes; left in place for future wiring.
-    #[allow(dead_code)]
-    fn sync_session(&mut self, config: &ColumnConfig) {
-        let new_session = Self::config_session(config);
-        self.state.on_session_switch(new_session.as_deref());
-    }
-
     /// User-initiated selection routing. Idempotent. May toggle
     /// follow-mode (engaging when the picked span IS the latest tool
     /// span, disengaging otherwise) and persists the workspace.

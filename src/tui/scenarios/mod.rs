@@ -1,7 +1,8 @@
-//! Scenario dispatch: Phase 1 ships real renderers for LiveSessions and
-//! Spans; later phases add ToolDetail, ChatDetail, and FileTouches. Only
-//! RawBrowser keeps the Phase-0 placeholder renderer (which dumps
-//! `column.config` so cross-column routing can be evaluated visually).
+//! Scenario dispatch: every `ScenarioType` is now backed by a real
+//! `Scenario` trait implementation. The `render_placeholder` helper here
+//! is kept as a fallback for any column whose `scenario_for` returns
+//! `None` (a defensive arm — every variant currently maps to a
+//! scenario, so this is functionally dead but cheap to keep).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -34,8 +35,8 @@ pub use scenario::{Ctx, KeyOutcome, Scenario, WsBatchMeta};
 /// graph simple: a scenario takes `&mut state` + read-only context and
 /// returns owned data.
 ///
-/// More effect variants will be added as the remaining scenarios migrate
-/// (Phase 11). The first user is `live_sessions` (Phase 9 proof).
+/// Every variant is consumed by [`crate::tui::app::App::apply_effect`].
+/// Add new variants here as scenarios sprout new cross-cutting needs.
 #[derive(Debug, Clone)]
 pub enum ScenarioEffect {
     /// Set the column at `origin_col_idx`'s session to `cid` and clear the

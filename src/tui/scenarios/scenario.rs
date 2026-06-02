@@ -20,13 +20,16 @@
 //!   `&mut Ctx` are disjoint borrows of App fields) and concentrates
 //!   cross-column reasoning in one place.
 //! * [`Ctx`] is constructed inside the dispatch branch, not around the
-//!   whole loop, so legacy code paths (Spans, pending migration) can
-//!   continue to take `&mut self` on the same iteration.
+//!   whole loop, so per-iteration borrows of `&self.workspace` and
+//!   `&mut self.span_detail_memo` remain disjoint.
 //! * Key handlers MUST NOT trigger network fetches. The cache fetcher
-//!   lifecycle is owned by render-path `swr_read` and by explicit
-//!   debounced kickers like [`Ctx::kick_search_debounce`]. This is
-//!   discipline-by-convention today; a future `DrawCtx`/`KeyCtx` split
-//!   can encode it in the type system.
+//!   lifecycle is owned by render-path `swr_read` (SWR policy) and by
+//!   explicit debounced kickers like [`Ctx::kick_search_debounce`].
+//!   Key handlers that need to peek cached state should use
+//!   [`Ctx::cached_traces_readonly`] or call [`Ctx::cached_search_hits`]
+//!   directly (both `ReadOnly` policy). This is discipline-by-convention
+//!   today; a future `DrawCtx`/`KeyCtx` split can encode it in the
+//!   type system.
 //! * `on_ws_batch` runs once per scenario per WS batch (post-
 //!   invalidation, pre-draw). Effects from all scenarios are collected
 //!   in column order and applied after the loop, so an earlier
