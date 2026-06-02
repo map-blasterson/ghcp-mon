@@ -787,5 +787,74 @@ pub fn handle_key(key: KeyEvent, state: &mut ToolDetailState) -> bool {
     }
 }
 
+/// `Scenario` impl bundling per-column state + the existing pure handlers.
+#[derive(Debug, Default)]
+pub struct ToolDetailScenario {
+    pub state: ToolDetailState,
+}
+
+impl ToolDetailScenario {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl crate::tui::scenarios::Scenario for ToolDetailScenario {
+    fn draw(
+        &mut self,
+        ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        config: &crate::tui::workspace::ColumnConfig,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        _outcome: &mut crate::tui::app::DrawOutcome,
+    ) {
+        let trace_id = config.get("selected_trace_id").and_then(|v| v.as_str());
+        let span_id = config.get("selected_span_id").and_then(|v| v.as_str());
+        let search_query = config.get("search_query").and_then(|v| v.as_str());
+        let selection = match (trace_id, span_id) {
+            (Some(t), Some(s)) => Some((t, s)),
+            _ => None,
+        };
+        let detail = selection.and_then(|(t, s)| ctx.cached_span_detail(t, s));
+        render(
+            area,
+            buf,
+            &mut self.state,
+            selection,
+            search_query,
+            detail.as_deref(),
+            focused,
+        );
+    }
+
+    fn handle_key(
+        &mut self,
+        _ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        _config: &crate::tui::workspace::ColumnConfig,
+        k: KeyEvent,
+    ) -> crate::tui::scenarios::KeyOutcome {
+        let consumed = handle_key(k, &mut self.state);
+        crate::tui::scenarios::KeyOutcome { consumed, effects: Vec::new() }
+    }
+
+    fn keymap_entries(
+        &self,
+        _config: &crate::tui::workspace::ColumnConfig,
+    ) -> Vec<(String, String)> {
+        vec![
+            ("Tab / Shift-Tab".into(), "cycle detail blocks".into()),
+            ("↑ / ↓".into(), "scroll body".into()),
+            ("Home / End".into(), "scroll to top / bottom".into()),
+            ("Space".into(), "toggle focused panel".into()),
+            ("/".into(), "activate focused block search".into()),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -37,7 +37,7 @@ use crate::tui::cache::{
 use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt, WsEnvelope, WsKind};
 use crate::tui::persist;
 use crate::tui::scenarios::live_sessions::{
-    LiveSessionsState, clear_session_everywhere, delete_prompt, propagate_session, render_row,
+    clear_session_everywhere, delete_prompt, propagate_session,
 };
 use crate::tui::scenarios::render_placeholder;
 use crate::tui::scenarios::spans::{
@@ -150,15 +150,14 @@ pub struct App {
     pub app_popover: Option<AppPopover>,
     pub add_column_picker: SelectState,
     pub status: WsStatus,
-    /// Per-column scenario state (keyed by column id).
-    pub live_sessions_state: HashMap<String, LiveSessionsState>,
+    /// Per-column Spans scenario state (not yet migrated to the
+    /// `Scenario` trait — see `scenario-trait-spans` todo). All other
+    /// scenarios live in `scenarios` below.
     pub spans_state: HashMap<String, SpansState>,
-    /// Per-column tool-detail scenario state (keyed by column id).
-    pub tool_detail_state: HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>,
-    /// Per-column chat-detail scenario state.
-    pub chat_detail_state: HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>,
-    /// Per-column file-touches scenario state.
-    pub file_touches_state: HashMap<String, crate::tui::scenarios::file_touches::FileTouchesState>,
+    /// Per-column `Scenario` instances (LiveSessions, ToolDetail,
+    /// ChatDetail, FileTouches, …). Spans is special-cased in dispatch
+    /// until its migration lands.
+    pub scenarios: HashMap<String, Box<dyn crate::tui::scenarios::Scenario>>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
     /// consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
@@ -190,7 +189,7 @@ impl App {
         };
         let last_focused_column = focus.column_idx();
         let status = ws.status();
-        Self {
+        let mut app = Self {
             rt: AppRuntime {
                 api,
                 ws,
@@ -206,17 +205,52 @@ impl App {
             mouse_enabled,
             app_popover: None,
             add_column_picker: SelectState::default(),
-            live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
-            tool_detail_state: HashMap::new(),
-            chat_detail_state: HashMap::new(),
-            file_touches_state: HashMap::new(),
+            scenarios: HashMap::new(),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
             context_widget: ContextGrowthState::default(),
             term_size: (0, 0),
             span_detail_memo: HashMap::new(),
+        };
+        app.sync_scenarios_with_workspace();
+        app
+    }
+
+    /// Instantiate the `Scenario` for a given `ScenarioType`. Returns
+    /// `None` for scenario types that are not yet trait-migrated (Spans,
+    /// RawBrowser) — those go through legacy dispatch in App.
+    fn scenario_for(t: ScenarioType) -> Option<Box<dyn crate::tui::scenarios::Scenario>> {
+        use crate::tui::scenarios as sc;
+        match t {
+            ScenarioType::LiveSessions => Some(Box::new(sc::live_sessions::LiveSessionsScenario::new())),
+            ScenarioType::ToolDetail => Some(Box::new(sc::tool_detail::ToolDetailScenario::new())),
+            ScenarioType::ChatDetail => Some(Box::new(sc::chat_detail::ChatDetailScenario::new())),
+            ScenarioType::FileTouches => Some(Box::new(sc::file_touches::FileTouchesScenario::new())),
+            // Not yet migrated:
+            ScenarioType::Spans => None,
+            ScenarioType::RawBrowser => None,
+        }
+    }
+
+    /// Reconcile `self.scenarios` with the current workspace columns: drop
+    /// scenarios for columns that no longer exist, instantiate scenarios
+    /// for columns that don't yet have one (and whose scenario type is
+    /// trait-migrated). Idempotent — safe to call after any workspace
+    /// mutation.
+    pub fn sync_scenarios_with_workspace(&mut self) {
+        use std::collections::HashSet;
+        let live_ids: HashSet<String> =
+            self.workspace.columns.iter().map(|c| c.id.clone()).collect();
+        self.scenarios.retain(|id, _| live_ids.contains(id));
+        for c in &self.workspace.columns {
+            if self.scenarios.contains_key(&c.id) {
+                continue;
+            }
+            if let Some(s) = Self::scenario_for(c.scenario_type) {
+                self.scenarios.insert(c.id.clone(), s);
+            }
         }
     }
 
@@ -620,12 +654,12 @@ impl App {
             Focus::Column(i) => {
                 if let Some(col) = self.workspace.columns.get(i) {
                     match col.scenario_type {
-                        ScenarioType::LiveSessions => entries.extend(Self::live_sessions_keymap()),
                         ScenarioType::Spans => entries.extend(Self::spans_keymap()),
-                        ScenarioType::ToolDetail => entries.extend(Self::tool_detail_keymap()),
-                        ScenarioType::ChatDetail => entries.extend(Self::chat_detail_keymap()),
-                        ScenarioType::FileTouches => entries.extend(Self::file_touches_keymap()),
-                        ScenarioType::RawBrowser => {}
+                        _ => {
+                            if let Some(scenario) = self.scenarios.get(&col.id) {
+                                entries.extend(scenario.keymap_entries(&col.config));
+                            }
+                        }
                     }
                 }
             }
@@ -702,74 +736,30 @@ impl App {
         ]
     }
 
-    fn live_sessions_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("↑ / ↓", "move session cursor"),
-            Self::keymap_entry("Home / End", "jump to top / bottom"),
-            Self::keymap_entry("Enter", "pick session"),
-            Self::keymap_entry("d / Delete", "delete session"),
-        ]
-    }
-
-    fn tool_detail_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("Tab / Shift-Tab", "cycle detail blocks"),
-            Self::keymap_entry("↑ / ↓", "scroll body"),
-            Self::keymap_entry("Home / End", "scroll to top / bottom"),
-            Self::keymap_entry("Space", "toggle focused panel"),
-            Self::keymap_entry("/", "activate focused block search"),
-        ]
-    }
-
-    fn chat_detail_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("↑ / ↓", "move row cursor"),
-            Self::keymap_entry("← / →", "collapse / expand focused node"),
-            Self::keymap_entry("Home / End", "jump to top / bottom"),
-            Self::keymap_entry("Space", "toggle focused node"),
-            Self::keymap_entry("m", "toggle chat detail mode"),
-            Self::keymap_entry("Tab / Shift-Tab", "cycle body focus"),
-        ]
-    }
-
-    fn file_touches_keymap() -> Vec<(String, String)> {
-        vec![
-            Self::keymap_entry("↑ / ↓", "move row cursor"),
-            Self::keymap_entry("← / →", "collapse / expand directory"),
-            Self::keymap_entry("Home / End", "jump to top / bottom"),
-            Self::keymap_entry("Space", "toggle directory"),
-            Self::keymap_entry("+ / -", "expand all / collapse all"),
-        ]
-    }
-
     /// Dispatch a key to the focused column's scenario. Returns `true` if
-    /// the key was consumed.
+    /// the key was consumed. Spans is still legacy-dispatched on App; every
+    /// other scenario goes through the trait.
     fn scenario_handle_key(&mut self, col_idx: usize, k: crossterm::event::KeyEvent) -> bool {
         let st = self.workspace.columns[col_idx].scenario_type;
         let col_id = self.workspace.columns[col_idx].id.clone();
-        match st {
-            ScenarioType::LiveSessions => self.live_sessions_key(col_idx, &col_id, k),
-            ScenarioType::Spans => self.spans_key(col_idx, &col_id, k),
-            ScenarioType::ToolDetail => self.tool_detail_key(&col_id, k),
-            ScenarioType::ChatDetail => self.chat_detail_key(col_idx, &col_id, k),
-            ScenarioType::FileTouches => self.file_touches_key(&col_id, k),
-            _ => false,
+        if matches!(st, ScenarioType::Spans) {
+            return self.spans_key(col_idx, &col_id, k);
         }
-    }
-
-    fn live_sessions_key(
-        &mut self,
-        col_idx: usize,
-        col_id: &str,
-        k: crossterm::event::KeyEvent,
-    ) -> bool {
-        let sessions = self.cached_sessions();
-        let state = self.live_sessions_state.entry(col_id.to_string()).or_default();
-        let (consumed, effects) = crate::tui::scenarios::live_sessions::handle_key(
-            k, state, &sessions, col_idx,
+        let cfg = self.workspace.columns[col_idx].config.clone();
+        let Some(scenario) = self.scenarios.get_mut(&col_id) else {
+            return false;
+        };
+        let mut ctx = crate::tui::scenarios::Ctx::new(
+            &self.rt.api,
+            &self.rt.cache,
+            &self.workspace,
+            &self.hovered_chat_pk,
+            &mut self.span_detail_memo,
         );
-        self.apply_effects(effects);
-        consumed
+        let outcome = scenario.handle_key(&mut ctx, col_idx, &col_id, &cfg, k);
+        drop(ctx);
+        self.apply_effects(outcome.effects);
+        outcome.consumed
     }
 
     /// Apply a batch of [`ScenarioEffect`]s emitted by a scenario handler.
@@ -1673,6 +1663,7 @@ impl App {
     fn append_column(&mut self, scenario_type: ScenarioType) {
         self.workspace.add_column(scenario_type);
         self.focus_column(self.workspace.columns.len() - 1);
+        self.sync_scenarios_with_workspace();
         let _ = persist::save(&self.workspace);
     }
 
@@ -1698,11 +1689,10 @@ impl App {
     /// it MUST be a no-op so the user does not accidentally destroy a column
     /// they cannot see being targeted.
     ///
-    /// On success, scrub the removed column's id from every per-scenario
-    /// state map. With the unique-ID guarantee from
-    /// [`Workspace::add_column`] the freed id will never be reused, so a
-    /// missed scrub is undetectable today — but explicit cleanup keeps the
-    /// maps bounded and prevents future bugs if the ID minter ever changes.
+    /// On success, scrub the removed column's id from the spans-state map
+    /// (the only legacy per-scenario state map left on `App` — all other
+    /// scenarios live in `App::scenarios`, scrubbed by
+    /// `sync_scenarios_with_workspace`).
     fn remove_focused_column(&mut self) {
         let Some(i) = self.focus.column_idx() else {
             return;
@@ -1710,11 +1700,8 @@ impl App {
         let Some(removed_id) = self.workspace.remove_column(i) else {
             return;
         };
-        self.live_sessions_state.remove(&removed_id);
         self.spans_state.remove(&removed_id);
-        self.tool_detail_state.remove(&removed_id);
-        self.chat_detail_state.remove(&removed_id);
-        self.file_touches_state.remove(&removed_id);
+        self.sync_scenarios_with_workspace();
         let n = self.workspace.columns.len();
         if n == 0 {
             self.focus = Focus::None;
@@ -1901,241 +1888,29 @@ impl App {
                 continue;
             }
             let buf: &mut Buffer = frame.buffer_mut();
+            // Spans is still legacy-dispatched on App; everything else goes
+            // through the trait-migrated scenarios map.
             match st {
-                ScenarioType::LiveSessions => self.draw_live_sessions(inner, buf, &col_id),
                 ScenarioType::Spans => self.draw_spans(inner, buf, i, &col_id, outcome),
-                ScenarioType::ToolDetail => {
-                    self.draw_tool_detail(inner, buf, &col_id, &cfg, focused)
+                _ => {
+                    if let Some(scenario) = self.scenarios.get_mut(&col_id) {
+                        // Borrow-disjoint Ctx assembled inline (cannot use
+                        // `self.make_ctx()` here because `self.scenarios`
+                        // is borrowed mutably).
+                        let mut ctx = crate::tui::scenarios::Ctx::new(
+                            &self.rt.api,
+                            &self.rt.cache,
+                            &self.workspace,
+                            &self.hovered_chat_pk,
+                            &mut self.span_detail_memo,
+                        );
+                        scenario.draw(&mut ctx, i, &col_id, &cfg, inner, buf, focused, outcome);
+                    } else {
+                        render_placeholder(inner, buf, st, &cfg);
+                    }
                 }
-                ScenarioType::ChatDetail => {
-                    self.draw_chat_detail(inner, buf, &col_id, &cfg, focused)
-                }
-                ScenarioType::FileTouches => {
-                    self.draw_file_touches(inner, buf, &col_id, &cfg, focused)
-                }
-                _ => render_placeholder(inner, buf, st, &cfg),
             }
         }
-    }
-
-    fn draw_live_sessions(&mut self, area: Rect, buf: &mut Buffer, col_id: &str) {
-        let sessions = self.cached_sessions();
-        let default = LiveSessionsState::default();
-        let state: &LiveSessionsState =
-            self.live_sessions_state.get(col_id).unwrap_or(&default);
-        if sessions.is_empty() {
-            let line = Line::from(Span::styled(
-                "no sessions yet — replay a fixture",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-            Paragraph::new(line).render(area, buf);
-            return;
-        }
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(sessions.len());
-        for (i, s) in sessions.iter().enumerate() {
-            let txt = render_row(s);
-            let style = if i == state.cursor {
-                Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            lines.push(Line::from(Span::styled(txt, style)));
-        }
-        Paragraph::new(lines).render(area, buf);
-    }
-
-    /// Render a `ToolDetail` column. Resolves the configured span selection +
-    /// search query and the cached span detail, then delegates to the
-    /// tool-detail scenario renderer (which mutates per-column state through
-    /// the `RefCell`).
-    fn draw_tool_detail(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_id: &str,
-        cfg: &crate::tui::workspace::ColumnConfig,
-        focused: bool,
-    ) {
-        let trace_id = cfg.get("selected_trace_id").and_then(|v| v.as_str());
-        let span_id = cfg.get("selected_span_id").and_then(|v| v.as_str());
-        let search_query = cfg.get("search_query").and_then(|v| v.as_str());
-        let selection = match (trace_id, span_id) {
-            (Some(t), Some(s)) => Some((t, s)),
-            _ => None,
-        };
-        let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
-
-        let state = self.tool_detail_state.entry(col_id.to_string()).or_default();
-        crate::tui::scenarios::tool_detail::render(
-            area,
-            buf,
-            state,
-            selection,
-            search_query,
-            detail.as_deref(),
-            focused,
-        );
-    }
-
-    /// Dispatch a key to a `ToolDetail` column's scenario state.
-    fn tool_detail_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
-        let state = self.tool_detail_state.entry(col_id.to_string()).or_default();
-        crate::tui::scenarios::tool_detail::handle_key(k, state)
-    }
-
-    /// Render a `ChatDetail` column. Resolves the selection, mode, search
-    /// query, tool-call hint, and the prior chat-span baseline (DELTA), then
-    /// delegates to the chat-detail scenario renderer.
-    fn draw_chat_detail(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_id: &str,
-        cfg: &crate::tui::workspace::ColumnConfig,
-        focused: bool,
-    ) {
-        use crate::tui::scenarios::chat_detail::tree::ChatMode;
-        let trace_id = cfg.get("selected_trace_id").and_then(|v| v.as_str());
-        let span_id = cfg.get("selected_span_id").and_then(|v| v.as_str());
-        let selected_tool_call_id =
-            cfg.get("selected_tool_call_id").and_then(|v| v.as_str());
-        let search_query = cfg.get("search_query").and_then(|v| v.as_str());
-        let selection = match (trace_id, span_id) {
-            (Some(t), Some(s)) => Some((t, s)),
-            _ => None,
-        };
-        let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
-
-        // Determine the per-column mode BEFORE borrowing chat_detail_state
-        // mutably for prior_attrs computation (which needs `&mut self`).
-        let cfg_mode = cfg.get("chat_mode").and_then(|v| v.as_str()).map(str::to_string);
-        let mode = self
-            .chat_detail_state
-            .get(col_id)
-            .map(|s| s.mode)
-            .unwrap_or_else(|| ChatMode::from_config_str(cfg_mode.as_deref()));
-
-        // DELTA prior-chat-span lookup walks the COMPLETE cached
-        // `session-span-tree` (per the cache contract). Conversation id
-        // comes from the current span's projection. Computed up front so
-        // the subsequent `&mut self.chat_detail_state` borrow doesn't
-        // conflict with the cache-spawning `&mut self` calls.
-        let prior_attrs: Option<Value> = match (&detail, mode) {
-            (Some(d), ChatMode::Delta) => d
-                .projection
-                .chat_turn
-                .as_ref()
-                .and_then(|c| c.conversation_id.clone())
-                .and_then(|cid| {
-                    let tree = self.cached_session_span_tree_by_cid(&cid);
-                    tree.find_prior_chat(
-                        d.span.span_pk,
-                        d.span.end_unix_ns,
-                        d.span.start_unix_ns,
-                    )
-                    .and_then(|node| {
-                        self.cached_span_detail(&node.trace_id, &node.span_id)
-                            .and_then(|sd| sd.span.attributes.clone())
-                    })
-                }),
-            _ => None,
-        };
-
-        let state = self.chat_detail_state.entry(col_id.to_string()).or_insert_with(|| {
-            crate::tui::scenarios::chat_detail::ChatDetailState {
-                mode: ChatMode::from_config_str(cfg_mode.as_deref()),
-                ..Default::default()
-            }
-        });
-
-        crate::tui::scenarios::chat_detail::render(
-            area,
-            buf,
-            state,
-            selection,
-            search_query,
-            selected_tool_call_id,
-            detail.as_deref(),
-            prior_attrs.as_ref(),
-            focused,
-        );
-    }
-
-    /// Dispatch a key to a `ChatDetail` column. The mode lives on the
-    /// scenario state itself — the `m` key toggle reads and writes
-    /// `state.mode` inside [`crate::tui::scenarios::chat_detail::handle_key`].
-    fn chat_detail_key(
-        &mut self,
-        col_idx: usize,
-        col_id: &str,
-        k: crossterm::event::KeyEvent,
-    ) -> bool {
-        use crate::tui::scenarios::chat_detail::tree::ChatMode;
-        // Seed state.mode from cfg on first access so a key arriving before
-        // the first render still respects the column's `chat_mode` config.
-        let cfg_mode = self.workspace.columns[col_idx]
-            .config
-            .get("chat_mode")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let state = self.chat_detail_state.entry(col_id.to_string()).or_insert_with(|| {
-            crate::tui::scenarios::chat_detail::ChatDetailState {
-                mode: ChatMode::from_config_str(cfg_mode.as_deref()),
-                ..Default::default()
-            }
-        });
-        crate::tui::scenarios::chat_detail::handle_key(k, state)
-    }
-
-    /// Render a `FileTouches` column. Resolves the configured session, walks
-    /// the cached session span tree for file-touching tool spans (fetching each
-    /// span's detail through the shared `["span", ...]` cache), and delegates to
-    /// the file-touches scenario renderer.
-    fn draw_file_touches(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        col_id: &str,
-        cfg: &crate::tui::workspace::ColumnConfig,
-        focused: bool,
-    ) {
-        let session = cfg.get("session").and_then(|v| v.as_str());
-        let (cache_loaded, touches) = match session {
-            Some(s) => {
-                let tree = self.cached_session_span_tree_by_cid(s);
-                // Distinguish "loading" from "no touches": the tree fetch is
-                // complete once the cache key holds a value.
-                let loaded = self.rt.cache.peek(&qkey(["session-span-tree", s])).value.is_some();
-                let touches = crate::tui::scenarios::file_touches::walk::extract_touches(
-                    &tree,
-                    |t, sp| self.cached_span_detail(t, sp).map(|rc| (*rc).clone()),
-                );
-                (loaded, touches)
-            }
-            None => (false, Vec::new()),
-        };
-
-        let state = self.file_touches_state.entry(col_id.to_string()).or_default();
-        crate::tui::scenarios::file_touches::render(
-            area,
-            buf,
-            state,
-            session,
-            cache_loaded,
-            &touches,
-            focused,
-        );
-    }
-
-    /// Dispatch a key to a `FileTouches` column's scenario state.
-    fn file_touches_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
-        let state = self.file_touches_state.entry(col_id.to_string()).or_default();
-        crate::tui::scenarios::file_touches::handle_key(k, state)
     }
 
     /// Read-or-fetch `["session-span-tree", cid]` keyed by cid directly.
@@ -3967,28 +3742,31 @@ mod tests {
     /// between columns.
     #[test]
     fn precedence_tab_in_tool_detail_column_passes_to_global_focus_cycle() {
-        use crate::tui::scenarios::tool_detail::{FocusKind, ToolDetailState};
+        use crate::tui::scenarios::tool_detail::{
+            FocusKind, ToolDetailScenario, ToolDetailState,
+        };
 
         let mut app = tool_detail_then_spans_app();
         let col_id = app.workspace.columns[0].id.clone();
-        app.tool_detail_state.insert(
-            col_id.clone(),
-            ToolDetailState {
-                focused_block: 0,
-                focus_plan: vec![
-                    ("metadata".into(), FocusKind::Metadata),
-                    ("body".into(), FocusKind::Search),
-                ],
-                ..Default::default()
-            },
+        // Replace the auto-instantiated scenario with one carrying a
+        // pre-seeded focus plan.
+        app.scenarios.insert(
+            col_id,
+            Box::new(ToolDetailScenario {
+                state: ToolDetailState {
+                    focused_block: 0,
+                    focus_plan: vec![
+                        ("metadata".into(), FocusKind::Metadata),
+                        ("body".into(), FocusKind::Search),
+                    ],
+                    ..Default::default()
+                },
+            }),
         );
 
+        // `Dispatch::Pass` proves the column layer never invoked the
+        // scenario's handle_key, so the focused_block cannot have moved.
         assert_eq!(app.layer_column(press(KeyCode::Tab)), Dispatch::Pass);
-        assert_eq!(
-            app.tool_detail_state.get(&col_id).unwrap().focused_block,
-            0,
-            "column layer must not advance block focus"
-        );
 
         let quit = app.handle_key(press(KeyCode::Tab)).unwrap();
         assert!(!quit);

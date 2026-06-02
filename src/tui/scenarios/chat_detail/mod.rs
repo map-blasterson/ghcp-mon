@@ -834,6 +834,127 @@ pub fn handle_key(
 #[cfg(test)]
 mod tests;
 
+/// `Scenario` impl bundling per-column state + the existing pure handlers.
+/// Owns `ChatDetailState` (mode + tree + searchable text blocks). Pulls the
+/// DELTA prior-chat-span attrs through `Ctx` so the scenario stays
+/// decoupled from `App`.
+#[derive(Debug, Default)]
+pub struct ChatDetailScenario {
+    pub state: ChatDetailState,
+    /// True once the per-column state's `mode` has been initialised from
+    /// `config["chat_mode"]`. Persisted reload happens once per scenario
+    /// instance; subsequent draws keep the live `state.mode` value (the
+    /// `m` key toggle in `handle_key` writes to it).
+    mode_seeded: bool,
+}
+
+impl ChatDetailScenario {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn ensure_mode_seeded(&mut self, config: &crate::tui::workspace::ColumnConfig) {
+        if self.mode_seeded {
+            return;
+        }
+        let cfg_mode = config.get("chat_mode").and_then(|v| v.as_str());
+        self.state.mode = tree::ChatMode::from_config_str(cfg_mode);
+        self.mode_seeded = true;
+    }
+}
+
+impl crate::tui::scenarios::Scenario for ChatDetailScenario {
+    fn draw(
+        &mut self,
+        ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        config: &crate::tui::workspace::ColumnConfig,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        _outcome: &mut crate::tui::app::DrawOutcome,
+    ) {
+        self.ensure_mode_seeded(config);
+
+        let trace_id = config.get("selected_trace_id").and_then(|v| v.as_str());
+        let span_id = config.get("selected_span_id").and_then(|v| v.as_str());
+        let selected_tool_call_id =
+            config.get("selected_tool_call_id").and_then(|v| v.as_str());
+        let search_query = config.get("search_query").and_then(|v| v.as_str());
+        let selection = match (trace_id, span_id) {
+            (Some(t), Some(s)) => Some((t, s)),
+            _ => None,
+        };
+        let detail = selection.and_then(|(t, s)| ctx.cached_span_detail(t, s));
+
+        // DELTA prior-chat-span lookup walks the COMPLETE cached
+        // session-span-tree (per the cache contract — NOT the reveal-
+        // filtered Spans view).
+        let prior_attrs: Option<Value> = match (&detail, self.state.mode) {
+            (Some(d), tree::ChatMode::Delta) => {
+                use crate::tui::model::SpanTreeExt;
+                d.projection
+                    .chat_turn
+                    .as_ref()
+                    .and_then(|c| c.conversation_id.clone())
+                    .and_then(|cid| {
+                        let tree = ctx.cached_session_span_tree(&cid);
+                        let prior = tree.find_prior_chat(
+                            d.span.span_pk,
+                            d.span.end_unix_ns,
+                            d.span.start_unix_ns,
+                        )?;
+                        let prior_tid = prior.trace_id.clone();
+                        let prior_sid = prior.span_id.clone();
+                        ctx.cached_span_detail(&prior_tid, &prior_sid)
+                            .and_then(|sd| sd.span.attributes.clone())
+                    })
+            }
+            _ => None,
+        };
+
+        render(
+            area,
+            buf,
+            &mut self.state,
+            selection,
+            search_query,
+            selected_tool_call_id,
+            detail.as_deref(),
+            prior_attrs.as_ref(),
+            focused,
+        );
+    }
+
+    fn handle_key(
+        &mut self,
+        _ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        config: &crate::tui::workspace::ColumnConfig,
+        k: KeyEvent,
+    ) -> crate::tui::scenarios::KeyOutcome {
+        self.ensure_mode_seeded(config);
+        let consumed = handle_key(k, &mut self.state);
+        crate::tui::scenarios::KeyOutcome { consumed, effects: Vec::new() }
+    }
+
+    fn keymap_entries(
+        &self,
+        _config: &crate::tui::workspace::ColumnConfig,
+    ) -> Vec<(String, String)> {
+        vec![
+            ("↑ / ↓".into(), "move row cursor".into()),
+            ("← / →".into(), "collapse / expand focused node".into()),
+            ("Home / End".into(), "jump to top / bottom".into()),
+            ("Space".into(), "toggle focused node".into()),
+            ("m".into(), "toggle chat detail mode".into()),
+            ("Tab / Shift-Tab".into(), "cycle body focus".into()),
+        ]
+    }
+}
+
 /// Decode a primitive-key synthetic NodeId of the form `{node}__p{i}` back
 /// into the underlying node id. Returns `None` for non-primitive ids.
 fn decode_prim_id(nid: &NodeId) -> Option<NodeId> {

@@ -12,8 +12,17 @@
 //! the App calls after handling key input.
 
 use crate::tui::model::SessionSummary;
-use crate::tui::workspace::{Column, ScenarioType};
+use crate::tui::workspace::{Column, ColumnConfig, ScenarioType};
 use crate::tui::format::fmt_relative;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Widget};
+
+use super::scenario::{Ctx, KeyOutcome, Scenario};
+use crate::tui::app::DrawOutcome;
 
 #[derive(Debug, Default, Clone)]
 pub struct LiveSessionsState {
@@ -167,6 +176,81 @@ pub fn handle_key(
             (true, effects)
         }
         _ => (false, vec![]),
+    }
+}
+
+/// `Scenario` impl bundling state + the existing pure handlers. App holds
+/// one of these per LiveSessions column in `App::scenarios`.
+#[derive(Debug, Default)]
+pub struct LiveSessionsScenario {
+    pub state: LiveSessionsState,
+}
+
+impl LiveSessionsScenario {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Scenario for LiveSessionsScenario {
+    fn draw(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        _config: &ColumnConfig,
+        area: Rect,
+        buf: &mut Buffer,
+        _focused: bool,
+        _outcome: &mut DrawOutcome,
+    ) {
+        let sessions = ctx.cached_sessions();
+        if sessions.is_empty() {
+            let line = Line::from(Span::styled(
+                "no sessions yet — replay a fixture",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            Paragraph::new(line).render(area, buf);
+            return;
+        }
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(sessions.len());
+        for (i, s) in sessions.iter().enumerate() {
+            let txt = render_row(s);
+            let style = if i == self.state.cursor {
+                Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(txt, style)));
+        }
+        Paragraph::new(lines).render(area, buf);
+    }
+
+    fn handle_key(
+        &mut self,
+        ctx: &mut Ctx<'_>,
+        col_idx: usize,
+        _col_id: &str,
+        _config: &ColumnConfig,
+        k: ratatui::crossterm::event::KeyEvent,
+    ) -> KeyOutcome {
+        let sessions = ctx.cached_sessions();
+        let (consumed, effects) = handle_key(k, &mut self.state, &sessions, col_idx);
+        KeyOutcome { consumed, effects }
+    }
+
+    fn keymap_entries(&self, _config: &ColumnConfig) -> Vec<(String, String)> {
+        vec![
+            ("↑ / ↓".into(), "move session cursor".into()),
+            ("Home / End".into(), "jump to top / bottom".into()),
+            ("Enter".into(), "pick session".into()),
+            ("d / Delete".into(), "delete session".into()),
+        ]
     }
 }
 

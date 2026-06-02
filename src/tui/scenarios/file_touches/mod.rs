@@ -401,3 +401,68 @@ pub fn handle_key(key: KeyEvent, state: &mut FileTouchesState) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// `Scenario` impl bundling per-column state + the existing pure handlers.
+#[derive(Debug, Default)]
+pub struct FileTouchesScenario {
+    pub state: FileTouchesState,
+}
+
+impl FileTouchesScenario {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl crate::tui::scenarios::Scenario for FileTouchesScenario {
+    fn draw(
+        &mut self,
+        ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        config: &crate::tui::workspace::ColumnConfig,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        _outcome: &mut crate::tui::app::DrawOutcome,
+    ) {
+        let session = config.get("session").and_then(|v| v.as_str());
+        let (cache_loaded, touches) = match session {
+            Some(s) => {
+                let tree = ctx.cached_session_span_tree(s);
+                let loaded = ctx.session_span_tree_loaded(s);
+                let touches = walk::extract_touches(&tree, |t, sp| {
+                    ctx.cached_span_detail(t, sp).map(|rc| (*rc).clone())
+                });
+                (loaded, touches)
+            }
+            None => (false, Vec::new()),
+        };
+        render(area, buf, &mut self.state, session, cache_loaded, &touches, focused);
+    }
+
+    fn handle_key(
+        &mut self,
+        _ctx: &mut crate::tui::scenarios::Ctx<'_>,
+        _col_idx: usize,
+        _col_id: &str,
+        _config: &crate::tui::workspace::ColumnConfig,
+        k: KeyEvent,
+    ) -> crate::tui::scenarios::KeyOutcome {
+        let consumed = handle_key(k, &mut self.state);
+        crate::tui::scenarios::KeyOutcome { consumed, effects: Vec::new() }
+    }
+
+    fn keymap_entries(
+        &self,
+        _config: &crate::tui::workspace::ColumnConfig,
+    ) -> Vec<(String, String)> {
+        vec![
+            ("↑ / ↓".into(), "move row cursor".into()),
+            ("← / →".into(), "collapse / expand directory".into()),
+            ("Home / End".into(), "jump to top / bottom".into()),
+            ("Space".into(), "toggle directory".into()),
+            ("+ / -".into(), "expand all / collapse all".into()),
+        ]
+    }
+}

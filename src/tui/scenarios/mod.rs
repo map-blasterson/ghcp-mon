@@ -12,10 +12,13 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use crate::tui::workspace::{ColumnConfig, ScenarioType};
 
 pub mod live_sessions;
+pub mod scenario;
 pub mod spans;
 pub mod tool_detail;
 pub mod chat_detail;
 pub mod file_touches;
+
+pub use scenario::{Ctx, KeyOutcome, Scenario, WsBatchMeta};
 
 /// Commands a scenario emits back to [`crate::tui::app::App`] after handling
 /// a key. Scenarios MUST NOT mutate workspace columns, the confirm modal,
