@@ -5,7 +5,7 @@ tags:
   - tui
   - domain/workspace
 ---
-The TUI top bar MUST render a one-line hint string after the status dot listing the supported global keys (`a` add, `x` remove, `Tab` focus, `M` mouse, `?` logs, `q` quit) so users can discover the keymap without external documentation.
+The TUI top bar MUST render a one-line hint string after the status dot listing the supported global keys: `a:add`, `x:rm`, `Shift+←/→:move`, `Shift+Alt+←/→:resize`, `Tab:focus`, `?:logs` (treated as the help/keymap pointer), and `q:quit`. The hint string is suppressed when the top-bar area is narrower than 4 cells.
 
 ## Rationale
 Discoverability for a TUI that has no menu bar.

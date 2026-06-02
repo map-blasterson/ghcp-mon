@@ -11,3 +11,5 @@ Proportional segment bar widget for the Chat Detail summary row. `SummarySeg { i
 ## Source For
 - [[Chat detail summary bar proportional to visible segments]]
 - [[TUI Chat detail summary bar paints via Buffer cell_mut]]
+- [[TUI Chat detail DELTA dark-shades unchanged bar segments]]
+- [[TUI Chat detail hover indicator uses yellow up-triangle row]]

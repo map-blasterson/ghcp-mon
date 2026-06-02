@@ -27,3 +27,7 @@ Chat-detail scenario entry: `ChatDetailState` (expanded sets, primitive expansio
 - [[TUI Chat detail focus precedence within column]]
 - [[TUI Chat detail mode chip in header]]
 - [[TUI Chat detail search-expanded set tracks restoration]]
+- [[TUI Chat detail unified focus marker]]
+- [[TUI Chat detail DELTA dark-shades unchanged bar segments]]
+- [[TUI Chat detail hover indicator uses yellow up-triangle row]]
+- [[TUI Chat detail auto-expand to search match content]]

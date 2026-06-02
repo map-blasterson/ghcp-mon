@@ -23,4 +23,3 @@ wiring. Mouse capture is opt-in; the keyboard path is always present.
 
 ## Derived from
 - [[Terminal Rendering Constraints]]
-- [[Mouse Capture is Opt-In]]

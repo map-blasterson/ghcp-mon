@@ -18,3 +18,4 @@ Spans scenario top-level: SpansState (cursor, user_collapsed, follow_mode, searc
 - [[Span tree row publishes hovered chat ancestor]]
 - [[TUI Spans focused row publishes hovered chat ancestor]]
 - [[Context widget bar click selects chat in Spans column]]
+- [[TUI Spans tree row suppresses noisy names]]

@@ -21,3 +21,5 @@ Tool-detail scenario entry: `ToolDetailState` (metadata/raw-attrs open flags, sc
 - [[TUI Tool detail key-dispatch precedence within column]]
 - [[TUI Tool detail metadata panel default closed]]
 - [[TUI Tool detail empty state verbatim copy]]
+- [[TUI Tool detail edit inline diff renders unified rows]]
+- [[Tool detail inline diff for edit tool]]

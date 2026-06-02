@@ -7,17 +7,21 @@ tags:
 ---
 The cumulative key table registered by the TUI. Each phase appends rows; this is the Phase 0 baseline.
 
-| Mode    | Key            | Effect                                 |
-| ------- | -------------- | -------------------------------------- |
-| Global  | `q`            | Quit                                   |
-| Global  | `Ctrl-C`       | Quit                                   |
-| Global  | `Tab`          | Focus next column                      |
-| Global  | `Shift-Tab`    | Focus previous column                  |
-| Global  | `?`            | Toggle log overlay                     |
-| Global  | `M`            | Toggle mouse capture                   |
-| Global  | `a`            | Append a column (cycle scenario type)  |
-| Global  | `x`            | Remove the focused column              |
-| Modal   | `?` / `Esc`    | Close log overlay                      |
+| Mode    | Key                        | Effect                                                          |
+| ------- | -------------------------- | --------------------------------------------------------------- |
+| Global  | `q`                        | Quit                                                            |
+| Global  | `Ctrl-C`                   | Quit (single press; no longer requires a confirm chord)         |
+| Global  | `Tab`                      | Focus next column / widget slot                                 |
+| Global  | `Shift-Tab`                | Focus previous column / widget slot                             |
+| Global  | `Shift+←` / `Shift+→`      | Move focused column left / right                                |
+| Global  | `Shift+Alt+←` / `Shift+Alt+→` | Narrow / widen focused column by `COLUMN_RESIZE_STEP` (0.1)  |
+| Global  | `a`                        | Open the add-column popover (was: cycle scenario type)          |
+| Global  | `x`                        | Remove the focused column                                       |
+| Global  | `?`                        | Toggle keymap overlay                                           |
+| Global  | `~`                        | Toggle log overlay                                              |
+| Modal   | `?` / `Esc`                | Close keymap overlay                                            |
+| Modal   | `~` / `Esc`                | Close log overlay                                               |
+| Modal   | `↑` / `↓` / `Enter` / `Esc`| Add-column popover: move / pick / cancel                        |
 
 ### Phase 1 additions
 
@@ -114,6 +118,10 @@ Active when a `FileTouches` column has focus.
 | `Home` / `End` | column | tree focused  | jump to top / bottom                              |
 
 ## Derived LLRs
+- [[TUI Shift+Alt arrow column resize]]
+- [[TUI single-press Ctrl-C quit]]
+- [[TUI keymap overlay toggled by question mark]]
+- [[TUI log overlay toggled by tilde]]
 - [[TUI top bar appends column via 'a' keystroke]]
 - [[TUI top bar removes focused column via 'x' keystroke]]
 - [[TUI Spans search input edit semantics]]

@@ -12,3 +12,4 @@ Edit/write renderer: path kv + syntect-highlighted `old_str`/`new_str` (or `cont
 - [[Edit tool renders old new with syntax highlight]]
 - [[Edit tool result renders unified diff from metadata]]
 - [[TUI Udiff classify line precedence]]
+- [[TUI Tool detail edit inline diff renders unified rows]]

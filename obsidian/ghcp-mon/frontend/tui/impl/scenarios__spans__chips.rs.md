@@ -21,3 +21,6 @@ Inline-row chip extractors for the Spans tree:
 - [[Spans tool description inline label]]
 - [[Spans diff stat badges on file mutation tools]]
 - [[Copilot apply_patch diff-stat parsing]]
+- [[TUI Spans chat row shows text preview from messages]]
+- [[TUI Spans target chip renders file basename or URL host]]
+- [[TUI Tool detail edit diff chip counts diff rows not block totals]]

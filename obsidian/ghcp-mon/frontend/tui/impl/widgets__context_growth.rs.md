@@ -18,3 +18,4 @@ Context Growth Widget renderer: stacked per-turn bars (cache-read green / input 
 - [[Context widget binds to first column session]]
 - [[TUI Context widget bar cell layout and tail truncation]]
 - [[TUI Context widget collapsed single-row bar]]
+- [[TUI Context widget bars rendered at 3x vertical via sextants]]

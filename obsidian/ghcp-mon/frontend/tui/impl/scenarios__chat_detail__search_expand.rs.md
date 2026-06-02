@@ -11,3 +11,4 @@ Pure walker that, given a non-empty `query`, returns the set of node IDs that mu
 ## Source For
 - [[ChatDetail auto-expands tree to span search matches]]
 - [[TUI Chat detail search-expanded set tracks restoration]]
+- [[TUI Chat detail auto-expand to search match content]]
