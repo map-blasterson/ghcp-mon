@@ -415,7 +415,10 @@ impl App {
     /// Layer 1 — text-input mode. Currently the only text-input target is
     /// the Spans column's search box (`/`-activated). Per
     /// `TUI Spans search input edit semantics`: printable characters and
-    /// arrows go to the input verbatim; `Esc` exits to column-focused mode.
+    /// arrows go to the input verbatim; `Esc` exits to column-focused mode
+    /// preserving the query; `Delete` exits AND clears the query (btop-
+    /// style); `Enter` / `Shift+Enter` cycle to the next / previous server-
+    /// side search match in the visible tree (auto-selects the landed row).
     fn layer_text_input(&mut self, k: crossterm::event::KeyEvent) -> Dispatch {
         let Some(i) = self.focus.column_idx() else {
             return Dispatch::Pass;
@@ -432,11 +435,38 @@ impl App {
         if !active {
             return Dispatch::Pass;
         }
-        // Esc exits search-input mode (does not propagate further).
+        // Esc exits search-input mode (does not propagate further). Query
+        // text is preserved per btop semantics.
         if matches!(k.code, KeyCode::Esc) {
             if let Some(s) = self.spans_state.get_mut(&col_id) {
                 s.search_active = false;
             }
+            return Dispatch::Consumed;
+        }
+        // Delete (forward-delete key) exits search mode AND clears the
+        // query — btop-style. Overrides the SearchInput's per-character
+        // forward-delete behavior, which is rarely used in practice.
+        if matches!(k.code, KeyCode::Delete) {
+            if let Some(s) = self.spans_state.get_mut(&col_id) {
+                s.search_active = false;
+                s.search.clear();
+                let _ = s.search.take_changed();
+                s.last_search_emitted.clear();
+            }
+            propagate_search(&mut self.workspace.columns, "");
+            let _ = persist::save(&self.workspace);
+            self.kick_search_debounce(&col_id, String::new());
+            return Dispatch::Consumed;
+        }
+        // Enter / Shift+Enter cycle to next / previous search match. Only
+        // intercept bare or Shift-only Enter — Ctrl/Alt+Enter falls through
+        // to the SearchInput which currently ignores them anyway.
+        if matches!(k.code, KeyCode::Enter)
+            && !k.modifiers.contains(KeyModifiers::CONTROL)
+            && !k.modifiers.contains(KeyModifiers::ALT)
+        {
+            let forward = !k.modifiers.contains(KeyModifiers::SHIFT);
+            self.spans_jump_to_match(i, forward);
             return Dispatch::Consumed;
         }
         let mut emitted: Option<String> = None;
@@ -708,8 +738,9 @@ impl App {
             Self::keymap_entry("← / →", "move cursor"),
             Self::keymap_entry("Home / End", "jump cursor"),
             Self::keymap_entry("Backspace", "delete character left"),
-            Self::keymap_entry("Delete", "delete character right"),
-            Self::keymap_entry("Esc", "exit search input"),
+            Self::keymap_entry("Enter / Shift+Enter", "next / previous match"),
+            Self::keymap_entry("Esc", "exit search input (keep query)"),
+            Self::keymap_entry("Delete", "clear query and exit search"),
         ]
     }
 
@@ -723,16 +754,16 @@ impl App {
 
     fn spans_keymap() -> Vec<(String, String)> {
         vec![
-            Self::keymap_entry("↑ / ↓", "move row cursor"),
+            Self::keymap_entry("↑ / ↓", "move row cursor (auto-selects)"),
             Self::keymap_entry("← / →", "collapse / expand focused row"),
-            Self::keymap_entry("Home / End", "jump to top / bottom"),
+            Self::keymap_entry("Home / End", "jump to top / bottom (auto-selects)"),
             Self::keymap_entry("+ / -", "expand all / collapse all"),
             Self::keymap_entry("Space", "toggle focused row"),
             Self::keymap_entry("f", "toggle follow mode"),
             Self::keymap_entry("/", "focus search input"),
             Self::keymap_entry("s", "open session selector"),
             Self::keymap_entry("k", "open kind filter"),
-            Self::keymap_entry("Enter", "select focused row"),
+            Self::keymap_entry("Enter / Shift+Enter", "next / previous search match"),
         ]
     }
 
@@ -993,10 +1024,16 @@ impl App {
                 state.follow_mode = !state.follow_mode;
                 true
             }
-            KeyCode::Enter => {
-                if let Some(id) = flat.get(state.cursor).cloned() {
-                    self.spans_pick(col_idx, &id);
-                }
+            KeyCode::Enter
+                if !k.modifiers.contains(KeyModifiers::CONTROL)
+                    && !k.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                // Hover-as-select made Enter redundant for picking. Enter
+                // and Shift+Enter now navigate to the next / previous
+                // server-side search match; spans_jump_to_match auto-picks
+                // the landed row via spans_pick.
+                let forward = !k.modifiers.contains(KeyModifiers::SHIFT);
+                self.spans_jump_to_match(col_idx, forward);
                 true
             }
             _ => false,
@@ -1171,6 +1208,81 @@ impl App {
         if let Ok(mut g) = self.hovered_chat_pk.write() {
             *g = pk;
         }
+    }
+
+    /// Move the cursor to the next (or previous, when `forward=false`) row
+    /// in the visible flat list whose `span_id` is in the current server-
+    /// side search-hits set, then route the new selection through
+    /// [`Self::spans_pick`] so peer columns follow.
+    ///
+    /// Wrap-around: cycles past the end / before the start. When the cursor
+    /// already sits on a match, the search skips it (vim `n` / `N` semantics).
+    ///
+    /// No-op when any of the following hold:
+    /// * The column has no `session` configured.
+    /// * The search query is empty.
+    /// * The server-side hits are not yet cached (the 300 ms debounce hasn't
+    ///   landed — typing `/foo<Enter>` immediately may swallow the first
+    ///   Enter; a second press once results arrive succeeds).
+    /// * The visible flat list contains no rows in the hit set.
+    fn spans_jump_to_match(&mut self, col_idx: usize, forward: bool) {
+        let col_id = self.workspace.columns[col_idx].id.clone();
+        let Some(session) = self.workspace.columns[col_idx]
+            .config
+            .get("session")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            return;
+        };
+        let (q, cursor, user_collapsed) = {
+            let Some(s) = self.spans_state.get(&col_id) else {
+                return;
+            };
+            (
+                s.search.text().to_string(),
+                s.cursor,
+                s.user_collapsed.clone(),
+            )
+        };
+        if q.is_empty() {
+            return;
+        }
+        let Some(resp) = self.cached_search_hits(&session, &q) else {
+            return;
+        };
+        let hits: std::collections::HashSet<String> =
+            resp.results.into_iter().map(|r| r.span_id).collect();
+        if hits.is_empty() {
+            return;
+        }
+        let tree = self.cached_session_tree(col_idx);
+        let flat = tree.flatten_visible(&user_collapsed);
+        if flat.is_empty() {
+            return;
+        }
+        let n = flat.len();
+        let start = cursor.min(n.saturating_sub(1));
+        // Walk all n indices in order from start+1 (or start-1), wrapping.
+        // step ∈ 1..=n: every index visited exactly once, the current `start`
+        // is checked last → naturally implements "skip current if it's a hit".
+        let new_idx = (1..=n).find_map(|step| {
+            let idx = if forward {
+                (start + step) % n
+            } else {
+                (start + n - step) % n
+            };
+            hits.contains(&flat[idx]).then_some(idx)
+        });
+        let Some(new_idx) = new_idx else {
+            return;
+        };
+        if let Some(s) = self.spans_state.get_mut(&col_id) {
+            s.cursor = new_idx;
+        }
+        self.publish_hovered_chat(col_idx);
+        let id = flat[new_idx].clone();
+        self.spans_pick(col_idx, &id);
     }
 
     /// 300 ms debounce kick for the server-side span search. Per the
@@ -4069,6 +4181,160 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    /// `Delete` while the search input is active must exit search mode AND
+    /// clear the query (btop-style). `Esc` keeps the query.
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_delete_clears_query_and_exits_input_mode() {
+        let mut app = one_spans_column_app();
+        let col_id = app.workspace.columns[0].id.clone();
+        {
+            let s = app
+                .spans_state
+                .entry(col_id.clone())
+                .or_insert_with(SpansState::new);
+            s.search_active = true;
+            s.search.set_text("hello");
+            s.last_search_emitted = "hello".to_string();
+        }
+        let _ = app.handle_key(press(KeyCode::Delete)).unwrap();
+        let s = app.spans_state.get(&col_id).unwrap();
+        assert!(!s.search_active, "Delete must exit search-input mode");
+        assert_eq!(s.search.text(), "", "Delete must clear the query");
+        assert_eq!(
+            s.last_search_emitted, "",
+            "Delete must reset last_search_emitted so re-typing the same text re-emits",
+        );
+    }
+
+    /// `Esc` while the search input is active exits input mode but preserves
+    /// the query text — separate from `Delete`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_esc_exits_input_mode_but_keeps_query() {
+        let mut app = one_spans_column_app();
+        let col_id = app.workspace.columns[0].id.clone();
+        {
+            let s = app
+                .spans_state
+                .entry(col_id.clone())
+                .or_insert_with(SpansState::new);
+            s.search_active = true;
+            s.search.set_text("hello");
+            s.last_search_emitted = "hello".to_string();
+        }
+        let _ = app.handle_key(press(KeyCode::Esc)).unwrap();
+        let s = app.spans_state.get(&col_id).unwrap();
+        assert!(!s.search_active, "Esc must exit search-input mode");
+        assert_eq!(s.search.text(), "hello", "Esc must preserve the query");
+    }
+
+    /// `Enter` / `Shift+Enter` cycle the cursor through server-side search
+    /// matches in the visible flat list. Tested in column-focused mode
+    /// (search input not active).
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_enter_cycles_to_next_match_and_shift_enter_to_previous() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        // Flat tree of 5 top-level spans. Hits will be set on a + c.
+        let tree = vec![
+            mk_span_node_named("a", "a", KindClass::ExecuteTool, Some("bash"), 10, vec![]),
+            mk_span_node_named("b", "b", KindClass::ExecuteTool, Some("bash"), 20, vec![]),
+            mk_span_node_named("c", "c", KindClass::ExecuteTool, Some("bash"), 30, vec![]),
+            mk_span_node_named("d", "d", KindClass::ExecuteTool, Some("bash"), 40, vec![]),
+            mk_span_node_named("e", "e", KindClass::ExecuteTool, Some("bash"), 50, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_search(&app, "cid-1", "q", vec!["a", "c"]);
+        // Seed the column state to mirror the active-search precondition.
+        let col_id = app.workspace.columns[0].id.clone();
+        {
+            let s = app
+                .spans_state
+                .entry(col_id.clone())
+                .or_insert_with(SpansState::new);
+            s.search.set_text("q");
+            s.last_search_emitted = "q".to_string();
+            // Park the cursor between the two hits (idx 1 = "b").
+            s.cursor = 1;
+        }
+
+        // Enter advances to the next match after cursor=1 → c (idx 2).
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 2);
+
+        // Enter again wraps past d/e back to a (idx 0).
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 0);
+
+        // Shift+Enter goes prev — from a, wraps to c (idx 2).
+        let _ = app
+            .handle_key(key_mod(KeyCode::Enter, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 2);
+    }
+
+    /// When the cursor is already on a hit, Enter must skip it (vim `n`
+    /// semantics).
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_enter_skips_current_row_when_already_on_a_match() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![
+            mk_span_node_named("a", "a", KindClass::ExecuteTool, Some("bash"), 10, vec![]),
+            mk_span_node_named("b", "b", KindClass::ExecuteTool, Some("bash"), 20, vec![]),
+            mk_span_node_named("c", "c", KindClass::ExecuteTool, Some("bash"), 30, vec![]),
+        ];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_search(&app, "cid-1", "q", vec!["a", "c"]);
+        let col_id = app.workspace.columns[0].id.clone();
+        {
+            let s = app
+                .spans_state
+                .entry(col_id.clone())
+                .or_insert_with(SpansState::new);
+            s.search.set_text("q");
+            s.cursor = 0; // already on hit "a"
+        }
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(
+            app.spans_state.get(&col_id).unwrap().cursor,
+            2,
+            "Enter on a hit must skip current and advance to next hit",
+        );
+    }
+
+    /// With an empty query, Enter is a no-op (cursor unchanged) but still
+    /// consumed so it doesn't trigger anything else.
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_enter_no_op_when_query_empty() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node_named(
+            "a",
+            "a",
+            KindClass::ExecuteTool,
+            Some("bash"),
+            10,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        let col_id = app.workspace.columns[0].id.clone();
+        {
+            let s = app
+                .spans_state
+                .entry(col_id.clone())
+                .or_insert_with(SpansState::new);
+            s.cursor = 0;
+        }
+        let _ = app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().cursor, 0);
     }
 
     /// LLR: `TUI Tool detail key-dispatch precedence within column` —
