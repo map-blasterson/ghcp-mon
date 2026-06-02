@@ -913,6 +913,9 @@ impl App {
             KeyCode::Up => {
                 state.cursor = state.cursor.saturating_sub(1);
                 self.publish_hovered_chat(col_idx);
+                if let Some(id) = flat.get(self.spans_state.get(col_id).map(|s| s.cursor).unwrap_or(0)).cloned() {
+                    self.spans_pick(col_idx, &id);
+                }
                 true
             }
             KeyCode::Down => {
@@ -920,16 +923,25 @@ impl App {
                     state.cursor += 1;
                 }
                 self.publish_hovered_chat(col_idx);
+                if let Some(id) = flat.get(self.spans_state.get(col_id).map(|s| s.cursor).unwrap_or(0)).cloned() {
+                    self.spans_pick(col_idx, &id);
+                }
                 true
             }
             KeyCode::Home => {
                 state.cursor = 0;
                 self.publish_hovered_chat(col_idx);
+                if let Some(id) = flat.first().cloned() {
+                    self.spans_pick(col_idx, &id);
+                }
                 true
             }
             KeyCode::End => {
                 state.cursor = max.saturating_sub(1);
                 self.publish_hovered_chat(col_idx);
+                if let Some(id) = flat.last().cloned() {
+                    self.spans_pick(col_idx, &id);
+                }
                 true
             }
             KeyCode::Left => {
