@@ -43,33 +43,29 @@ pub struct SummarySeg {
 /// The renderer. Pure stateless; called per-frame.
 pub struct SummaryBar<'a> {
     pub segments: &'a [SummarySeg],
-    /// Optional id of the currently-focused tree row; when its segment is
-    /// present in `segments`, we brighten it (BOLD + REVERSED) for visual
-    /// linkage to the focused row.
+    /// Optional id of the currently-focused tree row. Used by
+    /// [`SummaryBar::render_hover_indicator`] to locate the cell range to
+    /// point at. The id may name a visible-frontier segment OR any ancestor
+    /// of one (matching is exact-equal or prefix `"{hovered}/"`, since node
+    /// ids are slash-delimited paths and a frontier's descendants of a given
+    /// ancestor are contiguous in the segment list).
     pub hovered: Option<&'a str>,
 }
 
 impl<'a> SummaryBar<'a> {
-    /// Paint into the first row of `area`.
+    /// Paint the colored bar into the first row of `area`. Hover state does
+    /// not affect this row; see [`Self::render_hover_indicator`] for the
+    /// separate pointer row.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let total: usize = self.segments.iter().map(|s| s.bytes).sum();
-        let weights: Vec<usize> = self.segments.iter().map(|s| s.bytes).collect();
-        let widths = allocate_widths(total, &weights, area.width);
+        let widths = self.widths(area.width);
         let y = area.y;
         let mut x = area.x;
         for (i, seg) in self.segments.iter().enumerate() {
             let w = widths[i];
-            let is_hover = self
-                .hovered
-                .map(|h| h == seg.id)
-                .unwrap_or(false);
-            let mut style = Style::default().fg(seg.color);
-            if is_hover {
-                style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
-            }
+            let style = Style::default().fg(seg.color);
             for dx in 0..w {
                 let cx = x + dx;
                 if cx >= area.x + area.width {
@@ -91,6 +87,53 @@ impl<'a> SummaryBar<'a> {
             }
             x += 1;
         }
+    }
+
+    /// Paint a yellow `▲` pointer row into the first row of `area`, spanning
+    /// exactly the horizontal cell range of the segments that match the
+    /// hovered id (either the segment's own id or any ancestor prefix). All
+    /// non-matching cells in `area` are blanked with spaces so a previously-
+    /// painted indicator never leaves stale glyphs across frames.
+    pub fn render_hover_indicator(&self, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let y = area.y;
+        // 1. Blank the row first to clear any leftover glyphs.
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(Style::default());
+            }
+        }
+        let Some(hov) = self.hovered else { return; };
+        let widths = self.widths(area.width);
+        let arrow_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let prefix = format!("{hov}/");
+        let mut x = area.x;
+        for (i, seg) in self.segments.iter().enumerate() {
+            let w = widths[i];
+            let matches = seg.id == hov || seg.id.starts_with(&prefix);
+            if matches {
+                for dx in 0..w {
+                    let cx = x + dx;
+                    if cx >= area.x + area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_symbol("▲").set_style(arrow_style);
+                    }
+                }
+            }
+            x += w;
+        }
+    }
+
+    fn widths(&self, width: u16) -> Vec<u16> {
+        let total: usize = self.segments.iter().map(|s| s.bytes).sum();
+        let weights: Vec<usize> = self.segments.iter().map(|s| s.bytes).collect();
+        allocate_widths(total, &weights, width)
     }
 }
 
@@ -221,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn render_hover_brightens_segment() {
+    fn render_does_not_brighten_hovered_segment() {
         let segs = vec![SummarySeg {
             id: "a".into(),
             bytes: 1,
@@ -235,13 +278,133 @@ mod tests {
         let area = Rect::new(0, 0, 5, 1);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-        // At least one cell should carry the REVERSED modifier.
-        let mut any_reversed = false;
         for x in 0..5 {
-            if buf[(x, 0)].modifier.contains(Modifier::REVERSED) {
-                any_reversed = true;
-            }
+            assert!(
+                !buf[(x, 0)].modifier.contains(Modifier::REVERSED),
+                "bar row should not carry REVERSED at x={x}",
+            );
         }
-        assert!(any_reversed);
+    }
+
+    #[test]
+    fn hover_indicator_paints_yellow_arrows_under_matched_segment() {
+        let segs = vec![
+            SummarySeg {
+                id: "a".into(),
+                bytes: 50,
+                color: Color::Red,
+                label: None,
+            },
+            SummarySeg {
+                id: "b".into(),
+                bytes: 50,
+                color: Color::Blue,
+                label: None,
+            },
+        ];
+        let bar = SummaryBar {
+            segments: &segs,
+            hovered: Some("b"),
+        };
+        let bar_area = Rect::new(0, 0, 10, 1);
+        let ind_area = Rect::new(0, 1, 10, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
+        bar.render(bar_area, &mut buf);
+        bar.render_hover_indicator(ind_area, &mut buf);
+
+        // The matched segment ("b") occupies the right half (cols 5..10).
+        for x in 0..5 {
+            assert_eq!(buf[(x, 1)].symbol(), " ", "left half should be blank at x={x}");
+        }
+        for x in 5..10 {
+            assert_eq!(buf[(x, 1)].symbol(), "▲", "right half should have arrow at x={x}");
+            assert_eq!(buf[(x, 1)].fg, Color::Yellow);
+            assert!(buf[(x, 1)].modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn hover_indicator_blanks_row_when_no_hover() {
+        let segs = vec![SummarySeg {
+            id: "a".into(),
+            bytes: 1,
+            color: Color::Red,
+            label: None,
+        }];
+        let bar = SummaryBar {
+            segments: &segs,
+            hovered: None,
+        };
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        // Pre-fill so we can verify the renderer overwrites stale glyphs.
+        for x in 0..5 {
+            buf[(x, 0)].set_symbol("▲");
+        }
+        bar.render_hover_indicator(area, &mut buf);
+        for x in 0..5 {
+            assert_eq!(buf[(x, 0)].symbol(), " ", "stale glyph should be cleared at x={x}");
+        }
+    }
+
+    #[test]
+    fn hover_indicator_blanks_row_when_id_does_not_match() {
+        let segs = vec![SummarySeg {
+            id: "a".into(),
+            bytes: 1,
+            color: Color::Red,
+            label: None,
+        }];
+        let bar = SummaryBar {
+            segments: &segs,
+            hovered: Some("zzz"),
+        };
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        for x in 0..5 {
+            buf[(x, 0)].set_symbol("▲");
+        }
+        bar.render_hover_indicator(area, &mut buf);
+        for x in 0..5 {
+            assert_eq!(buf[(x, 0)].symbol(), " ");
+        }
+    }
+
+    #[test]
+    fn hover_indicator_matches_ancestor_via_slash_prefix() {
+        // Two visible-frontier descendants under a common ancestor "p".
+        let segs = vec![
+            SummarySeg {
+                id: "p/a".into(),
+                bytes: 50,
+                color: Color::Red,
+                label: None,
+            },
+            SummarySeg {
+                id: "p/b".into(),
+                bytes: 50,
+                color: Color::Blue,
+                label: None,
+            },
+            SummarySeg {
+                id: "q".into(),
+                bytes: 0,
+                color: Color::Green,
+                label: None,
+            },
+        ];
+        let bar = SummaryBar {
+            segments: &segs,
+            hovered: Some("p"),
+        };
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        bar.render_hover_indicator(area, &mut buf);
+        // Both "p/a" and "p/b" descendants get arrows; "q" has zero bytes so
+        // contributes no cells anyway. The full 10-cell row should be arrows.
+        for x in 0..10 {
+            assert_eq!(buf[(x, 0)].symbol(), "▲", "expected arrow at x={x}");
+            assert_eq!(buf[(x, 0)].fg, Color::Yellow);
+        }
     }
 }

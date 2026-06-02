@@ -5,7 +5,10 @@
 //!  * row 1: summary bar — one colored segment per visible-frontier node,
 //!    widths proportional to `bytes` per the `Chat detail summary bar
 //!    proportional to visible segments` LLR.
-//!  * rows 2..: tree with two prefix cells — arrow gutter (1 cell, `▶` only
+//!  * row 2: hover indicator — yellow `▲` characters spanning the cell range
+//!    of the segment (or ancestor's contiguous descendants) matching the
+//!    focused tree row; blank when no segment matches.
+//!  * rows 3..: tree with two prefix cells — arrow gutter (1 cell, `▶` only
 //!    at the tool-call target row) + focus glyph (1 cell, `▸`/`▾`/space).
 //!
 //! Source for (shared `frontend/llr/`):
@@ -262,18 +265,19 @@ fn render_full(
     };
 
     // ---- Layout ----
-    if area.height < 3 {
+    if area.height < 4 {
         Paragraph::new(empty_lines("(column too short)")).render(area, buf);
         return;
     }
     let header = Rect::new(area.x, area.y, area.width, 1);
     let bar = Rect::new(area.x, area.y + 1, area.width, 1);
-    let tree_area = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
+    let indicator = Rect::new(area.x, area.y + 2, area.width, 1);
+    let tree_area = Rect::new(area.x, area.y + 3, area.width, area.height - 3);
 
     // ---- Header ----
     render_header(header, buf, tree.bytes, mode);
 
-    // ---- Summary bar ----
+    // ---- Summary bar segments ----
     let frontier = walk::visible_frontier(&tree, &state.expanded);
     let segs: Vec<SummarySeg> = frontier
         .iter()
@@ -285,22 +289,28 @@ fn render_full(
         })
         .collect();
 
-    // Build flat row list before rendering bar so we can derive hover id from
-    // the focused row.
+    // Build flat row list, then clamp focus_row BEFORE deriving the hovered
+    // id so the indicator never points off the end of the visible list.
     let rows = build_rows(&tree, state, arrow_target.as_ref());
-    let hovered_id = rows.get(state.focus_row).and_then(|r| r.node_id.as_ref()).map(|n| n.0.as_str());
-    SummaryBar {
-        segments: &segs,
-        hovered: hovered_id,
-    }
-    .render(bar, buf);
-
-    // ---- Tree body ----
     state.last_row_count = rows.len();
     state.last_focus_map = rows.iter().map(|r| r.node_id.clone()).collect();
     if state.focus_row >= rows.len() && !rows.is_empty() {
         state.focus_row = rows.len() - 1;
     }
+    let hovered_id = rows
+        .get(state.focus_row)
+        .and_then(|r| r.node_id.as_ref())
+        .map(|n| n.0.as_str());
+
+    // ---- Summary bar + hover indicator ----
+    let summary = SummaryBar {
+        segments: &segs,
+        hovered: hovered_id,
+    };
+    summary.render(bar, buf);
+    summary.render_hover_indicator(indicator, buf);
+
+    // ---- Tree body ----
     // Scroll-into-view for focus row.
     let view_h = tree_area.height;
     if !rows.is_empty() && view_h > 0 {
