@@ -423,8 +423,118 @@ impl App {
         col_id: &str,
         k: crossterm::event::KeyEvent,
     ) -> bool {
+        // Per `TUI Spans traces list mode`: when `column.config.session` is
+        // unset, the body is the recent-traces list (cursor = traces_cursor,
+        // Enter reserved for Phase 6). When set, the body is the session
+        // span tree (cursor = state.cursor, Enter routes via spans_pick).
+        let has_session = self.workspace.columns[col_idx]
+            .config
+            .get("session")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+
+        // Common keys (route to popovers / search-input toggle) apply in
+        // both modes — the popovers and the search input themselves are
+        // mode-agnostic affordances.
+        match k.code {
+            KeyCode::Char('/') => {
+                let s = self.spans_state.entry(col_id.to_string()).or_default();
+                s.search_active = true;
+                return true;
+            }
+            KeyCode::Char('s') => {
+                let sessions = self.cached_sessions();
+                let n_sessions = sessions.len();
+                let current_cid = self.workspace.columns[col_idx]
+                    .config
+                    .get("session")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let cur = current_cid
+                    .as_ref()
+                    .and_then(|cid| {
+                        sessions.iter().position(|x| &x.conversation_id == cid)
+                    })
+                    .unwrap_or(0);
+                let s = self.spans_state.entry(col_id.to_string()).or_default();
+                s.popover = Some(SpansPopover::Session);
+                let safe_cursor = cur.min(n_sessions.saturating_sub(1));
+                s.session_picker.open(safe_cursor);
+                return true;
+            }
+            KeyCode::Char('k') => {
+                let s = self.spans_state.entry(col_id.to_string()).or_default();
+                s.popover = Some(SpansPopover::Kind);
+                s.kind_picker.open(0);
+                return true;
+            }
+            _ => {}
+        }
+
+        if has_session {
+            self.spans_key_session_tree(col_idx, col_id, k)
+        } else {
+            self.spans_key_traces(col_id, k)
+        }
+    }
+
+    /// Key dispatch for the no-session traces-list mode. Per
+    /// `TUI Spans traces list mode`: arrow keys move the cursor; `Enter` is
+    /// reserved for Phase 6 trace-pick and MUST be consumed (no-op) so it
+    /// does not fall through to the global layer.
+    fn spans_key_traces(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
+        // Key handlers MUST NOT trigger network fetches — render owns the
+        // SWR lifecycle. Peek the cached traces length read-only.
+        let max = swr_read::<crate::tui::model::ListTracesResponse, _, _>(
+            &self.cache,
+            qkey(["traces"]),
+            std::time::Duration::from_secs(5),
+            FetchPolicy::ReadOnly,
+            || async move { unreachable!("ReadOnly policy never invokes the fetcher") },
+        )
+        .map(|r| r.traces.len())
+        .unwrap_or(0);
+        let s = self.spans_state.entry(col_id.to_string()).or_default();
+        match k.code {
+            KeyCode::Up => {
+                s.traces_cursor = s.traces_cursor.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                if s.traces_cursor + 1 < max {
+                    s.traces_cursor += 1;
+                }
+                true
+            }
+            KeyCode::Home => {
+                s.traces_cursor = 0;
+                true
+            }
+            KeyCode::End => {
+                s.traces_cursor = max.saturating_sub(1);
+                true
+            }
+            // Phase 6 reserved; swallow so it does not quit / reach global.
+            KeyCode::Enter => true,
+            _ => false,
+        }
+    }
+
+    /// Key dispatch for the session-span-tree body mode.
+    fn spans_key_session_tree(
+        &mut self,
+        col_idx: usize,
+        col_id: &str,
+        k: crossterm::event::KeyEvent,
+    ) -> bool {
         let tree = self.cached_session_tree(col_idx);
-        let flat = tree.flatten_visible(&self.spans_state.get(col_id).map(|s| s.user_collapsed.clone()).unwrap_or_default());
+        let flat = tree.flatten_visible(
+            &self
+                .spans_state
+                .get(col_id)
+                .map(|s| s.user_collapsed.clone())
+                .unwrap_or_default(),
+        );
         let max = flat.len();
         let state = self.spans_state.entry(col_id.to_string()).or_default();
         match k.code {
@@ -497,36 +607,6 @@ impl App {
             }
             KeyCode::Char('f') => {
                 state.follow_mode = !state.follow_mode;
-                true
-            }
-            KeyCode::Char('/') => {
-                state.search_active = true;
-                true
-            }
-            KeyCode::Char('s') => {
-                let sessions = self.cached_sessions();
-                let n_sessions = sessions.len();
-                let current_cid = self.workspace.columns[col_idx]
-                    .config
-                    .get("session")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let cur = current_cid
-                    .as_ref()
-                    .and_then(|cid| sessions.iter().position(|x| &x.conversation_id == cid))
-                    .unwrap_or(0);
-                if let Some(s) = self.spans_state.get_mut(col_id) {
-                    s.popover = Some(SpansPopover::Session);
-                    let safe_cursor = cur.min(n_sessions.saturating_sub(1));
-                    s.session_picker.open(safe_cursor);
-                }
-                true
-            }
-            KeyCode::Char('k') => {
-                if let Some(s) = self.spans_state.get_mut(col_id) {
-                    s.popover = Some(SpansPopover::Kind);
-                    s.kind_picker.open(0);
-                }
                 true
             }
             KeyCode::Enter => {
@@ -2677,6 +2757,98 @@ mod tests {
         let text = render_buf_text(&app, 120, 20);
         assert!(text.contains("hit-span"), "missing hit in:\n{text}");
         assert!(text.contains("miss-span"), "missing miss in:\n{text}");
+    }
+
+    /// LLR: `TUI Spans traces list mode` — "Arrow keys move the cursor;
+    /// `Enter` is reserved for Phase 6 trace-pick." In no-session mode the
+    /// session span tree is empty, so navigation MUST target `traces_cursor`
+    /// against the cached traces list, not `cursor` against the empty tree.
+    #[tokio::test(flavor = "current_thread")]
+    async fn traces_mode_down_advances_traces_cursor() {
+        let mut app = one_spans_column_app();
+        seed_traces(
+            &app,
+            vec![
+                TraceSummary {
+                    trace_id: "trace-a".into(),
+                    first_seen_ns: None,
+                    last_seen_ns: None,
+                    span_count: 1,
+                    placeholder_count: 0,
+                    kind_counts: KindCounts::default(),
+                    root: None,
+                    conversation_id: None,
+                },
+                TraceSummary {
+                    trace_id: "trace-b".into(),
+                    first_seen_ns: None,
+                    last_seen_ns: None,
+                    span_count: 1,
+                    placeholder_count: 0,
+                    kind_counts: KindCounts::default(),
+                    root: None,
+                    conversation_id: None,
+                },
+                TraceSummary {
+                    trace_id: "trace-c".into(),
+                    first_seen_ns: None,
+                    last_seen_ns: None,
+                    span_count: 1,
+                    placeholder_count: 0,
+                    kind_counts: KindCounts::default(),
+                    root: None,
+                    conversation_id: None,
+                },
+            ],
+        );
+        let col_id = app.workspace.columns[0].id.clone();
+        // No session in config → traces mode. Initial cursor = 0.
+        assert_eq!(
+            app.spans_state
+                .get(&col_id)
+                .map(|s| s.traces_cursor)
+                .unwrap_or(0),
+            0
+        );
+        let _ = app.handle_key(press(KeyCode::Down)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 1);
+        let _ = app.handle_key(press(KeyCode::Down)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 2);
+        // Clamps at last row.
+        let _ = app.handle_key(press(KeyCode::Down)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 2);
+        // Up wraps no further than 0.
+        let _ = app.handle_key(press(KeyCode::Up)).unwrap();
+        let _ = app.handle_key(press(KeyCode::Up)).unwrap();
+        let _ = app.handle_key(press(KeyCode::Up)).unwrap();
+        let _ = app.handle_key(press(KeyCode::Up)).unwrap();
+        assert_eq!(app.spans_state.get(&col_id).unwrap().traces_cursor, 0);
+    }
+
+    /// LLR: `TUI Spans traces list mode` — "`Enter` is reserved for Phase 6
+    /// trace-pick." It MUST be consumed (no-op) so it does not fall through
+    /// to the global layer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn traces_mode_enter_is_consumed_no_op() {
+        let mut app = one_spans_column_app();
+        seed_traces(
+            &app,
+            vec![TraceSummary {
+                trace_id: "trace-a".into(),
+                first_seen_ns: None,
+                last_seen_ns: None,
+                span_count: 1,
+                placeholder_count: 0,
+                kind_counts: KindCounts::default(),
+                root: None,
+                conversation_id: None,
+            }],
+        );
+        // No selection should be propagated; no session should be set.
+        let quit = app.handle_key(press(KeyCode::Enter)).unwrap();
+        assert!(!quit);
+        // Session config remains unset (no spans_pick fired).
+        assert!(app.workspace.columns[0].config.get("session").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
