@@ -189,18 +189,22 @@ impl Widget for SpansTreeRow<'_> {
             x += name_w;
         }
 
-        // (5) Chips — `▏text▕` with the side bars + text painted in the
-        // chip's hash color on a transparent background. Same cell width
-        // as the previous bg-fill `" text "` style (text.chars + 2) so
-        // surrounding budget arithmetic is unchanged.
+        // (5) Chips — `▏text▕` with a 4-side colored 1px outline:
+        //   * left  / right edges: `▏` (U+258F) and `▕` (U+2595),
+        //     ratatui's own single-cell vertical edge glyphs
+        //     (`ratatui::symbols::border::ONE_EIGHTH_*_EIGHT`, used in
+        //     its `ONE_EIGHTH_TALL` border set).
+        //   * bottom edge: `Modifier::UNDERLINED` painted in the chip
+        //     color via `.underline_color(*color)` (SGR 4 + 58).
+        //   * top edge: U+0305 COMBINING OVERLINE appended to each body
+        //     cell's symbol post-paint — zero-width combining mark, so
+        //     terminals that support it render an overline above the
+        //     character without disturbing cell counts. We append after
+        //     `set_span` so the chip width arithmetic (chars().count())
+        //     stays correct.
         //
-        // `▏` (U+258F LEFT ONE EIGHTH BLOCK) / `▕` (U+2595 RIGHT ONE
-        // EIGHTH BLOCK) are ratatui's standard 1-cell left/right edge
-        // glyphs — see `ratatui::symbols::border::{ONE_EIGHTH_LEFT_EIGHT,
-        // ONE_EIGHTH_RIGHT_EIGHT}` (used by its `ONE_EIGHTH_TALL`
-        // border set). In one-row chip space they read as a vertical
-        // 1px outline that approaches the cell boundary, leaving the
-        // body cells free of background fill.
+        // Same cell footprint (text.chars + 2) as the previous solid-bg
+        // chip — surrounding budget arithmetic unchanged.
         for (text, color) in self.chips {
             if x + 1 >= right_edge {
                 break;
@@ -213,8 +217,22 @@ impl Widget for SpansTreeRow<'_> {
             );
             let chip_w = (chip_text.chars().count() as u16)
                 .min(right_edge.saturating_sub(x));
-            let chip_style = Style::default().fg(*color).add_modifier(Modifier::BOLD);
+            let chip_style = Style::default()
+                .fg(*color)
+                .underline_color(*color)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             buf.set_span(x, row_y, &Span::styled(chip_text, chip_style), chip_w);
+            // Append the top-edge combining overline to each body cell
+            // (skip the two side-bar cells — `▏`/`▕` are full-height
+            // block glyphs that already reach the cell's top edge).
+            let body_chars = text.chars().count() as u16;
+            for k in 0..body_chars.min(chip_w.saturating_sub(2)) {
+                let cx = x + 1 + k;
+                let cell = &mut buf[(cx, row_y)];
+                let mut s = cell.symbol().to_string();
+                s.push('\u{0305}');
+                cell.set_symbol(&s);
+            }
             x += chip_w;
         }
 
