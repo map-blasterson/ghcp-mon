@@ -189,28 +189,14 @@ impl Widget for SpansTreeRow<'_> {
             x += name_w;
         }
 
-        // (5) Chips — `▏text▕` with the side bars + text painted in the
-        // chip's hash color on a transparent background. Same cell width
-        // as the previous bg-fill `" text "` style (text.chars + 2) so
-        // surrounding budget arithmetic is unchanged.
-        //
-        // `▏` (U+258F LEFT ONE EIGHTH BLOCK) / `▕` (U+2595 RIGHT ONE
-        // EIGHTH BLOCK) are ratatui's standard 1-cell left/right edge
-        // glyphs — see `ratatui::symbols::border::{ONE_EIGHTH_LEFT_EIGHT,
-        // ONE_EIGHTH_RIGHT_EIGHT}` (used by its `ONE_EIGHTH_TALL`
-        // border set). In one-row chip space they read as a vertical
-        // 1px outline that approaches the cell boundary, leaving the
-        // body cells free of background fill.
+        // (5) Chips — `[text]` in the chip's hash color. Same cell
+        // footprint as the prior styles (text.chars + 2).
         for (text, color) in self.chips {
             if x + 1 >= right_edge {
                 break;
             }
             x += 1;
-            let chip_text = format!(
-                "{}{text}{}",
-                ratatui::symbols::border::ONE_EIGHTH_LEFT_EIGHT,
-                ratatui::symbols::border::ONE_EIGHTH_RIGHT_EIGHT,
-            );
+            let chip_text = format!("[{text}]");
             let chip_w = (chip_text.chars().count() as u16)
                 .min(right_edge.saturating_sub(x));
             let chip_style = Style::default().fg(*color).add_modifier(Modifier::BOLD);

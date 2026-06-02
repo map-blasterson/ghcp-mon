@@ -48,12 +48,9 @@ impl Widget for KindBadge {
         }
         let label = kind_label(self.kind);
         let seed = self.hash_seed.as_deref().unwrap_or(label);
-        let bg = hash_color(seed);
-        let style = Style::default()
-            .bg(bg)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD);
-        let text = format!(" {label} ");
+        let fg = hash_color(seed);
+        let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+        let text = format!("[{label}]");
         let span = Span::styled(text, style);
         buf.set_span(area.x, area.y, &span, area.width);
     }
