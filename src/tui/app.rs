@@ -27,7 +27,7 @@ use crate::tui::event::{
     AppEvent, spawn_crossterm_reader, spawn_tick, spawn_ws_coalescer,
 };
 use crate::tui::live_feed::LiveFeed;
-use crate::tui::model::{KindClass, SessionSpanTreeResponse};
+use crate::tui::model::{KindClass, SessionSpanTreeResponse, SpanTreeExt};
 use crate::tui::persist;
 use crate::tui::scenarios::live_sessions::{
     LiveSessionsState, clear_session_everywhere, delete_prompt, propagate_session, render_row,
@@ -424,7 +424,7 @@ impl App {
         k: crossterm::event::KeyEvent,
     ) -> bool {
         let tree = self.cached_session_tree(col_idx);
-        let flat = flatten_visible(&tree, &self.spans_state.get(col_id).map(|s| s.user_collapsed.clone()).unwrap_or_default());
+        let flat = tree.flatten_visible(&self.spans_state.get(col_id).map(|s| s.user_collapsed.clone()).unwrap_or_default());
         let max = flat.len();
         let state = self.spans_state.entry(col_id.to_string()).or_default();
         match k.code {
@@ -639,7 +639,7 @@ impl App {
     fn spans_pick(&mut self, col_idx: usize, picked_span_id: &str) {
         let tree = self.cached_session_tree(col_idx);
         // Locate the picked node for trace_id + kind + tool_call_id.
-        let Some(node) = find_node_ref(&tree, picked_span_id) else {
+        let Some(node) = tree.find_by_id(picked_span_id) else {
             return;
         };
         let picked_kind = node.kind_class;
@@ -700,7 +700,7 @@ impl App {
         let Some(state) = self.spans_state.get(col_id) else {
             return;
         };
-        let flat = flatten_visible(&tree, &state.user_collapsed);
+        let flat = tree.flatten_visible(&state.user_collapsed);
         let pk = flat
             .get(state.cursor)
             .and_then(|id| hovered_chat_ancestor(&tree, id));
@@ -915,7 +915,7 @@ impl App {
         let Some(row) = merged.rows.get(i) else {
             return;
         };
-        let Some(node) = find_node_by_pk(&tree, row.span_pk) else {
+        let Some(node) = tree.find_by_pk(row.span_pk) else {
             return;
         };
         let signal = (node.trace_id.clone(), node.span_id.clone());
@@ -956,7 +956,7 @@ impl App {
                 .get(&col_id)
                 .map(|s| s.user_collapsed.clone())
                 .unwrap_or_default();
-            let flat = flatten_visible(&tree, &collapsed);
+            let flat = tree.flatten_visible(&collapsed);
             if let Some(pos) = flat.iter().position(|id| id == &sid) {
                 if let Some(s) = self.spans_state.get_mut(&col_id) {
                     s.cursor = pos;
@@ -1103,7 +1103,7 @@ impl App {
                 .get(&col_id)
                 .map(|s| s.user_collapsed.clone())
                 .unwrap_or_default();
-            let flat = flatten_visible(&tree, &collapsed);
+            let flat = tree.flatten_visible(&collapsed);
             if let Some(new_idx) = flat.iter().position(|id| id == &sid) {
                 if let Some(s) = self.spans_state.get_mut(&col_id) {
                     s.cursor = new_idx;
@@ -1111,7 +1111,7 @@ impl App {
                 }
                 // Propagate selection — same path as Enter (but without
                 // disengaging follow-mode).
-                let node = find_node_ref(&tree, &sid);
+                let node = tree.find_by_id(&sid);
                 if let Some(node) = node {
                     let picked = SelectionPatch {
                         trace_id: tid,
@@ -1474,8 +1474,7 @@ impl App {
                     ),
                 };
                 let tree = self.cached_session_span_tree_by_cid(&cid);
-                let prior = find_prior_chat_span(
-                    &tree,
+                let prior = tree.find_prior_chat(
                     d.span.span_pk,
                     d.span.end_unix_ns,
                     d.span.start_unix_ns,
@@ -1690,7 +1689,7 @@ impl App {
             self.draw_spans_popover(body_total, buf, col_id);
             return;
         }
-        let flat = flatten_visible(&tree, &st.user_collapsed);
+        let flat = tree.flatten_visible(&st.user_collapsed);
         let visible_rows = tree_area.height as usize;
         let start = if st.cursor >= visible_rows {
             st.cursor + 1 - visible_rows
@@ -1713,7 +1712,10 @@ impl App {
 
         for (i_visible, flat_idx) in (start..flat.len().min(start + visible_rows)).enumerate() {
             let row_id = &flat[flat_idx];
-            let (node, depth) = locate_for_render(&tree, row_id);
+            let (node, depth) = match tree.find_with_depth(row_id) {
+                Some((n, d)) => (Some(n), d),
+                None => (None, 0),
+            };
             let Some(node) = node else { continue };
             let row_y = tree_area.y + i_visible as u16;
             let focused = flat_idx == st.cursor;
@@ -1985,7 +1987,7 @@ impl App {
         let Some(focused_id) = flat.get(st.cursor) else {
             return;
         };
-        let Some(node) = find_node_ref(tree, focused_id) else {
+        let Some(node) = tree.find_by_id(focused_id) else {
             return;
         };
         // Try the cache for full detail; fall back to in-tree node for parent/children.
@@ -2245,113 +2247,6 @@ impl App {
     }
 }
 
-/// Flatten the tree into the visible row order, respecting collapse state.
-/// Returns `span_id`s in DFS-pre-order; collapsed nodes hide their children.
-fn flatten_visible(
-    tree: &[crate::tui::model::SpanNode],
-    collapsed: &std::collections::HashSet<String>,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    fn walk(
-        n: &crate::tui::model::SpanNode,
-        collapsed: &std::collections::HashSet<String>,
-        out: &mut Vec<String>,
-    ) {
-        out.push(n.span_id.clone());
-        if collapsed.contains(&n.span_id) {
-            return;
-        }
-        for c in &n.children {
-            walk(c, collapsed, out);
-        }
-    }
-    for r in tree {
-        walk(r, collapsed, &mut out);
-    }
-    out
-}
-
-fn find_node_ref<'a>(
-    tree: &'a [crate::tui::model::SpanNode],
-    id: &str,
-) -> Option<&'a crate::tui::model::SpanNode> {
-    fn walk<'a>(
-        n: &'a crate::tui::model::SpanNode,
-        id: &str,
-    ) -> Option<&'a crate::tui::model::SpanNode> {
-        if n.span_id == id {
-            return Some(n);
-        }
-        for c in &n.children {
-            if let Some(x) = walk(c, id) {
-                return Some(x);
-            }
-        }
-        None
-    }
-    for r in tree {
-        if let Some(n) = walk(r, id) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-/// Find a span node by its integer primary key (`span_pk`). Used to map a
-/// Context Growth Widget bar back to its chat span in the bound column's tree.
-fn find_node_by_pk(
-    tree: &[crate::tui::model::SpanNode],
-    pk: i64,
-) -> Option<&crate::tui::model::SpanNode> {
-    fn walk(
-        n: &crate::tui::model::SpanNode,
-        pk: i64,
-    ) -> Option<&crate::tui::model::SpanNode> {
-        if n.span_pk == pk {
-            return Some(n);
-        }
-        for c in &n.children {
-            if let Some(x) = walk(c, pk) {
-                return Some(x);
-            }
-        }
-        None
-    }
-    for r in tree {
-        if let Some(n) = walk(r, pk) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-fn locate_for_render<'a>(
-    tree: &'a [crate::tui::model::SpanNode],
-    id: &str,
-) -> (Option<&'a crate::tui::model::SpanNode>, usize) {
-    fn walk<'a>(
-        n: &'a crate::tui::model::SpanNode,
-        id: &str,
-        depth: usize,
-    ) -> Option<(&'a crate::tui::model::SpanNode, usize)> {
-        if n.span_id == id {
-            return Some((n, depth));
-        }
-        for c in &n.children {
-            if let Some(x) = walk(c, id, depth + 1) {
-                return Some(x);
-            }
-        }
-        None
-    }
-    for r in tree {
-        if let Some(x) = walk(r, id, 0) {
-            return (Some(x.0), x.1);
-        }
-    }
-    (None, 0)
-}
-
 /// Run the event loop until quit. Caller is responsible for `ratatui::init`
 /// and the panic-hook guard.
 pub async fn event_loop(
@@ -2396,54 +2291,6 @@ pub fn spawn_event_sources(
     spawn_crossterm_reader(tx.clone());
     spawn_tick(tx.clone());
     (tx, rx)
-}
-
-/// Locate the chat-kind span immediately preceding `current_pk` in the
-/// session-span-tree, ordered by `(end_unix_ns ?? start_unix_ns ?? 0,
-/// span_pk)` ascending. Used by Chat Detail's DELTA mode as the baseline
-/// `prior` per `Chat detail DELTA diffs against prior chat span`.
-///
-/// Walks the COMPLETE cached tree (caller passes the cached payload), not
-/// any reveal-filtered view, per the cache contract in the plan.
-pub fn find_prior_chat_span(
-    tree: &[crate::tui::model::SpanNode],
-    current_pk: i64,
-    current_end_ns: Option<crate::tui::model::UnixNs>,
-    current_start_ns: Option<crate::tui::model::UnixNs>,
-) -> Option<&crate::tui::model::SpanNode> {
-    fn flatten<'a>(
-        nodes: &'a [crate::tui::model::SpanNode],
-        out: &mut Vec<&'a crate::tui::model::SpanNode>,
-    ) {
-        for n in nodes {
-            out.push(n);
-            flatten(&n.children, out);
-        }
-    }
-    let mut all: Vec<&crate::tui::model::SpanNode> = Vec::new();
-    flatten(tree, &mut all);
-    // Filter to chat-kind only.
-    let mut chats: Vec<&crate::tui::model::SpanNode> = all
-        .into_iter()
-        .filter(|n| n.kind_class == crate::tui::model::KindClass::Chat)
-        .collect();
-    chats.sort_by_key(|n| {
-        let order_ns = n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0);
-        (order_ns, n.span_pk)
-    });
-    let cur_order = (
-        current_end_ns.or(current_start_ns).unwrap_or(0),
-        current_pk,
-    );
-    // The "prior" is the largest-ordered chat strictly less than cur_order.
-    chats
-        .iter()
-        .copied()
-        .filter(|n| {
-            let key = (n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0), n.span_pk);
-            key < cur_order
-        })
-        .next_back()
 }
 
 /// Make App::draw render into a buffer for unit-testing (no full terminal).
@@ -3144,10 +2991,10 @@ mod tests {
             n(3, 300, KindClass::Chat),
         ];
         // Current is pk=3, end=300 → prior is pk=2.
-        let p = find_prior_chat_span(&tree, 3, Some(300), Some(299)).unwrap();
+        let p = tree.find_prior_chat(3, Some(300), Some(299)).unwrap();
         assert_eq!(p.span_pk, 2);
         // Earliest chat has no prior.
-        assert!(find_prior_chat_span(&tree, 1, Some(100), Some(99)).is_none());
+        assert!(tree.find_prior_chat(1, Some(100), Some(99)).is_none());
     }
 
     // ---- Phase 0 (refactor): key-dispatch precedence golden masters ----
@@ -3274,7 +3121,7 @@ mod tests {
             n(2, 200, KindClass::ExecuteTool),
             n(3, 300, KindClass::Chat),
         ];
-        let p = find_prior_chat_span(&tree, 3, Some(300), None).unwrap();
+        let p = tree.find_prior_chat(3, Some(300), None).unwrap();
         assert_eq!(p.span_pk, 1);
     }
 }

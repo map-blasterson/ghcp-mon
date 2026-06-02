@@ -199,6 +199,154 @@ pub struct SessionSpanTreeResponse {
     pub tree: Vec<SpanNode>,
 }
 
+/// Extension methods for a forest of [`SpanNode`]s (`[SpanNode]`, including
+/// the top-level `Vec<SpanNode>` returned by [`SessionSpanTreeResponse::tree`]
+/// and any `node.children` slice).
+///
+/// Centralises the DFS-pre-order walks that used to live as ad-hoc nested
+/// `fn walk` helpers in [`crate::tui::app`]. Per the DAG-shape guarantees
+/// in the requirement model, every traversal here is acyclic and finite.
+pub trait SpanTreeExt {
+    /// Find the first node whose `span_id` equals `id`, searching DFS
+    /// pre-order across every root and its descendants.
+    fn find_by_id(&self, id: &str) -> Option<&SpanNode>;
+
+    /// Find the first node whose integer `span_pk` equals `pk`. Used to
+    /// map a Context Growth Widget bar (keyed by `span_pk`) back to its
+    /// span in the bound column's tree.
+    fn find_by_pk(&self, pk: i64) -> Option<&SpanNode>;
+
+    /// Locate a node by `span_id` and return it together with its depth
+    /// (0 for a root). Used by the Spans tree renderer to indent rows.
+    fn find_with_depth(&self, id: &str) -> Option<(&SpanNode, usize)>;
+
+    /// DFS-pre-order list of `span_id`s, skipping the descendants of any
+    /// node whose id is in `collapsed`. Implements the visible row order
+    /// for the Spans tree.
+    fn flatten_visible(
+        &self,
+        collapsed: &std::collections::HashSet<String>,
+    ) -> Vec<String>;
+
+    /// Locate the chat-kind span immediately preceding the one identified
+    /// by `(current_pk, current_end_ns, current_start_ns)` when chat spans
+    /// are ordered ascending by `(end_unix_ns ?? start_unix_ns ?? 0, span_pk)`.
+    /// Used by Chat Detail's DELTA mode as the baseline `prior`, per the
+    /// `Chat detail DELTA diffs against prior chat span` LLR.
+    fn find_prior_chat(
+        &self,
+        current_pk: i64,
+        current_end_ns: Option<UnixNs>,
+        current_start_ns: Option<UnixNs>,
+    ) -> Option<&SpanNode>;
+}
+
+impl SpanTreeExt for [SpanNode] {
+    fn find_by_id(&self, id: &str) -> Option<&SpanNode> {
+        fn walk<'a>(n: &'a SpanNode, id: &str) -> Option<&'a SpanNode> {
+            if n.span_id == id {
+                return Some(n);
+            }
+            for c in &n.children {
+                if let Some(x) = walk(c, id) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        self.iter().find_map(|r| walk(r, id))
+    }
+
+    fn find_by_pk(&self, pk: i64) -> Option<&SpanNode> {
+        fn walk(n: &SpanNode, pk: i64) -> Option<&SpanNode> {
+            if n.span_pk == pk {
+                return Some(n);
+            }
+            for c in &n.children {
+                if let Some(x) = walk(c, pk) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        self.iter().find_map(|r| walk(r, pk))
+    }
+
+    fn find_with_depth(&self, id: &str) -> Option<(&SpanNode, usize)> {
+        fn walk<'a>(
+            n: &'a SpanNode,
+            id: &str,
+            depth: usize,
+        ) -> Option<(&'a SpanNode, usize)> {
+            if n.span_id == id {
+                return Some((n, depth));
+            }
+            for c in &n.children {
+                if let Some(x) = walk(c, id, depth + 1) {
+                    return Some(x);
+                }
+            }
+            None
+        }
+        self.iter().find_map(|r| walk(r, id, 0))
+    }
+
+    fn flatten_visible(
+        &self,
+        collapsed: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
+        fn walk(
+            n: &SpanNode,
+            collapsed: &std::collections::HashSet<String>,
+            out: &mut Vec<String>,
+        ) {
+            out.push(n.span_id.clone());
+            if collapsed.contains(&n.span_id) {
+                return;
+            }
+            for c in &n.children {
+                walk(c, collapsed, out);
+            }
+        }
+        let mut out = Vec::new();
+        for r in self {
+            walk(r, collapsed, &mut out);
+        }
+        out
+    }
+
+    fn find_prior_chat(
+        &self,
+        current_pk: i64,
+        current_end_ns: Option<UnixNs>,
+        current_start_ns: Option<UnixNs>,
+    ) -> Option<&SpanNode> {
+        fn flatten<'a>(nodes: &'a [SpanNode], out: &mut Vec<&'a SpanNode>) {
+            for n in nodes {
+                out.push(n);
+                flatten(&n.children, out);
+            }
+        }
+        let mut all: Vec<&SpanNode> = Vec::new();
+        flatten(self, &mut all);
+        let mut chats: Vec<&SpanNode> = all
+            .into_iter()
+            .filter(|n| n.kind_class == KindClass::Chat)
+            .collect();
+        chats.sort_by_key(|n| {
+            (n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0), n.span_pk)
+        });
+        let cur_order = (
+            current_end_ns.or(current_start_ns).unwrap_or(0),
+            current_pk,
+        );
+        chats.into_iter().rfind(|n| {
+            let key = (n.end_unix_ns.or(n.start_unix_ns).unwrap_or(0), n.span_pk);
+            key < cur_order
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct KindCounts {
     #[serde(default)]
