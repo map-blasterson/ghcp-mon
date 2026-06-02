@@ -57,12 +57,6 @@ pub struct SpansState {
     /// Current session for which reveal state applies. Used to detect session
     /// switch and reset.
     pub current_session: Option<String>,
-    /// Click signal written by the Context Growth Widget when the user
-    /// `Enter`s on a bar (`Context widget bar click selects chat in Spans
-    /// column`). Carries the chat span's `(trace_id, span_id)`. Consumed in
-    /// the Spans render/tick path via the shared `spans_pick` route, then
-    /// cleared.
-    pub clicked_chat: Option<(String, String)>,
 }
 
 impl SpansState {

@@ -153,11 +153,9 @@ impl App {
                 // follow_mode is on, recompute the latest tool span and
                 // jump the cursor + propagate selection if it differs.
                 self.tick_follow_mode_advance();
-                // Phase 2: consume any pending Context Growth Widget bar
-                // clicks (`Context widget bar click selects chat in Spans
-                // column`) and refresh the widget's row count for cursor
-                // clamping.
-                self.consume_widget_clicks();
+                // Phase 2: refresh the widget's row count for cursor
+                // clamping. (Widget Enter is routed synchronously via
+                // `widget_select_current`, not polled here.)
                 self.context_widget.last_visible_rows = self
                     .widget_merged_context()
                     .map(|(m, _, _)| m.rows.len() as u16)
@@ -983,9 +981,12 @@ impl App {
         }
     }
 
-    /// `Enter` on the focused widget bar → emit a `clicked_chat` signal into
-    /// every Spans column (`Context widget bar click selects chat in Spans
-    /// column`). The signal is consumed in the tick path via `spans_pick`.
+    /// `Enter` on the focused widget bar → route the bar's chat span as a
+    /// selection through every Spans column (`Context widget bar click
+    /// selects chat in Spans column`). Synchronous: for each Spans column,
+    /// move the row cursor to the chat span (if visible in the flattened
+    /// tree) and call [`Self::spans_pick`] for the standard selection
+    /// routing.
     fn widget_select_current(&mut self) {
         let Some(i) = self.context_widget.bar_cursor else {
             return;
@@ -999,22 +1000,8 @@ impl App {
         let Some(node) = tree.find_by_pk(row.span_pk) else {
             return;
         };
-        let signal = (node.trace_id.clone(), node.span_id.clone());
-        for c in self.workspace.columns.iter() {
-            if c.scenario_type == ScenarioType::Spans {
-                let st = self.spans_state.entry(c.id.clone()).or_default();
-                st.clicked_chat = Some(signal.clone());
-            }
-        }
-        // Apply immediately as well so the routing is observable without
-        // waiting for the next tick.
-        self.consume_widget_clicks();
-    }
-
-    /// Consume any pending `clicked_chat` signals on Spans columns by routing
-    /// them through the shared `spans_pick` selection path, then clear them.
-    fn consume_widget_clicks(&mut self) {
-        let cols: Vec<(usize, String)> = self
+        let picked_sid = node.span_id.clone();
+        let spans_cols: Vec<(usize, String)> = self
             .workspace
             .columns
             .iter()
@@ -1022,31 +1009,23 @@ impl App {
             .filter(|(_, c)| c.scenario_type == ScenarioType::Spans)
             .map(|(i, c)| (i, c.id.clone()))
             .collect();
-        for (idx, col_id) in cols {
-            let clicked = self
-                .spans_state
-                .get(&col_id)
-                .and_then(|s| s.clicked_chat.clone());
-            let Some((_tid, sid)) = clicked else {
-                continue;
-            };
-            // Move the row cursor to the clicked chat span when it is visible.
-            let tree = self.cached_session_tree(idx);
+        for (idx, col_id) in spans_cols {
+            // Move the row cursor to the picked chat span when it is visible
+            // in the column's current flatten (collapse-state respected).
+            let col_tree = self.cached_session_tree(idx);
             let collapsed = self
                 .spans_state
                 .get(&col_id)
                 .map(|s| s.user_collapsed.clone())
                 .unwrap_or_default();
-            let flat = tree.flatten_visible(&collapsed);
-            if let Some(pos) = flat.iter().position(|id| id == &sid) {
-                if let Some(s) = self.spans_state.get_mut(&col_id) {
-                    s.cursor = pos;
-                }
+            let flat = col_tree.flatten_visible(&collapsed);
+            if let Some(pos) = flat.iter().position(|id| id == &picked_sid) {
+                self.spans_state
+                    .entry(col_id.clone())
+                    .or_default()
+                    .cursor = pos;
             }
-            self.spans_pick(idx, &sid);
-            if let Some(s) = self.spans_state.get_mut(&col_id) {
-                s.clicked_chat = None;
-            }
+            self.spans_pick(idx, &picked_sid);
         }
     }
 
@@ -2997,13 +2976,12 @@ mod tests {
         app.widget_focused = true;
         app.context_widget.bar_cursor = Some(1); // chat "b"
         app.widget_select_current();
-        // consume_widget_clicks (called inline) routes through spans_pick and
-        // clears the signal.
+        // Selection is routed synchronously through spans_pick — cursor
+        // must have moved to the flat index of span "b" (index 1).
         let col_id = app.workspace.columns[0].id.clone();
         let st = app.spans_state.get(&col_id).unwrap();
-        assert!(st.clicked_chat.is_none(), "signal must be consumed");
-        // Cursor moved to the flat index of span "b" (index 1).
         assert_eq!(st.cursor, 1);
+        assert_eq!(st.focused_span_id.as_deref(), Some("b"));
     }
 
     #[test]
