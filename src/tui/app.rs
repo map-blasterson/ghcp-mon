@@ -53,6 +53,32 @@ use crate::tui::ws::{WsBus, WsStatus};
 /// LLR; analog of the web's `MIN_COL_PX = 280`).
 pub const MIN_COL: u16 = 24;
 
+/// What the keyboard is currently pointed at. Replaces the previous
+/// `(focused_column: Option<usize>, widget_focused: bool)` pair, where the
+/// combination `widget_focused = true` AND `focused_column = Some(_)` was
+/// representable but had no defined meaning. With this enum, focus has
+/// exactly one target — and the `Tab` cycle, key precedence, and visual
+/// border-highlight can all be derived from it without ambiguity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    None,
+    Column(usize),
+    Widget,
+}
+
+impl Focus {
+    pub fn column_idx(self) -> Option<usize> {
+        match self {
+            Focus::Column(i) => Some(i),
+            _ => None,
+        }
+    }
+    pub fn is_widget(self) -> bool {
+        matches!(self, Focus::Widget)
+    }
+}
+
 /// Top-level app state.
 pub struct App {
     pub workspace: Workspace,
@@ -62,7 +88,13 @@ pub struct App {
     pub api: ApiClient,
     pub ws: WsBus,
     pub log_buffer: LogBuffer,
-    pub focused_column: Option<usize>,
+    pub focus: Focus,
+    /// Column index to restore focus to when widget focus is released
+    /// (`Esc` on the focused widget, or the widget being hidden). Updated
+    /// every time `focus` becomes `Focus::Column(i)`. Per the
+    /// `TUI Context widget participates in Tab focus cycle` LLR — "Esc
+    /// while focused, or hiding the widget, returns focus to the columns."
+    pub last_focused_column: Option<usize>,
     pub log_overlay_visible: bool,
     pub mouse_enabled: bool,
     pub add_column_cursor: usize,
@@ -90,9 +122,6 @@ pub struct App {
     pub anim_tick: u64,
     /// Context Growth Widget keyboard-cursor state (Phase 2).
     pub context_widget: ContextGrowthState,
-    /// True when keyboard focus is on the Context Growth Widget rather than a
-    /// column (part of the `Tab` focus cycle when the widget is visible).
-    pub widget_focused: bool,
     /// Last known terminal size `(width, height)`. Updated on resize and at
     /// startup; drives the widget-height `0.8 * term_h` clamp.
     pub term_size: (u16, u16),
@@ -101,7 +130,12 @@ pub struct App {
 impl App {
     pub fn new(api: ApiClient, ws: WsBus, log_buffer: LogBuffer, mouse_enabled: bool) -> Self {
         let workspace = persist::load();
-        let focused_column = (!workspace.columns.is_empty()).then_some(0);
+        let focus = if workspace.columns.is_empty() {
+            Focus::None
+        } else {
+            Focus::Column(0)
+        };
+        let last_focused_column = focus.column_idx();
         Self {
             workspace,
             cache: Arc::new(QueryCache::new()),
@@ -110,7 +144,8 @@ impl App {
             status: ws.status(),
             ws,
             log_buffer,
-            focused_column,
+            focus,
+            last_focused_column,
             log_overlay_visible: false,
             mouse_enabled,
             add_column_cursor: 0,
@@ -125,9 +160,36 @@ impl App {
             pending_delete: None,
             anim_tick: 0,
             context_widget: ContextGrowthState::default(),
-            widget_focused: false,
             term_size: (0, 0),
         }
+    }
+
+    /// Set focus to a column and remember it as the widget's return target.
+    fn focus_column(&mut self, i: usize) {
+        self.focus = Focus::Column(i);
+        self.last_focused_column = Some(i);
+    }
+
+    /// Set focus to the widget. The current `last_focused_column` is left
+    /// in place so `release_widget` can return there.
+    fn focus_widget(&mut self) {
+        self.focus = Focus::Widget;
+    }
+
+    /// Release widget focus back to the columns (LLR: "Esc while focused,
+    /// or hiding the widget, returns focus to the columns"). Restores the
+    /// last focused column when it is still a valid index, else falls back
+    /// to column 0, else `Focus::None`.
+    fn release_widget(&mut self) {
+        let n = self.workspace.columns.len();
+        let restore = self
+            .last_focused_column
+            .filter(|&i| i < n)
+            .or_else(|| (n > 0).then_some(0));
+        self.focus = match restore {
+            Some(i) => Focus::Column(i),
+            None => Focus::None,
+        };
     }
 
     /// Process one drained event. Returns `Ok(true)` if the loop should
@@ -226,7 +288,7 @@ impl App {
         }
 
         // Precedence layer 2 (continued): Spans popover (session / kind).
-        if let Some(i) = self.focused_column {
+        if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
             let popover = self
                 .spans_state
@@ -240,7 +302,7 @@ impl App {
         }
 
         // Precedence layer 1: text-input mode (Spans column search).
-        if let Some(i) = self.focused_column {
+        if let Some(i) = self.focus.column_idx() {
             let col_id = self.workspace.columns[i].id.clone();
             let st = self.workspace.columns[i].scenario_type;
             if st == ScenarioType::Spans {
@@ -281,7 +343,7 @@ impl App {
         }
 
         // Precedence layer 3: widget-local (Context Growth Widget focused).
-        if self.widget_focused {
+        if self.focus.is_widget() {
             match k.code {
                 KeyCode::Left => {
                     self.widget_move_cursor(-1);
@@ -296,7 +358,7 @@ impl App {
                     return Ok(false);
                 }
                 KeyCode::Esc => {
-                    self.widget_focused = false;
+                    self.release_widget();
                     return Ok(false);
                 }
                 // Any other key falls through to the global layer.
@@ -305,7 +367,7 @@ impl App {
         }
 
         // Precedence layer 4: column scenario keys.
-        if let Some(i) = self.focused_column {
+        if let Some(i) = self.focus.column_idx() {
             if self.scenario_handle_key(i, k) {
                 return Ok(false);
             }
@@ -1023,12 +1085,13 @@ impl App {
         }
     }
 
-    /// Toggle the Context Growth Widget visibility (`c` global key). Drops
-    /// widget focus when hiding.
+    /// Toggle the Context Growth Widget visibility (`c` global key). When
+    /// hiding while the widget is focused, focus returns to the columns per
+    /// the `TUI Context widget collapsed single-row bar` LLR.
     fn toggle_context_widget(&mut self) {
         self.workspace.context_widget_visible = !self.workspace.context_widget_visible;
-        if !self.workspace.context_widget_visible {
-            self.widget_focused = false;
+        if !self.workspace.context_widget_visible && self.focus.is_widget() {
+            self.release_widget();
         }
         let _ = persist::save(&self.workspace);
     }
@@ -1202,25 +1265,23 @@ impl App {
         // Focus slots: columns `0..n`, then an optional widget slot at index n.
         let slots = n + usize::from(widget_in_cycle);
         if slots == 0 {
-            self.focused_column = None;
-            self.widget_focused = false;
+            self.focus = Focus::None;
             return;
         }
-        let cur = if self.widget_focused {
-            n
-        } else {
-            self.focused_column.unwrap_or(0).min(slots - 1)
+        let cur = match self.focus {
+            Focus::Widget => n,
+            Focus::Column(i) => i.min(slots - 1),
+            Focus::None => 0,
         };
         let next = ((cur as i32 + dir).rem_euclid(slots as i32)) as usize;
         if widget_in_cycle && next == n {
-            self.widget_focused = true;
+            self.focus_widget();
             if self.context_widget.bar_cursor.is_none() {
                 self.context_widget.bar_cursor = Some(0);
             }
             self.publish_widget_hover();
         } else {
-            self.widget_focused = false;
-            self.focused_column = Some(next);
+            self.focus_column(next);
         }
     }
 
@@ -1229,22 +1290,30 @@ impl App {
         let st = all[self.add_column_cursor % all.len()];
         self.add_column_cursor = (self.add_column_cursor + 1) % all.len();
         self.workspace.add_column(st);
-        if self.focused_column.is_none() {
-            self.focused_column = Some(self.workspace.columns.len() - 1);
+        if matches!(self.focus, Focus::None) {
+            self.focus_column(self.workspace.columns.len() - 1);
         }
         let _ = persist::save(&self.workspace);
     }
 
+    /// `x` global key: remove the focused column. Per the `Keybinding Matrix`
+    /// the binding is column-scoped — when widget is focused (not a column)
+    /// it MUST be a no-op so the user does not accidentally destroy a column
+    /// they cannot see being targeted.
     fn remove_focused_column(&mut self) {
-        if let Some(i) = self.focused_column {
-            self.workspace.remove_column(i);
-            if self.workspace.columns.is_empty() {
-                self.focused_column = None;
-            } else if i >= self.workspace.columns.len() {
-                self.focused_column = Some(self.workspace.columns.len() - 1);
-            }
-            let _ = persist::save(&self.workspace);
+        let Some(i) = self.focus.column_idx() else {
+            return;
+        };
+        self.workspace.remove_column(i);
+        let n = self.workspace.columns.len();
+        if n == 0 {
+            self.focus = Focus::None;
+            self.last_focused_column = None;
+        } else {
+            let next = i.min(n - 1);
+            self.focus_column(next);
         }
+        let _ = persist::save(&self.workspace);
     }
 
     fn toggle_mouse(&mut self) {
@@ -1371,7 +1440,7 @@ impl App {
 
         for (i, col) in self.workspace.columns.iter().enumerate() {
             let rect = cols[i];
-            let focused = self.focused_column == Some(i);
+            let focused = self.focus.column_idx() == Some(i);
             let mut block = Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" {} ", col.title));
@@ -2224,7 +2293,7 @@ mod tests {
     fn append_column_cycles_scenario_types() {
         let mut app = make_app();
         app.workspace.columns.clear();
-        app.focused_column = None;
+        app.focus = Focus::None;
         let n0 = app.workspace.columns.len();
         app.append_column();
         app.append_column();
@@ -2241,7 +2310,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         let mut app = make_app();
         app.workspace.columns.clear();
-        app.focused_column = None;
+        app.focus = Focus::None;
         let backend = TestBackend::new(80, 12);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| app.draw(f)).unwrap();
@@ -2441,7 +2510,8 @@ mod tests {
         app.workspace.columns.clear();
         app.workspace
             .add_column(crate::tui::workspace::ScenarioType::Spans);
-        app.focused_column = Some(0);
+        app.focus = Focus::Column(0);
+        app.last_focused_column = Some(0);
         app
     }
 
@@ -2867,10 +2937,13 @@ mod tests {
     fn toggle_context_widget_flips_visibility_and_drops_focus() {
         let mut app = make_app();
         app.workspace.context_widget_visible = true;
-        app.widget_focused = true;
+        app.focus = Focus::Widget;
         app.toggle_context_widget();
         assert!(!app.workspace.context_widget_visible);
-        assert!(!app.widget_focused, "hiding must drop widget focus");
+        assert!(
+            !app.focus.is_widget(),
+            "hiding must drop widget focus"
+        );
         app.toggle_context_widget();
         assert!(app.workspace.context_widget_visible);
     }
@@ -2893,11 +2966,10 @@ mod tests {
     fn cycle_focus_includes_widget_slot_when_visible() {
         let mut app = one_spans_column_app();
         app.workspace.context_widget_visible = true;
-        app.focused_column = Some(0);
-        app.widget_focused = false;
+        app.focus_column(0);
         // One column + widget = 2 slots. Tab forward lands on the widget.
         app.cycle_focus(1);
-        assert!(app.widget_focused, "expected widget focus after column");
+        assert!(app.focus.is_widget(), "expected widget focus after column");
         assert_eq!(
             app.context_widget.bar_cursor,
             Some(0),
@@ -2905,18 +2977,39 @@ mod tests {
         );
         // Tab again wraps back to the column.
         app.cycle_focus(1);
-        assert!(!app.widget_focused);
-        assert_eq!(app.focused_column, Some(0));
+        assert!(!app.focus.is_widget());
+        assert_eq!(app.focus.column_idx(), Some(0));
     }
 
     #[test]
     fn cycle_focus_skips_widget_slot_when_hidden() {
         let mut app = one_spans_column_app();
         app.workspace.context_widget_visible = false;
-        app.focused_column = Some(0);
+        app.focus_column(0);
         app.cycle_focus(1);
-        assert!(!app.widget_focused);
-        assert_eq!(app.focused_column, Some(0));
+        assert!(!app.focus.is_widget());
+        assert_eq!(app.focus.column_idx(), Some(0));
+    }
+
+    /// LLR: `TUI Context widget participates in Tab focus cycle` — "Esc
+    /// while focused, or hiding the widget, returns focus to the columns."
+    /// With a column previously focused, widget Esc MUST restore that
+    /// column as the focus.
+    #[tokio::test(flavor = "current_thread")]
+    async fn widget_esc_restores_focus_to_last_column() {
+        let mut app = one_spans_column_app();
+        app.workspace.context_widget_visible = true;
+        // Establish column 0 as the focused column, then Tab into the widget.
+        app.focus_column(0);
+        app.cycle_focus(1);
+        assert!(app.focus.is_widget(), "precondition: Tab lands on widget");
+        // Esc on the widget releases.
+        let _ = app.handle_key(press(KeyCode::Esc)).unwrap();
+        assert_eq!(
+            app.focus.column_idx(),
+            Some(0),
+            "Esc on widget must return focus to the previously-focused column"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2957,7 +3050,7 @@ mod tests {
             "cid-1",
             vec![mk_snapshot(10, 150, 1000, 400), mk_snapshot(20, 250, 1000, 800)],
         );
-        app.widget_focused = true;
+        app.focus = Focus::Widget;
         app.context_widget.bar_cursor = Some(1); // chat "b"
         app.widget_select_current();
         // Selection is routed synchronously through spans_pick — cursor
@@ -3057,7 +3150,7 @@ mod tests {
             "cid-1",
             vec![mk_snapshot(10, 150, 1000, 400), mk_snapshot(20, 250, 1000, 800)],
         );
-        app.widget_focused = true;
+        app.focus = Focus::Widget;
         app.context_widget.bar_cursor = Some(0);
         let col_id = app.workspace.columns[0].id.clone();
         let col_cursor_before = app
