@@ -3123,18 +3123,10 @@ mod tests {
     }
 
     fn buf_text(buf: &Buffer) -> String {
-        // Strip the same combining marks `row_text` strips so text-content
-        // assertions over the whole frame stay grapheme-stable when the
-        // chip painter decorates cells with U+0305 COMBINING OVERLINE.
         let mut joined = String::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
-                for ch in buf[(x, y)].symbol().chars() {
-                    if ('\u{0300}'..='\u{036F}').contains(&ch) {
-                        continue;
-                    }
-                    joined.push(ch);
-                }
+                joined.push_str(buf[(x, y)].symbol());
             }
             joined.push('\n');
         }
@@ -3147,35 +3139,21 @@ mod tests {
     }
 
     fn row_text(buf: &Buffer, y: u16) -> String {
-        // The chip painter appends a U+0305 COMBINING OVERLINE to each
-        // body cell so terminals draw a top border above the chip. The
-        // mark is zero-width and purely decorative; for text-content
-        // assertions and substring searches we want the underlying chars
-        // only. Strip the entire `Mn` category to stay general (this
-        // also covers any future Mark codepoints we paint).
         let mut row = String::new();
         for x in 0..buf.area.width {
-            for ch in buf[(x, y)].symbol().chars() {
-                // Combining marks live in U+0300..U+036F (Combining
-                // Diacritical Marks) — the block we paint into. Strip.
-                if ('\u{0300}'..='\u{036F}').contains(&ch) {
-                    continue;
-                }
-                row.push(ch);
-            }
+            row.push_str(buf[(x, y)].symbol());
         }
         row
     }
 
     fn row_substr_x(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
         // The buffer's columns are CELLS; symbols can be multi-byte
-        // (the chip outlines `▏`/`▕` are 3 bytes each, body cells carry
-        // a zero-width COMBINING OVERLINE). `String::find` returns a
-        // *byte* offset into the joined row text — cast to a cell index
-        // it would land past the start of any multi-byte symbol
-        // preceding the needle. Walk cell-by-cell accumulating the
-        // post-combining-mark-strip byte lengths used by `row_text` so
-        // the offsets reconcile.
+        // (the chip outlines `▏`/`▕` are 3 bytes each). `String::find`
+        // returns a *byte* offset into the joined row text — cast to
+        // a cell index it would land 2 cells past the start of any
+        // multi-byte symbol preceding the needle. Walk cell-by-cell
+        // accumulating symbol bytes and report the cell whose byte
+        // offset matches a `String::find` hit.
         let row = row_text(buf, y);
         let byte_off = row.find(needle)?;
         let mut bytes = 0usize;
@@ -3186,13 +3164,7 @@ mod tests {
             if bytes > byte_off {
                 return None;
             }
-            // Symbol length *after* combining-mark strip, matching row_text.
-            for ch in buf[(x, y)].symbol().chars() {
-                if ('\u{0300}'..='\u{036F}').contains(&ch) {
-                    continue;
-                }
-                bytes += ch.len_utf8();
-            }
+            bytes += buf[(x, y)].symbol().len();
         }
         None
     }
