@@ -142,11 +142,7 @@ fn sort_nodes(level: &mut [TouchNode]) {
         // Directories (is_dir == true) sort before files.
         b.is_dir()
             .cmp(&a.is_dir())
-            // Primary alpha: case-insensitive.
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            // Tie-breaker: full case-sensitive name so "Main.rs" / "main.rs"
-            // produce a stable order independent of input order.
-            .then_with(|| a.name.cmp(&b.name))
     });
     for n in level.iter_mut() {
         sort_nodes(&mut n.children);

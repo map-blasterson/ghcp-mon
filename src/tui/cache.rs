@@ -227,49 +227,6 @@ impl QueryCache {
     pub fn len(&self) -> usize {
         self.inner.read().unwrap().entries.len()
     }
-
-    /// Atomically check whether a refetch is needed AND claim the in-flight
-    /// slot in one write-locked operation. Returns `Some(ticket)` if the
-    /// caller should perform the fetch (and post the result via
-    /// [`Self::put`] + [`Self::finish_fetch`]). Returns `None` when the
-    /// cached value is fresh OR another fetcher is already in flight.
-    ///
-    /// Closes the race window in the previous peek + spawn + begin_fetch
-    /// sequence: with the old code, N concurrent renderers each saw
-    /// `in_flight=None` (because no spawned task had yet acquired the
-    /// write lock to call `begin_fetch`) and N tasks would race, each
-    /// issuing its own HTTP request. At 60+fps with hundreds of stale
-    /// span entries this was a thundering herd that blew through the
-    /// 1024-entry span LRU and caused visible scramble.
-    pub fn try_claim_fetch(&self, key: &QueryKey) -> Option<FetchTicket> {
-        let mut g = self.inner.write().unwrap();
-        let entry = g.entries.entry(key.clone()).or_default();
-        if entry.in_flight.is_some() {
-            return None;
-        }
-        let stale = entry
-            .cached
-            .as_ref()
-            .map(|c: &CachedValue| c.is_stale())
-            .unwrap_or(true);
-        if !stale {
-            return None;
-        }
-        entry.latest_gen = entry.latest_gen.wrapping_add(1);
-        let (tx, rx) = broadcast::channel::<Value>(1);
-        entry.in_flight = Some(tx);
-        Some(FetchTicket {
-            generation: entry.latest_gen,
-            already_in_flight: false,
-            wait: Some(rx),
-        })
-    }
-}
-
-pub struct FetchTicket {
-    pub generation: u64,
-    pub already_in_flight: bool,
-    pub wait: Option<broadcast::Receiver<Value>>,
 }
 
 /// Convenience wrapper composing `peek` + `begin_fetch` + `put` +
@@ -338,13 +295,17 @@ where
     }
 }
 
+pub struct FetchTicket {
+    pub generation: u64,
+    pub already_in_flight: bool,
+    pub wait: Option<broadcast::Receiver<Value>>,
+}
+
 /// Fetch policy for [`swr_read`]: whether to dispatch a background refetch
 /// when the cached value is missing or stale.
 ///
 /// * `Swr` — stale-while-revalidate: return cached value (if any) and spawn
-///   a background fetch when stale. Uses [`QueryCache::try_claim_fetch`]
-///   to atomically deduplicate concurrent refetch attempts (no thundering
-///   herd at high render rates).
+///   a background fetch when `peek` reports `will_refetch`.
 /// * `ReadOnly` — return only what's already in the cache. Used by render
 ///   paths whose fetch lifecycle is owned elsewhere (e.g. debounced search
 ///   per `TUI Spans search input edit semantics`).
@@ -355,13 +316,11 @@ pub enum FetchPolicy {
 }
 
 /// Read the typed value at `key` from `cache`, deserializing into `T`. If
-/// `policy` is [`FetchPolicy::Swr`] and the value is missing or stale, the
-/// fetch lifecycle is opened atomically via [`QueryCache::try_claim_fetch`]
-/// — concurrent calls (many render call-sites within one frame, or many
-/// frames per second) coalesce into at most one in-flight fetch per key.
-///
-/// Deserialization failures are logged at `warn` (with the key) and
-/// treated as a cache miss — never silently swallowed.
+/// `policy` is [`FetchPolicy::Swr`] and the cache reports `will_refetch`,
+/// spawn `fetch` in the background under [`cache_get`] so the next render
+/// can pick up the fresh value. Deserialization failures are logged at
+/// `warn` (with the key) and treated as a cache miss — never silently
+/// swallowed.
 ///
 /// Replaces the seven copy-pasted `cached_*` peek+spawn+parse blocks in
 /// `app.rs` (per Phase 1 of the rectification plan).
@@ -378,28 +337,12 @@ where
     Fut: Future<Output = anyhow::Result<Value>> + Send + 'static,
 {
     let g = cache.peek(&key);
-    if matches!(policy, FetchPolicy::Swr) {
-        if let Some(ticket) = cache.try_claim_fetch(&key) {
-            let cache_c = cache.clone();
-            let key_c = key.clone();
-            let gen = ticket.generation;
-            tokio::spawn(async move {
-                match fetch().await {
-                    Ok(value) => {
-                        cache_c.put(FetchedRecord {
-                            key: key_c.clone(),
-                            generation: gen,
-                            value: value.clone(),
-                            stale_after,
-                        });
-                        cache_c.finish_fetch(&key_c, &value);
-                    }
-                    Err(_) => {
-                        cache_c.finish_fetch(&key_c, &Value::Null);
-                    }
-                }
-            });
-        }
+    if g.will_refetch && matches!(policy, FetchPolicy::Swr) {
+        let cache_c = cache.clone();
+        let key_c = key.clone();
+        tokio::spawn(async move {
+            let _ = cache_get(&cache_c, key_c, stale_after, fetch).await;
+        });
     }
     let cached = g.value?;
     match serde_json::from_value::<T>(cached.value) {
@@ -799,78 +742,5 @@ mod tests {
             || async move { unreachable!() },
         );
         assert!(v.is_none(), "shape mismatch must yield None");
-    }
-
-    /// Regression: many concurrent `swr_read` calls on a missing key MUST
-    /// coalesce into exactly one fetch. The pre-`try_claim_fetch` impl
-    /// raced between `peek` and the spawned `cache_get`'s `begin_fetch`,
-    /// so N concurrent callers each spawned an HTTP fetch — a thundering
-    /// herd at high render rates.
-    #[tokio::test(flavor = "current_thread")]
-    async fn swr_read_swr_coalesces_concurrent_calls_to_one_fetch() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = Arc::new(QueryCache::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-        // Simulate 100 concurrent render call sites (e.g. file_touches walk
-        // hitting the same span detail). Each invokes swr_read; only one
-        // fetcher closure should actually run.
-        for _ in 0..100 {
-            let c2 = calls.clone();
-            let _: Option<serde_json::Value> = swr_read(
-                &cache,
-                k(&["span", "trace-1", "span-1"]),
-                Duration::from_secs(60),
-                FetchPolicy::Swr,
-                move || async move {
-                    c2.fetch_add(1, Ordering::SeqCst);
-                    Ok(serde_json::json!({"hit": true}))
-                },
-            );
-        }
-        // Let the single in-flight spawn complete.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "concurrent swr_read calls must coalesce to one fetch"
-        );
-    }
-
-    /// Regression: under sustained calls AFTER the cache is fresh, no
-    /// fetcher should run.
-    #[tokio::test(flavor = "current_thread")]
-    async fn swr_read_swr_skips_fetch_when_fresh() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = Arc::new(QueryCache::new());
-        cache.put(FetchedRecord {
-            key: k(&["span", "trace-1", "span-1"]),
-            generation: 1,
-            value: serde_json::json!({"hit": true}),
-            stale_after: Duration::from_secs(60),
-        });
-        let calls = Arc::new(AtomicUsize::new(0));
-        for _ in 0..50 {
-            let c2 = calls.clone();
-            let _: Option<serde_json::Value> = swr_read(
-                &cache,
-                k(&["span", "trace-1", "span-1"]),
-                Duration::from_secs(60),
-                FetchPolicy::Swr,
-                move || async move {
-                    c2.fetch_add(1, Ordering::SeqCst);
-                    Ok(serde_json::json!({"hit": true}))
-                },
-            );
-        }
-        tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "fresh cached value must skip fetcher entirely"
-        );
     }
 }
