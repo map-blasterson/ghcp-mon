@@ -28,6 +28,27 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::shade;
 
+/// Multiplier applied to each RGB channel of a segment's color when it is
+/// painted as "shaded" (DELTA-mode unchanged). Lower = darker. 0.40 yields a
+/// clearly-faded but still recognizable tint of the original color on a dark
+/// terminal background.
+const SHADED_DARKEN_FACTOR: f32 = 0.40;
+
+/// Return a darker version of `c` for use as a "shaded" fill. Only `Rgb`
+/// colors are darkened directly; named/indexed colors fall back to
+/// `Color::DarkGray` since we can't reliably blend an indexed palette entry
+/// without knowing the terminal theme.
+pub fn shaded_color(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * SHADED_DARKEN_FACTOR) as u8,
+            (g as f32 * SHADED_DARKEN_FACTOR) as u8,
+            (b as f32 * SHADED_DARKEN_FACTOR) as u8,
+        ),
+        _ => Color::DarkGray,
+    }
+}
+
 /// One segment painted into the summary bar.
 #[derive(Debug, Clone)]
 pub struct SummarySeg {
@@ -39,10 +60,10 @@ pub struct SummarySeg {
     /// Optional inline label painted as a 1-character abbreviation when there
     /// is room. Currently unused but reserved for future tweaks.
     pub label: Option<String>,
-    /// When true, paint the segment with the DARK shade glyph (`▓`) instead
-    /// of FULL (`█`). Used by Chat Detail in DELTA mode to visually de-
-    /// emphasize segments whose content is unchanged since the prior chat
-    /// span. The segment's `color` is preserved either way.
+    /// When true, paint the segment with a darkened version of `color`
+    /// (`shaded_color(color)`) so it visually recedes vs unshaded segments.
+    /// Used by Chat Detail in DELTA mode to de-emphasize content that is
+    /// unchanged since the prior chat span.
     pub shaded: bool,
 }
 
@@ -71,15 +92,15 @@ impl<'a> SummaryBar<'a> {
         let mut x = area.x;
         for (i, seg) in self.segments.iter().enumerate() {
             let w = widths[i];
-            let style = Style::default().fg(seg.color);
-            let glyph = if seg.shaded { shade::DARK } else { shade::FULL };
+            let fg = if seg.shaded { shaded_color(seg.color) } else { seg.color };
+            let style = Style::default().fg(fg);
             for dx in 0..w {
                 let cx = x + dx;
                 if cx >= area.x + area.width {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_symbol(glyph).set_style(style);
+                    cell.set_symbol(shade::FULL).set_style(style);
                 }
             }
             x += w;
@@ -426,19 +447,21 @@ mod tests {
     }
 
     #[test]
-    fn shaded_segments_use_dark_glyph_unshaded_use_full() {
+    fn shaded_segments_paint_with_darkened_color_unshaded_keep_original() {
+        let red = Color::Rgb(200, 50, 50);
+        let blue = Color::Rgb(50, 50, 200);
         let segs = vec![
             SummarySeg {
                 id: "a".into(),
                 bytes: 50,
-                color: Color::Red,
+                color: red,
                 label: None,
                 shaded: true,
             },
             SummarySeg {
                 id: "b".into(),
                 bytes: 50,
-                color: Color::Blue,
+                color: blue,
                 label: None,
                 shaded: false,
             },
@@ -447,15 +470,30 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         bar.render(area, &mut buf);
-        // Left half = shaded ("▓"), right half = full ("█"). Both keep their
-        // own fg color (Red on the left, Blue on the right).
+        // Both halves should be FULL-block painted; the shaded half uses a
+        // darkened version of red and the unshaded half keeps its original
+        // blue. The darkened color must be strictly darker than the original
+        // in every channel that had non-zero brightness.
+        let expected_dark_red = shaded_color(red);
         for x in 0..5 {
-            assert_eq!(buf[(x, 0)].symbol(), "▓", "expected DARK at x={x}");
-            assert_eq!(buf[(x, 0)].fg, Color::Red);
+            assert_eq!(buf[(x, 0)].symbol(), "█", "expected FULL block at x={x}");
+            assert_eq!(buf[(x, 0)].fg, expected_dark_red, "x={x}");
         }
         for x in 5..10 {
-            assert_eq!(buf[(x, 0)].symbol(), "█", "expected FULL at x={x}");
-            assert_eq!(buf[(x, 0)].fg, Color::Blue);
+            assert_eq!(buf[(x, 0)].symbol(), "█", "expected FULL block at x={x}");
+            assert_eq!(buf[(x, 0)].fg, blue, "x={x}");
         }
+        // Sanity-check: the darkening actually reduced brightness.
+        if let (Color::Rgb(r0, g0, b0), Color::Rgb(r1, g1, b1)) = (red, expected_dark_red) {
+            assert!(r1 < r0 && g1 < g0 && b1 < b0, "darkened color must be dimmer: {expected_dark_red:?} < {red:?}");
+        } else {
+            panic!("expected Rgb variants");
+        }
+    }
+
+    #[test]
+    fn shaded_color_falls_back_to_dark_gray_for_named_colors() {
+        assert_eq!(shaded_color(Color::Red), Color::DarkGray);
+        assert_eq!(shaded_color(Color::Reset), Color::DarkGray);
     }
 }

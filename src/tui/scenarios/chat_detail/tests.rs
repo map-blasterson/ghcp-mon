@@ -246,11 +246,17 @@ fn summary_bar_paints_distinct_colors_for_visible_segments() {
 #[test]
 fn summary_bar_dark_shades_unchanged_segments_in_delta_mode() {
     // In DELTA mode with prior == current, system instructions and tool
-    // definitions get the `Unchanged` badge at the top-level frontier and
-    // should paint DARK (`▓`). Input/output messages don't carry an
-    // Unchanged badge at the section level (input falls through to per-turn
-    // delta; output isn't diffed) so they remain FULL (`█`). We assert the
-    // mixed outcome.
+    // definitions get the `Unchanged` badge and should render with a
+    // DARKENED version of their fg color. Input/output messages don't carry
+    // an Unchanged badge at the section level (input falls through to per-
+    // turn delta; output isn't diffed) so they keep their bright fg.
+    use crate::tui::widgets::summary_bar::shaded_color;
+    use ratatui::style::Color;
+    // From color_for_node in chat_detail/mod.rs:
+    let bright_system = Color::Rgb(0x60, 0xa5, 0xfa);
+    let bright_input = Color::Rgb(0x4a, 0xde, 0x80);
+    let dark_system = shaded_color(bright_system);
+
     let attrs = json!({
         "gen_ai.system_instructions": [{"type":"text","content":"sys"}],
         "gen_ai.tool.definitions": [{"name":"ls","description":"x"}],
@@ -279,23 +285,41 @@ fn summary_bar_dark_shades_unchanged_segments_in_delta_mode() {
     })
     .unwrap();
     let buf = term.backend().buffer();
-    let mut dark = 0;
-    let mut full = 0;
+    let mut colors: std::collections::HashSet<Color> = std::collections::HashSet::new();
     for x in 0..80 {
-        match buf[(x, 1)].symbol() {
-            "▓" => dark += 1,
-            "█" => full += 1,
-            _ => {}
-        }
+        // Every bar cell should be FULL block regardless of shading.
+        assert_eq!(buf[(x, 1)].symbol(), "█", "bar cell should be FULL at x={x}");
+        colors.insert(buf[(x, 1)].fg);
     }
-    assert!(dark > 0, "expected DARK (▓) cells from sys+tools, got dark={dark} full={full}");
-    assert!(full > 0, "expected FULL (█) cells from input+output, got dark={dark} full={full}");
+    // Sys segment is the leftmost; assert it renders darkened.
+    assert!(
+        colors.contains(&dark_system),
+        "expected darkened-system fg in bar, got {:?}",
+        colors
+    );
+    // Bright system must NOT appear (the entire system segment is shaded).
+    assert!(
+        !colors.contains(&bright_system),
+        "expected no bright-system fg in bar, got {:?}",
+        colors
+    );
+    // Input segment is unchanged-at-section-level=false → bright green is
+    // still present.
+    assert!(
+        colors.contains(&bright_input),
+        "expected bright-input fg in bar, got {:?}",
+        colors
+    );
 }
 
 #[test]
 fn summary_bar_uses_full_glyph_in_full_mode_even_with_prior() {
-    // Same setup as the dark-shade test, but FULL mode never tags Unchanged
-    // → bar should be all FULL (`█`), no DARK.
+    // FULL mode never tags Unchanged → every segment uses its bright color.
+    use crate::tui::widgets::summary_bar::shaded_color;
+    use ratatui::style::Color;
+    let bright_system = Color::Rgb(0x60, 0xa5, 0xfa);
+    let dark_system = shaded_color(bright_system);
+
     let attrs = json!({
         "gen_ai.system_instructions": [{"type":"text","content":"sys"}],
         "gen_ai.tool.definitions": [{"name":"ls","description":"x"}],
@@ -325,17 +349,20 @@ fn summary_bar_uses_full_glyph_in_full_mode_even_with_prior() {
     })
     .unwrap();
     let buf = term.backend().buffer();
-    let mut dark = 0;
-    let mut full = 0;
+    let mut colors: std::collections::HashSet<Color> = std::collections::HashSet::new();
     for x in 0..80 {
-        match buf[(x, 1)].symbol() {
-            "▓" => dark += 1,
-            "█" => full += 1,
-            _ => {}
-        }
+        colors.insert(buf[(x, 1)].fg);
     }
-    assert_eq!(dark, 0, "FULL mode must not shade segments");
-    assert!(full > 0, "expected FULL (█) cells in FULL mode, got full={full}");
+    assert!(
+        colors.contains(&bright_system),
+        "FULL mode must keep bright system color, got {:?}",
+        colors
+    );
+    assert!(
+        !colors.contains(&dark_system),
+        "FULL mode must never produce darkened colors, got {:?}",
+        colors
+    );
 }
 
 #[test]
