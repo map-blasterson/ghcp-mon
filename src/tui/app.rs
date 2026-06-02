@@ -3,7 +3,6 @@
 //! `try_recv` before `terminal.draw` runs once.
 
 use std::collections::HashMap;
-use std::cell::RefCell;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -115,9 +114,9 @@ pub struct App {
     /// Per-column tool-detail scenario state (keyed by column id).
     pub tool_detail_state: HashMap<String, crate::tui::scenarios::tool_detail::ToolDetailState>,
     /// Per-column chat-detail scenario state.
-    pub chat_detail_state: RefCell<HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>>,
+    pub chat_detail_state: HashMap<String, crate::tui::scenarios::chat_detail::ChatDetailState>,
     /// Per-column file-touches scenario state.
-    pub file_touches_state: RefCell<HashMap<String, crate::tui::scenarios::file_touches::FileTouchesState>>,
+    pub file_touches_state: HashMap<String, crate::tui::scenarios::file_touches::FileTouchesState>,
     /// Cross-column hovered chat pk store. Spans publishes; Phase 2 widget
     /// consumes.
     pub hovered_chat_pk: Arc<RwLock<Option<i64>>>,
@@ -160,8 +159,8 @@ impl App {
             live_sessions_state: HashMap::new(),
             spans_state: HashMap::new(),
             tool_detail_state: HashMap::new(),
-            chat_detail_state: RefCell::new(HashMap::new()),
-            file_touches_state: RefCell::new(HashMap::new()),
+            chat_detail_state: HashMap::new(),
+            file_touches_state: HashMap::new(),
             hovered_chat_pk: Arc::new(RwLock::new(None)),
             confirm_modal: ConfirmModalState::new(),
             pending_delete: None,
@@ -1362,8 +1361,8 @@ impl App {
         self.live_sessions_state.remove(&removed_id);
         self.spans_state.remove(&removed_id);
         self.tool_detail_state.remove(&removed_id);
-        self.chat_detail_state.borrow_mut().remove(&removed_id);
-        self.file_touches_state.borrow_mut().remove(&removed_id);
+        self.chat_detail_state.remove(&removed_id);
+        self.file_touches_state.remove(&removed_id);
         let n = self.workspace.columns.len();
         if n == 0 {
             self.focus = Focus::None;
@@ -1646,21 +1645,21 @@ impl App {
         };
         let detail = selection.and_then(|(t, s)| self.cached_span_detail(t, s));
 
-        // Seed state.mode from cfg's `chat_mode` on first access for this
-        // column. Subsequent `m` toggles mutate `state.mode` directly.
-        let cfg_mode = cfg.get("chat_mode").and_then(|v| v.as_str());
-        let mut map = self.chat_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_insert_with(|| {
-            crate::tui::scenarios::chat_detail::ChatDetailState {
-                mode: ChatMode::from_config_str(cfg_mode),
-                ..Default::default()
-            }
-        });
+        // Determine the per-column mode BEFORE borrowing chat_detail_state
+        // mutably for prior_attrs computation (which needs `&mut self`).
+        let cfg_mode = cfg.get("chat_mode").and_then(|v| v.as_str()).map(str::to_string);
+        let mode = self
+            .chat_detail_state
+            .get(col_id)
+            .map(|s| s.mode)
+            .unwrap_or_else(|| ChatMode::from_config_str(cfg_mode.as_deref()));
 
         // DELTA prior-chat-span lookup walks the COMPLETE cached
         // `session-span-tree` (per the cache contract). Conversation id
-        // comes from the current span's projection.
-        let prior_attrs: Option<Value> = match (&detail, state.mode) {
+        // comes from the current span's projection. Computed up front so
+        // the subsequent `&mut self.chat_detail_state` borrow doesn't
+        // conflict with the cache-spawning `&mut self` calls.
+        let prior_attrs: Option<Value> = match (&detail, mode) {
             (Some(d), ChatMode::Delta) => d
                 .projection
                 .chat_turn
@@ -1680,6 +1679,13 @@ impl App {
                 }),
             _ => None,
         };
+
+        let state = self.chat_detail_state.entry(col_id.to_string()).or_insert_with(|| {
+            crate::tui::scenarios::chat_detail::ChatDetailState {
+                mode: ChatMode::from_config_str(cfg_mode.as_deref()),
+                ..Default::default()
+            }
+        });
 
         crate::tui::scenarios::chat_detail::render(
             area,
@@ -1711,8 +1717,7 @@ impl App {
             .get("chat_mode")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        let mut map = self.chat_detail_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_insert_with(|| {
+        let state = self.chat_detail_state.entry(col_id.to_string()).or_insert_with(|| {
             crate::tui::scenarios::chat_detail::ChatDetailState {
                 mode: ChatMode::from_config_str(cfg_mode.as_deref()),
                 ..Default::default()
@@ -1749,8 +1754,7 @@ impl App {
             None => (false, Vec::new()),
         };
 
-        let mut map = self.file_touches_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
+        let state = self.file_touches_state.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::file_touches::render(
             area,
             buf,
@@ -1764,8 +1768,7 @@ impl App {
 
     /// Dispatch a key to a `FileTouches` column's scenario state.
     fn file_touches_key(&mut self, col_id: &str, k: crossterm::event::KeyEvent) -> bool {
-        let mut map = self.file_touches_state.borrow_mut();
-        let state = map.entry(col_id.to_string()).or_default();
+        let state = self.file_touches_state.entry(col_id.to_string()).or_default();
         crate::tui::scenarios::file_touches::handle_key(k, state)
     }
 
