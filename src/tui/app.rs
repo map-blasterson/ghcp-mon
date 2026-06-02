@@ -1849,29 +1849,24 @@ impl App {
             .constraints(constraints)
             .split(area);
 
-        // Snapshot per-column dispatch data so the iteration does not
-        // borrow `self.workspace` for the duration of the per-scenario
-        // calls (which need `&mut self`).
-        let dispatches: Vec<(usize, Rect, String, String, ScenarioType,
-            crate::tui::workspace::ColumnConfig, bool)> = self
-            .workspace
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                (
-                    i,
-                    cols[i],
-                    c.id.clone(),
-                    c.title.clone(),
-                    c.scenario_type,
-                    c.config.clone(),
-                    self.focus.column_idx() == Some(i),
-                )
-            })
-            .collect();
+        // Per-column dispatch. The Spans branch still needs `&mut self`
+        // for legacy draw_spans, so each iteration re-reads the column
+        // header off `&self.workspace.columns[i]` for that branch's call.
+        // Non-Spans branches go through `self.scenarios.get_mut(&col_id)`
+        // with a disjoint Ctx (api, cache, workspace, hovered_chat_pk,
+        // span_detail_memo) — no clones of column state required.
+        for i in 0..self.workspace.columns.len() {
+            let rect = cols[i];
+            let focused = self.focus.column_idx() == Some(i);
+            // Snapshot just the scalars + ids needed by the legacy Spans
+            // branch (its `&mut self` call invalidates any `&self.workspace`
+            // borrow). For non-Spans branches we re-borrow `config` later
+            // inside the disjoint window.
+            let (col_id, title, st) = {
+                let c = &self.workspace.columns[i];
+                (c.id.clone(), c.title.clone(), c.scenario_type)
+            };
 
-        for (i, rect, col_id, title, st, cfg, focused) in dispatches {
             let mut block = Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" {title} "));
@@ -1881,22 +1876,24 @@ impl App {
             let inner = block.inner(rect);
             frame.render_widget(block, rect);
             if inner.width < 3 {
-                // truncated label
                 let buf: &mut Buffer = frame.buffer_mut();
                 let span = Span::styled("…", Style::default().fg(Color::DarkGray));
                 buf.set_span(inner.x, inner.y, &span, inner.width);
                 continue;
             }
             let buf: &mut Buffer = frame.buffer_mut();
-            // Spans is still legacy-dispatched on App; everything else goes
-            // through the trait-migrated scenarios map.
             match st {
-                ScenarioType::Spans => self.draw_spans(inner, buf, i, &col_id, outcome),
+                ScenarioType::Spans => {
+                    // Legacy: takes &mut self; the function reads its own
+                    // config off `self.workspace.columns[col_idx]`.
+                    self.draw_spans(inner, buf, i, &col_id, outcome);
+                }
                 _ => {
+                    // Disjoint-borrow Ctx: holds `&self.workspace` (so
+                    // `&self.workspace.columns[i].config` is fine to alias
+                    // for the scenario call).
                     if let Some(scenario) = self.scenarios.get_mut(&col_id) {
-                        // Borrow-disjoint Ctx assembled inline (cannot use
-                        // `self.make_ctx()` here because `self.scenarios`
-                        // is borrowed mutably).
+                        let cfg = &self.workspace.columns[i].config;
                         let mut ctx = crate::tui::scenarios::Ctx::new(
                             &self.rt.api,
                             &self.rt.cache,
@@ -1904,9 +1901,10 @@ impl App {
                             &self.hovered_chat_pk,
                             &mut self.span_detail_memo,
                         );
-                        scenario.draw(&mut ctx, i, &col_id, &cfg, inner, buf, focused, outcome);
+                        scenario.draw(&mut ctx, i, &col_id, cfg, inner, buf, focused, outcome);
                     } else {
-                        render_placeholder(inner, buf, st, &cfg);
+                        let cfg = &self.workspace.columns[i].config;
+                        render_placeholder(inner, buf, st, cfg);
                     }
                 }
             }
