@@ -175,7 +175,7 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
     // attributes carry the cid OR is reachable via projection conv tag, OR is
     // an ancestor/descendant of one of those. For now, gather all spans whose
     // own attrs carry the cid, plus descendants of those, plus their ancestors.
-    let rows: Vec<(i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String, String)> = sqlx::query_as(
+    let rows: Vec<(i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String, Option<String>)> = sqlx::query_as(
         r#"
         WITH RECURSIVE
         seeds AS (
@@ -206,7 +206,8 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
             SELECT s.span_pk FROM spans s JOIN trace_ids t ON t.trace_id = s.trace_id
         )
         SELECT s.span_pk, s.trace_id, s.span_id, s.parent_span_id, s.name,
-               s.start_unix_ns, s.end_unix_ns, s.ingestion_state, s.attributes_json
+               s.start_unix_ns, s.end_unix_ns, s.ingestion_state,
+               json_extract(s.attributes_json, '$."error.type"')
           FROM spans s WHERE s.span_pk IN (SELECT span_pk FROM all_pks)
           ORDER BY COALESCE(s.end_unix_ns, s.start_unix_ns, 0) ASC
         "#,
@@ -224,11 +225,12 @@ pub async fn get_session_span_tree(State(s): State<AppState>, Path(cid): Path<St
     }
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
     let mut child_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (pk, tr, sp, parent, name, st, en, state, _attrs) in &rows {
+    for (pk, tr, sp, parent, name, st, en, state, error_type) in &rows {
         let node_v = json!({
             "span_pk": pk, "trace_id": tr, "span_id": sp, "parent_span_id": parent,
             "name": name, "kind_class": classify(name),
             "ingestion_state": state,
+            "error_type": error_type,
             "start_unix_ns": st, "end_unix_ns": en,
             "projection": proj.get(pk).cloned().unwrap_or(json!({})),
             "children": Value::Array(vec![]),
@@ -366,7 +368,7 @@ async fn load_projections(pool: &sqlx::SqlitePool, pks: &[i64]) -> sqlx::Result<
 
 // ------------------------- shared tree builder -------------------------
 
-type SpanTreeRow = (i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String);
+type SpanTreeRow = (i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String, Option<String>);
 
 async fn build_tree_for_rows(
     pool: &sqlx::SqlitePool,
@@ -382,11 +384,12 @@ async fn build_tree_for_rows(
     }
     let mut nodes: BTreeMap<String, Node> = BTreeMap::new();
     let mut child_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (pk, tr, sp, parent, name, st, en, state) in &rows {
+    for (pk, tr, sp, parent, name, st, en, state, error_type) in &rows {
         let node_v = json!({
             "span_pk": pk, "trace_id": tr, "span_id": sp, "parent_span_id": parent,
             "name": name, "kind_class": classify(name),
             "ingestion_state": state,
+            "error_type": error_type,
             "start_unix_ns": st, "end_unix_ns": en,
             "projection": proj.get(pk).cloned().unwrap_or(json!({})),
             "children": Value::Array(vec![]),
@@ -520,7 +523,7 @@ pub async fn list_traces(State(s): State<AppState>, Query(q): Query<ListQuery>) 
 
 pub async fn get_trace(State(s): State<AppState>, Path(trace_id): Path<String>) -> AppResult<Json<Value>> {
     let rows: Vec<SpanTreeRow> = sqlx::query_as(
-        "SELECT span_pk, trace_id, span_id, parent_span_id, name, start_unix_ns, end_unix_ns, ingestion_state \
+        "SELECT span_pk, trace_id, span_id, parent_span_id, name, start_unix_ns, end_unix_ns, ingestion_state, json_extract(attributes_json, '$.\"error.type\"') \
          FROM spans WHERE trace_id = ? ORDER BY COALESCE(end_unix_ns, start_unix_ns, 0) ASC"
     ).bind(&trace_id).fetch_all(&s.pool).await?;
     if rows.is_empty() { return Err(AppError::NotFound); }
@@ -540,7 +543,8 @@ pub async fn list_spans(State(s): State<AppState>, Query(q): Query<ListQuery>) -
     let lim = limit(&q, 100, 1000);
     let mut sql = String::from(
         "SELECT s.span_pk, s.trace_id, s.span_id, s.parent_span_id, s.name, \
-                s.start_unix_ns, s.end_unix_ns, s.ingestion_state \
+                s.start_unix_ns, s.end_unix_ns, s.ingestion_state, \
+                json_extract(s.attributes_json, '$.\"error.type\"') \
          FROM spans s WHERE 1=1"
     );
     let mut binds: Vec<String> = Vec::new();
@@ -566,27 +570,28 @@ pub async fn list_spans(State(s): State<AppState>, Query(q): Query<ListQuery>) -
         binds.push(since.to_string());
     }
     sql.push_str(" ORDER BY COALESCE(s.start_unix_ns, 0) DESC LIMIT ?");
-    let mut qq = sqlx::query_as::<_, (i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String)>(&sql);
+    let mut qq = sqlx::query_as::<_, (i64, String, String, Option<String>, String, Option<i64>, Option<i64>, String, Option<String>)>(&sql);
     for b in &binds { qq = qq.bind(b); }
     qq = qq.bind(lim);
     let rows = qq.fetch_all(&s.pool).await?;
     let out: Vec<Value> = rows.into_iter()
-        .map(|(pk, tr, sp, par, name, st, en, state)| json!({
+        .map(|(pk, tr, sp, par, name, st, en, state, error_type)| json!({
             "span_pk": pk, "trace_id": tr, "span_id": sp, "parent_span_id": par,
             "name": name, "kind_class": classify(&name),
             "start_unix_ns": st, "end_unix_ns": en,
-            "ingestion_state": state
+            "ingestion_state": state,
+            "error_type": error_type
         }))
         .collect();
     Ok(Json(json!({"spans": out})))
 }
 
 pub async fn get_span(State(s): State<AppState>, Path((trace_id, span_id)): Path<(String, String)>) -> AppResult<Json<Value>> {
-    let row: Option<(i64, String, String, Option<String>, String, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, String, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
-        "SELECT span_pk, trace_id, span_id, parent_span_id, name, kind, start_unix_ns, end_unix_ns, duration_ns, status_message, attributes_json, resource_json, scope_name, scope_version, ingestion_state \
+    let row: Option<(i64, String, String, Option<String>, String, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<String>, String, Option<String>, Option<String>, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT span_pk, trace_id, span_id, parent_span_id, name, kind, start_unix_ns, end_unix_ns, duration_ns, status_message, attributes_json, resource_json, scope_name, scope_version, ingestion_state, json_extract(attributes_json, '$.\"error.type\"') \
          FROM spans WHERE trace_id = ? AND span_id = ?"
     ).bind(&trace_id).bind(&span_id).fetch_optional(&s.pool).await?;
-    let (pk, tr, sp, par, name, kind, st, en, dur, smsg, attrs, res, scn, scv, state) = row.ok_or(AppError::NotFound)?;
+    let (pk, tr, sp, par, name, kind, st, en, dur, smsg, attrs, res, scn, scv, state, etype) = row.ok_or(AppError::NotFound)?;
     let attrs_v: Value = serde_json::from_str(&attrs).unwrap_or(Value::Null);
     let res_v: Option<Value> = res.as_deref().and_then(|s| serde_json::from_str(s).ok());
 
@@ -620,6 +625,7 @@ pub async fn get_span(State(s): State<AppState>, Path((trace_id, span_id)): Path
             "name": name, "kind": kind, "kind_class": classify(&name),
             "start_unix_ns": st, "end_unix_ns": en, "duration_ns": dur,
             "status_message": smsg, "ingestion_state": state,
+            "error_type": etype,
             "scope_name": scn, "scope_version": scv,
             "attributes": attrs_v, "resource": res_v,
         },
