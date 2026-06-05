@@ -34,7 +34,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::tui::app::DrawOutcome;
-use crate::tui::model::{KindClass, SpanNode, SpanTreeExt};
+use crate::tui::model::{span_error_summary, KindClass, SpanNode, SpanTreeExt};
 use crate::tui::scenarios::scenario::{Ctx, KeyOutcome, Scenario, WsBatchMeta};
 use crate::tui::scenarios::ScenarioEffect;
 use crate::tui::widgets::kind_badge::kind_label;
@@ -759,6 +759,16 @@ impl SpansScenario {
             head,
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )));
+        let error_summary = detail
+            .as_ref()
+            .and_then(|d| d.span.error_summary())
+            .or_else(|| span_error_summary(node.error_type.as_deref(), node.status_code));
+        if let Some(summary) = error_summary {
+            lines.push(Line::from(Span::styled(
+                format!("! error  {summary}"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+        }
         let parent_label = if let Some(d) = &detail {
             match &d.parent {
                 Some(p) => format!(

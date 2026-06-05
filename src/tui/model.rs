@@ -60,6 +60,10 @@ pub struct SpanRow {
     pub start_unix_ns: Option<UnixNs>,
     pub end_unix_ns: Option<UnixNs>,
     pub ingestion_state: String,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub status_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -161,8 +165,12 @@ pub struct SpanFull {
     pub start_unix_ns: Option<UnixNs>,
     pub end_unix_ns: Option<UnixNs>,
     pub duration_ns: Option<i64>,
+    #[serde(default)]
+    pub status_code: Option<i64>,
     pub status_message: Option<String>,
     pub ingestion_state: String,
+    #[serde(default)]
+    pub error_type: Option<String>,
     pub scope_name: Option<String>,
     pub scope_version: Option<String>,
     pub attributes: Option<Value>,
@@ -187,10 +195,49 @@ pub struct SpanNode {
     pub name: String,
     pub kind_class: KindClass,
     pub ingestion_state: String,
+    #[serde(default)]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub status_code: Option<i64>,
     pub start_unix_ns: Option<UnixNs>,
     pub end_unix_ns: Option<UnixNs>,
     pub projection: SpanProjection,
     pub children: Vec<SpanNode>,
+}
+
+pub fn is_error_status_code(status_code: Option<i64>) -> bool {
+    matches!(status_code, Some(code) if code != 0 && code != 1)
+}
+
+fn non_empty_error_type(error_type: Option<&str>) -> Option<&str> {
+    error_type.map(str::trim).filter(|s| !s.is_empty())
+}
+
+pub fn span_has_error(error_type: Option<&str>, status_code: Option<i64>) -> bool {
+    non_empty_error_type(error_type).is_some() || is_error_status_code(status_code)
+}
+
+pub fn span_error_summary(error_type: Option<&str>, status_code: Option<i64>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(error_type) = non_empty_error_type(error_type) {
+        parts.push(format!("error.type: {error_type}"));
+    }
+    if is_error_status_code(status_code) {
+        if let Some(code) = status_code {
+            parts.push(format!("status_code: {code}"));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("  "))
+    }
+}
+
+impl SpanFull {
+    pub fn error_summary(&self) -> Option<String> {
+        span_error_summary(self.error_type.as_deref(), self.status_code)
+    }
 }
 
 impl SpanNode {
@@ -633,5 +680,52 @@ mod tests {
         }"#;
         let d: SpanDetail = serde_json::from_str(raw).expect("must parse null kind");
         assert_eq!(d.span.kind, None);
+    }
+
+    #[test]
+    fn span_error_fields_parse_without_parsing_attributes() {
+        let node: SpanNode = serde_json::from_value(serde_json::json!({
+            "span_pk": 1,
+            "trace_id": "t",
+            "span_id": "s",
+            "parent_span_id": null,
+            "name": "n",
+            "kind_class": "other",
+            "ingestion_state": "real",
+            "error_type": "SessionDestroyedError",
+            "status_code": 2,
+            "start_unix_ns": null,
+            "end_unix_ns": null,
+            "projection": {},
+            "children": []
+        })).expect("span node parses error fields");
+        assert_eq!(node.error_type.as_deref(), Some("SessionDestroyedError"));
+        assert_eq!(node.status_code, Some(2));
+        assert!(span_has_error(node.error_type.as_deref(), node.status_code));
+
+        let row: SpanRow = serde_json::from_value(serde_json::json!({
+            "span_pk": 1,
+            "trace_id": "t",
+            "span_id": "s",
+            "parent_span_id": null,
+            "name": "n",
+            "kind_class": "other",
+            "start_unix_ns": null,
+            "end_unix_ns": null,
+            "ingestion_state": "real",
+            "error_type": "SessionDestroyedError",
+            "status_code": 2
+        })).expect("span row parses error fields");
+        assert_eq!(row.error_type.as_deref(), Some("SessionDestroyedError"));
+        assert_eq!(row.status_code, Some(2));
+    }
+
+    #[test]
+    fn ok_and_unset_status_codes_are_not_errors_without_error_type() {
+        assert!(!span_has_error(None, None));
+        assert!(!span_has_error(None, Some(0)));
+        assert!(!span_has_error(None, Some(1)));
+        assert!(span_has_error(None, Some(2)));
+        assert!(span_has_error(Some("SessionDestroyedError"), Some(1)));
     }
 }

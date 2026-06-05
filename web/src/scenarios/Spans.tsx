@@ -9,6 +9,7 @@ import { useLiveFeed } from "../state/live";
 import { useHoverState } from "../state/hover";
 import { fmtNs, fmtClock, parseToolCallArguments } from "../components/content";
 import { kindLabel, kindClass as kindCls, HashTag, RollingDots } from "../components/KindBadge";
+import { SpanErrorIndicator } from "../components/SpanError";
 import type {
   KindClass,
   SpanNode,
@@ -1209,6 +1210,7 @@ function SpanTreeRow({
       {node.ingestion_state === "placeholder" && (
         <span className="tag warn"><RollingDots /></span>
       )}
+      <SpanErrorIndicator span={node} />
       <ProjectionChips projection={node.projection} />
       {(node.projection?.tool_call?.tool_name === "bash" || node.projection?.tool_call?.tool_name === "powershell") && (
         <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />

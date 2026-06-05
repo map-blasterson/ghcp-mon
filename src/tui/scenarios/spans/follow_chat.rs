@@ -158,6 +158,8 @@ mod tests {
             name: id.into(),
             kind_class: kind,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(start),
             end_unix_ns: Some(end),
             projection: SpanProjection::default(),

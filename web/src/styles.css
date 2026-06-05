@@ -367,6 +367,17 @@ a:hover { text-decoration: underline; }
   );
 }
 
+.span-error {
+  margin: 0 6px 6px;
+  padding: 6px;
+  border: 1px solid var(--err);
+  border-left-width: 3px;
+  background: rgba(224, 123, 123, 0.08);
+}
+.span-error-kv {
+  padding: 4px 0 0;
+}
+
 /* Color-coded kind_class labels. Used everywhere a span's class is
    displayed (tree rows, inspector, breakdown header, trace chips). */
 .kind {

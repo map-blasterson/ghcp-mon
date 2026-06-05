@@ -254,6 +254,8 @@ mod tests {
             name: id.into(),
             kind_class: KindClass::Other,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(ts),
             end_unix_ns: Some(ts),
             projection: SpanProjection::default(),

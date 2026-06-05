@@ -2,7 +2,7 @@
 //!
 //! Extracted from `crate::tui::app::App::draw_spans` so the row's cell
 //! layout (depth indent, collapse glyph, kind badge, placeholder dots,
-//! name truncation, chips, description label, report-intent title) is a
+//! error indicator, name truncation, chips, description label, report-intent title) is a
 //! single composable [`Widget`] rather than ~150 lines of inline `x +=`
 //! arithmetic.
 //!
@@ -21,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
-use crate::tui::model::SpanNode;
+use crate::tui::model::{span_has_error, SpanNode};
 use crate::tui::widgets::kind_badge::{KindBadge, kind_label};
 use crate::tui::widgets::rolling_dots;
 
@@ -162,7 +162,21 @@ impl Widget for SpansTreeRow<'_> {
             x += 4;
         }
 
-        // (4) Name — truncated to leave room for chips + description + title.
+        // (4) Error indicator (1 cell + gap).
+        if span_has_error(self.node.error_type.as_deref(), self.node.status_code) && x < right_edge {
+            buf.set_span(
+                x,
+                row_y,
+                &Span::styled(
+                    "!",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                1,
+            );
+            x += 2;
+        }
+
+        // (5) Name — truncated to leave room for chips + description + title.
         let chip_reserve: usize = self
             .chips
             .iter()
@@ -215,7 +229,7 @@ impl Widget for SpansTreeRow<'_> {
             x += name_w;
         }
 
-        // (5) Chips — `[text]` in the chip's hash color. Same cell
+        // (6) Chips — `[text]` in the chip's hash color. Same cell
         // footprint as the prior styles (text.chars + 2).
         for (text, color) in self.chips {
             if x + 1 >= right_edge {
@@ -230,7 +244,7 @@ impl Widget for SpansTreeRow<'_> {
             x += chip_w;
         }
 
-        // (6) Tool description label — plain white, no chip styling, per
+        // (7) Tool description label — plain white, no chip styling, per
         // `Spans tool description inline label`. Truncated at the column's
         // right edge with a trailing `…` so the user can tell content was
         // cut off (matters for chat-row text previews, which arrive at
@@ -264,7 +278,7 @@ impl Widget for SpansTreeRow<'_> {
             }
         }
 
-        // (7) Report-intent title — plain white, no chip styling, per
+        // (8) Report-intent title — plain white, no chip styling, per
         // `Report intent title shows on parent row`.
         if let Some(title) = self.report_title {
             if x + 1 < right_edge {
@@ -299,6 +313,8 @@ mod tests {
             name: "chat".into(),
             kind_class: KindClass::Chat,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(0),
             end_unix_ns: Some(0),
             projection: SpanProjection::default(),
@@ -322,6 +338,8 @@ mod tests {
             name: name.into(),
             kind_class: KindClass::InvokeAgent,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(0),
             end_unix_ns: Some(0),
             projection: proj,
@@ -415,5 +433,72 @@ mod tests {
         assert!(line.contains('…'), "must mark truncation: {line:?}");
         // Original full text MUST NOT be entirely present.
         assert!(!line.contains("twenty cells"), "should not paint past end: {line:?}");
+    }
+
+    #[test]
+    fn error_type_row_renders_red_error_indicator() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let mut node = chat_node("c1");
+        node.error_type = Some("SessionDestroyedError".into());
+        SpansTreeRow {
+            node: &node,
+            depth: 0,
+            focused: false,
+            collapsed: false,
+            row_bg: None,
+            row_dim: false,
+            chips: &[],
+            description: None,
+            report_title: None,
+            now_ms: 0,
+        }
+        .render(Rect::new(0, 0, 40, 1), &mut buf);
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, 0)].symbol() == "!")
+            .expect("error indicator");
+        let style = buf[(x, 0)].style();
+        assert_eq!(style.fg, Some(Color::Red));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn status_code_error_row_renders_indicator_but_ok_and_unset_do_not() {
+        let mut err_buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+        let mut err_node = chat_node("err");
+        err_node.status_code = Some(2);
+        SpansTreeRow {
+            node: &err_node,
+            depth: 0,
+            focused: false,
+            collapsed: false,
+            row_bg: None,
+            row_dim: false,
+            chips: &[],
+            description: None,
+            report_title: None,
+            now_ms: 0,
+        }
+        .render(Rect::new(0, 0, 40, 1), &mut err_buf);
+        assert!(row_text(&err_buf, 0).contains('!'));
+
+        for status_code in [Some(0), Some(1), None] {
+            let mut ok_buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+            let mut ok_node = chat_node("ok");
+            ok_node.status_code = status_code;
+            SpansTreeRow {
+                node: &ok_node,
+                depth: 0,
+                focused: false,
+                collapsed: false,
+                row_bg: None,
+                row_dim: false,
+                chips: &[],
+                description: None,
+                report_title: None,
+                now_ms: 0,
+            }
+            .render(Rect::new(0, 0, 40, 1), &mut ok_buf);
+            assert!(!row_text(&ok_buf, 0).contains('!'));
+        }
     }
 }

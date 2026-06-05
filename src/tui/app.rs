@@ -1957,6 +1957,8 @@ mod tests {
             name: name.into(),
             kind_class: kind,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(end_ns),
             end_unix_ns: Some(end_ns),
             projection,
@@ -2002,6 +2004,17 @@ mod tests {
         span_id: &str,
         attrs: serde_json::Value,
     ) {
+        seed_span_detail_with_error(app, trace_id, span_id, attrs, None, None);
+    }
+
+    fn seed_span_detail_with_error(
+        app: &App,
+        trace_id: &str,
+        span_id: &str,
+        attrs: serde_json::Value,
+        error_type: Option<&str>,
+        status_code: Option<i64>,
+    ) {
         let span = SpanFull {
             span_pk: 1,
             trace_id: trace_id.into(),
@@ -2013,8 +2026,10 @@ mod tests {
             start_unix_ns: Some(100),
             end_unix_ns: Some(200),
             duration_ns: Some(100),
+            status_code,
             status_message: None,
             ingestion_state: "complete".into(),
+            error_type: error_type.map(str::to_string),
             scope_name: None,
             scope_version: None,
             attributes: Some(attrs),
@@ -2417,8 +2432,10 @@ mod tests {
             start_unix_ns: Some(100),
             end_unix_ns: Some(200),
             duration_ns: Some(100),
+            status_code: None,
             status_message: None,
             ingestion_state: "complete".into(),
+            error_type: None,
             scope_name: None,
             scope_version: None,
             attributes: Some(serde_json::json!({
@@ -2722,6 +2739,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn span_detail_pane_renders_error_block_from_cached_detail() {
+        let mut app = one_spans_column_app();
+        app.workspace.columns[0]
+            .config
+            .insert("session".into(), toml::Value::String("cid-1".into()));
+        let tree = vec![mk_span_node(
+            "errored-span",
+            KindClass::ExecuteTool,
+            Some("bash"),
+            100,
+            vec![],
+        )];
+        seed_session_tree(&app, "cid-1", tree);
+        seed_span_detail_with_error(
+            &app,
+            "trace-1",
+            "errored-span",
+            serde_json::json!({}),
+            Some("SessionDestroyedError"),
+            Some(2),
+        );
+
+        let text = render_buf_text(&mut app, 120, 20);
+        assert!(text.contains("! error"), "missing error block in:\n{text}");
+        assert!(
+            text.contains("error.type: SessionDestroyedError"),
+            "missing error type in:\n{text}"
+        );
+        assert!(text.contains("status_code: 2"), "missing status code in:\n{text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn pressing_s_opens_session_popover() {
         let mut app = one_spans_column_app();
         seed_sessions(
@@ -2843,6 +2892,8 @@ mod tests {
             name: id.into(),
             kind_class: KindClass::Chat,
             ingestion_state: "complete".into(),
+            error_type: None,
+            status_code: None,
             start_unix_ns: Some(start),
             end_unix_ns: Some(start + 10),
             projection: SpanProjection::default(),
@@ -2990,6 +3041,8 @@ mod tests {
                 name: "chat".into(),
                 kind_class: kc,
                 ingestion_state: "real".into(),
+                error_type: None,
+                status_code: None,
                 start_unix_ns: Some(end - 1),
                 end_unix_ns: Some(end),
                 projection: SpanProjection::default(),
@@ -3351,6 +3404,8 @@ mod tests {
                 name: "x".into(),
                 kind_class: kc,
                 ingestion_state: "real".into(),
+                error_type: None,
+                status_code: None,
                 start_unix_ns: Some(end - 1),
                 end_unix_ns: Some(end),
                 projection: SpanProjection::default(),
