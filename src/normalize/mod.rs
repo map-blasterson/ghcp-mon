@@ -117,8 +117,10 @@ async fn normalize_span(ctx: &NormalizeCtx<'_>, s: &SpanEnvelope) -> anyhow::Res
     if kind_class == SpanKindClass::Chat {
         let input = attr_i64(&s.attributes, "gen_ai.usage.input_tokens");
         let output = attr_i64(&s.attributes, "gen_ai.usage.output_tokens");
-        let cache = attr_i64(&s.attributes, "gen_ai.usage.cache_read.input_tokens");
-        let reasoning = attr_i64(&s.attributes, "gen_ai.usage.reasoning.output_tokens");
+        let cache = attr_i64(&s.attributes, "gen_ai.usage.cache_read_input_tokens")
+            .or_else(|| attr_i64(&s.attributes, "gen_ai.usage.cache_read.input_tokens"));
+        let reasoning = attr_i64(&s.attributes, "gen_ai.usage.reasoning_output_tokens")
+            .or_else(|| attr_i64(&s.attributes, "gen_ai.usage.reasoning.output_tokens"));
         let token_limit = attr_i64(&s.attributes, "gen_ai.opencode.context.token_limit");
         let current_tokens = attr_i64(&s.attributes, "gen_ai.opencode.context.current_tokens");
         if input.is_some() || output.is_some() || cache.is_some() || reasoning.is_some()
@@ -218,8 +220,10 @@ async fn upsert_chat_turn(
         .or_else(|| attr_str(&s.attributes, "gen_ai.response.model").map(String::from));
     let input = attr_i64(&s.attributes, "gen_ai.usage.input_tokens");
     let output = attr_i64(&s.attributes, "gen_ai.usage.output_tokens");
-    let cache = attr_i64(&s.attributes, "gen_ai.usage.cache_read.input_tokens");
-    let reasoning = attr_i64(&s.attributes, "gen_ai.usage.reasoning.output_tokens");
+    let cache = attr_i64(&s.attributes, "gen_ai.usage.cache_read_input_tokens")
+        .or_else(|| attr_i64(&s.attributes, "gen_ai.usage.cache_read.input_tokens"));
+    let reasoning = attr_i64(&s.attributes, "gen_ai.usage.reasoning_output_tokens")
+        .or_else(|| attr_i64(&s.attributes, "gen_ai.usage.reasoning.output_tokens"));
     sqlx::query(
         "INSERT INTO chat_turns(span_pk, conversation_id, interaction_id, turn_id, model, \
             input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, \
