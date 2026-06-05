@@ -15,6 +15,7 @@ The system treats spans as the canonical truth and idempotently reconciles them 
 - [[Invoke agent span upserts agent run]]
 - [[Chat span upserts chat turn]]
 - [[Execute tool span upserts tool call]]
+- [[Span captures GenAI error type]]
 - [[External tool span upserts external tool call]]
 - [[External tool paired to internal tool call by call id]]
 - [[Projection pointers resolved via ancestor walk]]

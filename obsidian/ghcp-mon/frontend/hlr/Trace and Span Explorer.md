@@ -24,6 +24,8 @@ Span-row LLRs that branch on tool-call data are specified over a normalized tool
 - [[Span inspector fetches and renders detail]]
 - [[Span detail view renders projection sub-blocks]]
 - [[Span detail view shows parent and children]]
+- [[Span detail view renders error block]]
+- [[Span tree row shows error indicator]]
 - [[Placeholder ingestion state shown with rolling dots]]
 - [[Kind badge label renames raw kinds]]
 - [[Hash color stable hue via FNV-1a]]
