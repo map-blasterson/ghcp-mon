@@ -49,7 +49,9 @@ export interface SpanRow {
   kind_class: KindClass;
   start_unix_ns: Nullable<UnixNs>;
   end_unix_ns: Nullable<UnixNs>;
+  status_code?: Nullable<number>;
   ingestion_state: string; // "real" | "placeholder"
+  error_type: Nullable<string>;
 }
 export interface ListSpansResponse { spans: SpanRow[]; }
 
@@ -127,8 +129,10 @@ export interface SpanFull {
   start_unix_ns: Nullable<UnixNs>;
   end_unix_ns: Nullable<UnixNs>;
   duration_ns: Nullable<number>;
+  status_code?: Nullable<number>;
   status_message: Nullable<string>;
   ingestion_state: string;
+  error_type: Nullable<string>;
   scope_name: Nullable<string>;
   scope_version: Nullable<string>;
   attributes: Record<string, unknown> | null;
@@ -153,6 +157,8 @@ export interface SpanNode {
   name: string;
   kind_class: KindClass;
   ingestion_state: string;
+  error_type: Nullable<string>;
+  status_code?: Nullable<number>;
   start_unix_ns: Nullable<UnixNs>;
   end_unix_ns: Nullable<UnixNs>;
   projection: SpanProjection;

@@ -5,3 +5,7 @@
 *.db
 *.db-wal
 *.db-shm
+*.swp
+*.swo
+.*.swp
+.*.swo

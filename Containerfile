@@ -20,7 +20,7 @@
 #   podman run --rm -it ghcp-mon:windows cargo xwin test --release \
 #       --target x86_64-pc-windows-msvc
 
-ARG RUST_VERSION=1.86
+ARG RUST_VERSION=1.88
 ARG NODE_VERSION=22
 
 # ---- web ---------------------------------------------------------------------

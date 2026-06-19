@@ -3,7 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
-  - github-specific
+  - vendor/copilot
 ---
 For each span event named `github.copilot.skill.invoked`, the normalizer MUST insert a `skill_invocations` row carrying `span_pk`, `skill_name`, `skill_path`, `invoked_unix_ns`, and `conversation_id`, doing nothing on conflict against the unique key `(span_pk, invoked_unix_ns, skill_name)`.
 

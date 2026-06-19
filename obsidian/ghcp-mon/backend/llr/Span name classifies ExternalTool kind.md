@@ -3,7 +3,7 @@ type: LLR
 tags:
   - req/llr
   - domain/normalize
-  - github-specific
+  - vendor/copilot
 ---
 `SpanKindClass::from_name(name)` MUST additionally classify a span name as `ExternalTool` if it starts with `"external_tool"`, before falling through to `Other`.
 

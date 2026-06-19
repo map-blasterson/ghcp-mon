@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use ghcp_mon::{db, export, server::{self, AppState}, ws::Broadcaster};
+use ghcp_mon::{db, export, server::{self, AppState}, ws::Broadcaster, tui};
 
 #[derive(Parser, Debug)]
 #[command(name = "ghcp-mon", version, about = "Local-first GitHub Copilot CLI telemetry collector + dashboard backend")]
@@ -56,20 +56,66 @@ enum Cmd {
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
     },
+    /// Attach a terminal UI to a running `ghcp-mon serve`.
+    Attach {
+        /// Server base URL. Trailing `/` is stripped. Only http/https accepted.
+        #[arg(long, default_value = "http://127.0.0.1:4319")]
+        server: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=warn,hyper=warn")))
-        // Diagnostics MUST go to stderr so `ghcp-mon export ... | ghcp-mon
-        // replay /dev/stdin` (and any other stdout-consuming pipe) sees a
-        // clean JSON-lines stream.
-        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
-        .init();
-
     let cli = Cli::parse();
     let session_state_dir_override = Arc::new(cli.session_state_dir.clone());
+
+    // Tracing init is split by subcommand: `Attach` needs a rolling-file +
+    // in-process-buffer sink (writing to stderr would corrupt the alternate
+    // screen); every other subcommand keeps the historical stderr fmt layer.
+    let filter = || {
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,tower_http=warn,hyper=warn"))
+    };
+    let log_buffer_opt = if matches!(cli.cmd, Cmd::Attach { .. }) {
+        let log_buffer = tui::LogBuffer::new();
+        let log_path = tui::persist::log_path()
+            .ok_or_else(|| anyhow::anyhow!("no cache dir available for TUI log file"))?;
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let dir = log_path.parent().unwrap().to_path_buf();
+        let name = log_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("tui.log"))
+            .to_string_lossy()
+            .to_string();
+        let appender = tracing_appender::rolling::never(dir, name);
+        let (file_writer, guard) = tracing_appender::non_blocking(appender);
+        // Leak the guard so the writer flushes for the program's lifetime.
+        Box::leak(Box::new(guard));
+        tracing_subscriber::registry()
+            .with(filter())
+            .with(
+                fmt::layer()
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(file_writer),
+            )
+            .with(tui::widgets::log_overlay::LogBufferLayer::new(
+                log_buffer.clone(),
+            ))
+            .init();
+        Some(log_buffer)
+    } else {
+        tracing_subscriber::registry()
+            .with(filter())
+            // Diagnostics MUST go to stderr so `ghcp-mon export ... | ghcp-mon
+            // replay /dev/stdin` (and any other stdout-consuming pipe) sees a
+            // clean JSON-lines stream.
+            .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
+            .init();
+        None
+    };
 
     match cli.cmd {
         Cmd::Serve { otlp_addr, api_addr } => {
@@ -121,6 +167,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let _ = count;
+        }
+        Cmd::Attach { server } => {
+            let log_buffer = log_buffer_opt.expect("log buffer initialized for Attach");
+            tui::run(&server, log_buffer).await?;
         }
     }
     Ok(())

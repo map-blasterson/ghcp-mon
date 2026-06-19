@@ -16,6 +16,7 @@
 //! - API session detail enriched with local workspace metadata
 //! - API session detail returns span count
 //! - API session span tree trace scoped union
+//! - API span responses include captured error type
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
@@ -478,6 +479,49 @@ async fn session_span_tree_unions_by_trace_id_with_seeds() {
     let root = tree.iter().find(|n| n["span_id"] == "seed").expect("seed in tree");
     let kids = root["children"].as_array().unwrap();
     assert!(kids.iter().any(|k| k["span_id"] == "mate"));
+}
+
+// ---------- error_type ----------
+
+#[tokio::test]
+async fn span_responses_include_captured_error_type() {
+    let state = fresh_state().await;
+    let raw = insert_raw(&state.pool, "{}", "span").await;
+    let cid = "err-cid";
+    insert_session(&state.pool, cid, 0).await;
+    let errored = serde_json::to_string(&json!({
+        "gen_ai.conversation.id": cid,
+        "error.type": "SessionDestroyedError"
+    })).unwrap();
+    let ok_attrs = serde_json::to_string(&json!({"gen_ai.conversation.id": cid})).unwrap();
+    // Errored parent + healthy child in the same trace/session.
+    insert_span(&state.pool, raw, "ET", "p", None, "chat", "real", Some(1), Some(2), &errored).await;
+    insert_span(&state.pool, raw, "ET", "c", Some("p"), "execute_tool", "real", Some(3), Some(4), &ok_attrs).await;
+
+    // 1. get_span detail object.
+    let (status, body) = get(api_router(state.clone()), "/api/spans/ET/p").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["span"]["error_type"], json!("SessionDestroyedError"));
+    let (_, body) = get(api_router(state.clone()), "/api/spans/ET/c").await;
+    assert_eq!(body["span"]["error_type"], Value::Null, "non-errored span MUST be null");
+
+    // 2. get_trace tree nodes.
+    let (_, body) = get(api_router(state.clone()), "/api/traces/ET").await;
+    let root = &body["tree"].as_array().unwrap()[0];
+    assert_eq!(root["error_type"], json!("SessionDestroyedError"));
+    assert_eq!(root["children"][0]["error_type"], Value::Null);
+
+    // 3. get_session_span_tree nodes.
+    let (_, body) = get(api_router(state.clone()), &format!("/api/sessions/{}/span-tree", cid)).await;
+    let node = body["tree"].as_array().unwrap().iter()
+        .find(|n| n["span_id"] == "p").expect("errored span in tree");
+    assert_eq!(node["error_type"], json!("SessionDestroyedError"));
+
+    // 4. list_spans rows.
+    let (_, body) = get(api_router(state), "/api/spans").await;
+    let row = body["spans"].as_array().unwrap().iter()
+        .find(|r| r["span_id"] == "p").expect("errored span in list");
+    assert_eq!(row["error_type"], json!("SessionDestroyedError"));
 }
 
 // ---------- list_raw ----------

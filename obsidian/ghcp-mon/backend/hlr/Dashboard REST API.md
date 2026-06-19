@@ -21,6 +21,7 @@ The system exposes a JSON REST API over an HTTP listener so the dashboard fronte
 - [[API get trace returns span tree]]
 - [[API list spans filterable by session and kind]]
 - [[API get span returns events parent children projection]]
+- [[API span responses include captured error type]]
 - [[API list session contexts ordered by capture]]
 - [[API list raw filterable by record type]]
 - [[API list query limit clamped]]

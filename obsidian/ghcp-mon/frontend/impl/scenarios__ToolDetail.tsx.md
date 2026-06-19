@@ -14,6 +14,7 @@ Original source file for reverse-engineered requirements.
 - [[External tool detail body header fields]]
 - [[External tool detail uses generic args renderer]]
 - [[Edit tool renders old new with syntax highlight]]
+- [[Edit tool result renders unified diff from metadata]]
 - [[View tool splits line numbers into gutter]]
 - [[Task tool renders prompt as markdown]]
 - [[Read agent tool renders result as markdown]]

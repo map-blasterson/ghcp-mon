@@ -320,6 +320,30 @@ async fn chat_span_upserts_chat_turn_with_token_counters() {
 }
 
 #[tokio::test]
+async fn chat_span_reads_renamed_underscored_usage_keys() {
+    let pool = fresh_pool().await;
+    let bus = Broadcaster::new(64);
+    let rid = raw_id(&pool).await;
+    let ctx = NormalizeCtx { pool: &pool, bus: &bus, raw_record_id: rid };
+    let attrs = json!({
+        "gen_ai.conversation.id": "cc",
+        "github.copilot.interaction_id": "iid",
+        "github.copilot.turn_id": "0",
+        "gen_ai.request.model": "gpt-5",
+        "gen_ai.usage.input_tokens": 10,
+        "gen_ai.usage.output_tokens": 20,
+        "gen_ai.usage.cache_read_input_tokens": 5,
+        "gen_ai.usage.reasoning_output_tokens": 7,
+    });
+    handle(&ctx, &Envelope::Span(Box::new(span("tc","sc",None,"chat",attrs)))).await;
+    let (cache, reason): (Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT cache_read_tokens, reasoning_tokens FROM chat_turns")
+            .fetch_one(&pool).await.unwrap();
+    assert_eq!(cache, Some(5));
+    assert_eq!(reason, Some(7));
+}
+
+#[tokio::test]
 async fn chat_span_prefers_request_model_over_response_model() {
     let pool = fresh_pool().await;
     let bus = Broadcaster::new(64);

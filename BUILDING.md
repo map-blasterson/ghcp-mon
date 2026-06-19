@@ -19,7 +19,7 @@ podman build --target dist -o type=local,dest=./dist -f Containerfile .
 
 ```
 web      node:22-alpine                     -> /web/dist           (Vite SPA bundle)
-linux    rust:1.86-bookworm                 -> ghcp-mon            (x86_64-unknown-linux-gnu)
+linux    rust:1.88-bookworm                 -> ghcp-mon            (x86_64-unknown-linux-gnu)
 windows  messense/cargo-xwin                -> ghcp-mon.exe        (x86_64-pc-windows-msvc)
 darwin   ghcr.io/rust-cross/cargo-zigbuild  -> ghcp-mon-darwin     (universal2-apple-darwin)
 dist     scratch                            -> /ghcp-mon{,.exe,-darwin}

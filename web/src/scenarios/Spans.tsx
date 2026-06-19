@@ -9,6 +9,7 @@ import { useLiveFeed } from "../state/live";
 import { useHoverState } from "../state/hover";
 import { fmtNs, fmtClock, parseToolCallArguments } from "../components/content";
 import { kindLabel, kindClass as kindCls, HashTag, RollingDots } from "../components/KindBadge";
+import { SpanErrorIndicator } from "../components/SpanError";
 import type {
   KindClass,
   SpanNode,
@@ -70,6 +71,94 @@ function findNextChatSiblingId(tree: SpanNode[], span_id: string): string | unde
     }
   }
   return undefined;
+}
+
+// Locate the chat span that consumes a given tool span's response.
+//
+// OTel GenAI semconv permits two valid hierarchy shapes for tool spans
+// and the two producers we observe instrument them differently. Each
+// shape implies a different "response-consuming chat":
+//
+//   * Sibling shape (Copilot CLI, agent-loop-level instrumentation):
+//     the tool span is a sibling of chat spans under a shared parent.
+//     The tool is dispatched mid-stream from a still-running chat span;
+//     its response is appended to that same chat span's input.messages
+//     before the chat span ends. Find the chat sibling whose
+//     [start, end] temporally ENCLOSES the tool's [start, end].
+//
+//   * Nested shape (opencode, SDK-level instrumentation): the tool span
+//     is a descendant of a chat span ("parent chat"). The tool runs
+//     during the parent chat's lifetime but its response is NOT in the
+//     parent chat's input — it surfaces in the input of the NEXT chat
+//     span chronologically (the one that fires after the parent chat
+//     completes and the loop iterates). Find the chat span anywhere in
+//     the tree whose sortKey is the smallest value strictly greater
+//     than the parent chat's sortKey.
+//
+// Shape-driven, not vendor-gated: dispatched on whether the tool has a
+// chat ancestor. Falls back to next chat sibling if neither rule fires
+// (e.g. malformed tree). Service_name is not consulted.
+function findFollowingChatSpanId(tree: SpanNode[], span_id: string): string | undefined {
+  // Walk the tree, capturing the picked node and its ancestor chain.
+  let picked: SpanNode | null = null;
+  let pickedAncestors: SpanNode[] = [];
+  const find = (nodes: SpanNode[], ancestors: SpanNode[]): boolean => {
+    for (const n of nodes) {
+      if (n.span_id === span_id) {
+        picked = n;
+        pickedAncestors = ancestors;
+        return true;
+      }
+      if (find(n.children ?? [], [...ancestors, n])) return true;
+    }
+    return false;
+  };
+  find(tree, []);
+  if (!picked) return undefined;
+  const pickedNode: SpanNode = picked;
+
+  // Nested shape: nearest chat ancestor exists → next chat globally.
+  for (let i = pickedAncestors.length - 1; i >= 0; i--) {
+    if (pickedAncestors[i].kind_class === "chat") {
+      const threshold = sortKey(pickedAncestors[i]);
+      const thresholdPk = pickedAncestors[i].span_pk ?? 0;
+      let best: SpanNode | null = null;
+      let bestKey = Number.POSITIVE_INFINITY;
+      const walk = (nodes: SpanNode[]) => {
+        for (const n of nodes) {
+          if (n.kind_class === "chat") {
+            const k = sortKey(n);
+            const isAfter =
+              k > threshold ||
+              (k === threshold && (n.span_pk ?? 0) > thresholdPk);
+            if (isAfter && k < bestKey) {
+              best = n;
+              bestKey = k;
+            }
+          }
+          walk(n.children ?? []);
+        }
+      };
+      walk(tree);
+      return (best as SpanNode | null)?.span_id;
+    }
+  }
+
+  // Sibling shape: chat sibling whose lifetime encloses the tool.
+  const siblingsHit = findSiblings(tree, span_id);
+  if (siblingsHit) {
+    const tStart = pickedNode.start_unix_ns ?? 0;
+    const tEnd = pickedNode.end_unix_ns ?? tStart;
+    for (const sib of siblingsHit.siblings) {
+      if (sib.kind_class !== "chat") continue;
+      const sStart = sib.start_unix_ns ?? 0;
+      const sEnd = sib.end_unix_ns ?? Number.POSITIVE_INFINITY;
+      if (sStart <= tStart && sEnd >= tEnd) return sib.span_id;
+    }
+  }
+
+  // Fallback: next chat sibling chronologically.
+  return findNextChatSiblingId(tree, span_id);
 }
 
 // Find the most recent (by sortKey) chat span that is a descendant of
@@ -459,16 +548,17 @@ export function SpansScenario({ column }: { column: Column }) {
     }
 
     // For execute_tool selections, also auto-advance chat_detail
-    // columns to the chat span that immediately follows the picked
-    // tool span among its siblings (same parent_span_id) when one
-    // exists in the loaded session tree. Tool-kind selections would
-    // otherwise leave chat_detail stuck on a stale chat span.
-    let nextChatSpanId: string | undefined;
+    // columns to the chat span that consumes this tool's response.
+    // Shape-aware: opencode nests tool spans under chat (response
+    // lands in the NEXT chat globally); Copilot has tool spans as
+    // siblings of chat spans (response lands in the chat sibling that
+    // temporally encloses the tool). See findFollowingChatSpanId.
+    let followingChatSpanId: string | undefined;
     let toolCallId: string | undefined;
     if (kind_class === "execute_tool" && displayedTree.length > 0) {
       const hit = findSiblings(displayedTree, span_id);
       toolCallId = hit?.picked.projection.tool_call?.call_id ?? undefined;
-      nextChatSpanId = findNextChatSiblingId(displayedTree, span_id);
+      followingChatSpanId = findFollowingChatSpanId(displayedTree, span_id);
     }
 
     // For invoke_agent selections, advance chat_detail to the most
@@ -502,7 +592,7 @@ export function SpansScenario({ column }: { column: Column }) {
         return;
       }
       if (c.scenarioType === "chat_detail") {
-        const chatTarget = nextChatSpanId ?? agentChatSpanId;
+        const chatTarget = followingChatSpanId ?? agentChatSpanId;
         if (chatTarget) {
           updateColumn(c.id, {
             config: {
@@ -557,6 +647,54 @@ export function SpansScenario({ column }: { column: Column }) {
     // tree updates and selection changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [followMode, latestToolSpan, selected_span_id]);
+
+  // Latest chat span by sortKey across the revealed tree. Mirrors
+  // latestToolSpan; drives follow-mode advancement of ChatDetail columns.
+  const latestChatSpan = useMemo(() => {
+    let best: SpanNode | null = null;
+    let bestKey = -1;
+    const walk = (nodes: SpanNode[]) => {
+      for (const n of nodes) {
+        if (n.kind_class === "chat") {
+          const k = sortKey(n);
+          if (k > bestKey) { bestKey = k; best = n; }
+        }
+        walk(n.children ?? []);
+      }
+    };
+    walk(displayedTree);
+    return best as SpanNode | null;
+  }, [displayedTree]);
+
+  // Follow-mode chat catch-up. ChatDetail cannot be advanced at the moment
+  // follow jumps to a new tool span, because the chat span that consumes the
+  // tool's response usually hasn't arrived yet — and several batched tool
+  // calls may all land in a single chat span, so there's no reliable 1:1
+  // tool→chat target to resolve up front. Instead, while following, advance
+  // ChatDetail to the latest chat span as soon as it lands, pointing its
+  // tool-call arrow at whichever tool ToolDetail is currently showing. The
+  // converge-only guard makes this idempotent and leaves a user's manual chat
+  // pick in place until the next chat span arrives.
+  useEffect(() => {
+    if (!followMode || !latestChatSpan) return;
+    const chatSpan = latestChatSpan;
+    const toolCallId = latestToolSpan?.projection.tool_call?.call_id ?? undefined;
+    columns.forEach((c) => {
+      if (c.scenarioType !== "chat_detail") return;
+      if (
+        c.config.selected_span_id === chatSpan.span_id &&
+        c.config.selected_tool_call_id === toolCallId
+      ) return;
+      updateColumn(c.id, {
+        config: {
+          ...c.config,
+          selected_trace_id: chatSpan.trace_id,
+          selected_span_id: chatSpan.span_id,
+          selected_tool_call_id: toolCallId,
+        },
+      });
+    });
+  }, [followMode, latestChatSpan, latestToolSpan, columns, updateColumn]);
 
   // --- collapse state (lifted from SpanTreeView for header buttons) ---
   const [userCollapsed, setUserCollapsed] = useState<Set<string>>(new Set());
@@ -1072,6 +1210,7 @@ function SpanTreeRow({
       {node.ingestion_state === "placeholder" && (
         <span className="tag warn"><RollingDots /></span>
       )}
+      <SpanErrorIndicator span={node} />
       <ProjectionChips projection={node.projection} />
       {(node.projection?.tool_call?.tool_name === "bash" || node.projection?.tool_call?.tool_name === "powershell") && (
         <BashCommandChip trace_id={node.trace_id} span_id={node.span_id} />
@@ -1082,7 +1221,8 @@ function SpanTreeRow({
       <TargetBadge trace_id={node.trace_id} span_id={node.span_id} />
       {(node.projection?.tool_call?.tool_name === "edit" ||
         node.projection?.tool_call?.tool_name === "create" ||
-        node.projection?.tool_call?.tool_name === "apply_patch") && (
+        node.projection?.tool_call?.tool_name === "apply_patch" ||
+        node.projection?.tool_call?.tool_name === "write") && (
         <DiffStatBadge
           trace_id={node.trace_id}
           span_id={node.span_id}
@@ -1311,13 +1451,13 @@ function TargetBadge({ trace_id, span_id }: { trace_id: string; span_id: string 
   if (!args || typeof args !== "object" || Array.isArray(args)) return null;
   const rec = args as Record<string, unknown>;
 
-  // Try "path" → show basename
-  const pathVal = rec.path;
-  if (typeof pathVal === "string" && pathVal.length > 0) {
+  // Try "path" (Copilot) or "filePath" (opencode) → show basename
+  const pathRaw = rec.path ?? rec.filePath;
+  if (typeof pathRaw === "string" && pathRaw.length > 0) {
     // Windows paths start with a drive letter (e.g. C:\); split on \ only there.
     // On Unix, \ is an escape character in paths (e.g. my\ file.txt), not a separator.
-    const isWindows = /^[a-zA-Z]:[\\\/]/.test(pathVal);
-    const fileName = pathVal.split(isWindows ? /[\\/]/ : "/").pop() ?? pathVal;
+    const isWindows = /^[a-zA-Z]:[\\\/]/.test(pathRaw);
+    const fileName = pathRaw.split(isWindows ? /[\\/]/ : "/").pop() ?? pathRaw;
     if (fileName) {
       return (
         <span
@@ -1401,10 +1541,10 @@ function countPatchLines(patchText: string): { added: number; removed: number } 
 }
 
 // Renders red (-N) and green (+M) line-change badges next to the file
-// name on file-mutating tool spans (`edit`, `create`, `apply_patch`).
-// Reuses the same `["span", trace_id, span_id]` query cache as
-// TargetBadge / BashCommandChip / FileTouches / ToolDetail so it is
-// free of extra requests once any of those siblings has loaded.
+// name on file-mutating tool spans (`edit`, `create`, `write`,
+// `apply_patch`). Reuses the same `["span", trace_id, span_id]` query
+// cache as TargetBadge / BashCommandChip / FileTouches / ToolDetail so
+// it is free of extra requests once any of those siblings has loaded.
 function DiffStatBadge({
   trace_id,
   span_id,
@@ -1445,16 +1585,30 @@ function DiffStatBadge({
     if (!args || typeof args !== "object" || Array.isArray(args)) return null;
     const rec = args as Record<string, unknown>;
     if (tool_name === "edit") {
-      // ToolDetail's EditArgs proves the shape: edit replaces old_str
-      // with new_str within `path`. Each is a verbatim multi-line
-      // snippet, so line counts give the natural diff stat.
-      const oldStr = typeof rec.old_str === "string" ? rec.old_str : "";
-      const newStr = typeof rec.new_str === "string" ? rec.new_str : "";
+      // ToolDetail's EditArgs proves the shape: edit replaces an old
+      // snippet with a new snippet within the target file. Each is a
+      // verbatim multi-line string, so line counts give the natural
+      // diff stat. Copilot uses `old_str`/`new_str`; opencode uses
+      // `oldString`/`newString`.
+      const oldStr =
+        typeof rec.old_str === "string"
+          ? rec.old_str
+          : typeof rec.oldString === "string"
+            ? rec.oldString
+            : "";
+      const newStr =
+        typeof rec.new_str === "string"
+          ? rec.new_str
+          : typeof rec.newString === "string"
+            ? rec.newString
+            : "";
       removed = countLines(oldStr);
       added = countLines(newStr);
-    } else if (tool_name === "create") {
-      // The create tool writes a brand-new file from `file_text` (newer
-      // Copilot variants name it `content`). All lines are additions.
+    } else if (tool_name === "create" || tool_name === "write") {
+      // `create` (Copilot) and `write` (opencode) both write a
+      // brand-new file. Body field name varies: `file_text` (legacy
+      // Copilot), `content` (newer Copilot / opencode). All lines are
+      // additions.
       const text =
         typeof rec.file_text === "string"
           ? rec.file_text

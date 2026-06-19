@@ -8,14 +8,21 @@
   "collapse-color-groups": false,
   "colorGroups": [
     {
-      "query": "tag:#impl/rust  ",
+      "query": "tag:#tui  ",
       "color": {
         "a": 1,
-        "rgb": 14701138
+        "rgb": 16711854
       }
     },
     {
-      "query": "tag:#req/hlr  ",
+      "query": "path:frontend/llr",
+      "color": {
+        "a": 1,
+        "rgb": 7935
+      }
+    },
+    {
+      "query": "path:frontend/hlr",
       "color": {
         "a": 1,
         "rgb": 65297
@@ -46,6 +53,6 @@
   "repelStrength": 10.7341476091476,
   "linkStrength": 0.720893970893971,
   "linkDistance": 224,
-  "scale": 2.138804606146773,
+  "scale": 0.24329122768461542,
   "close": true
 }

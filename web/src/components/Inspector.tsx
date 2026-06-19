@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import { JsonView } from "./JsonView";
 import { fmtClock, fmtNs } from "./content";
 import { KindBadge, RollingDots } from "./KindBadge";
+import { SpanErrorBlock } from "./SpanError";
 import type { SpanDetail } from "../api/types";
 
 export function SpanInspector({
@@ -62,6 +63,7 @@ export function SpanDetailView({ detail }: { detail: SpanDetail }) {
             {span.scope_version ? ` ${span.scope_version}` : ""}
           </span>
         </div>
+        <SpanErrorBlock span={span} />
       </div>
 
       {Object.keys(projection ?? {}).length > 0 && (

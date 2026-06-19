@@ -4,7 +4,10 @@ tags:
   - req/hlr
   - domain/file-touches
 ---
-For a selected session, the dashboard aggregates every `view`, `edit`, and `create` tool call into a collapsible filesystem tree annotated with read/write counts, so the user can see at a glance which files Copilot has touched.
+For a selected session, the dashboard aggregates every file-touching tool call (any tool span whose normalized tool kind is `read`, `write`, `edit`, or `patch`) into a collapsible filesystem tree annotated with read/write counts, so the user can see at a glance which files the agent has touched. Patch-kind path extraction is delegated to the active vendor adapter (today, [[Copilot apply_patch path extraction]]).
+
+## Normalized tool-call vocabulary
+File-touch LLRs are specified over normalized tool kinds (`read`, `write`, `edit`, `patch`) and the normalized *file-path* argument rather than raw OTLP tool names. The active **vendor adapter** is selected per-span by `service_name`; concrete mappings live in each vendor scope (e.g., [[Copilot tool-call shape]], [[opencode tool-call shape]]).
 
 ## Derived LLRs
 - [[File touches aggregates view edit create]]
